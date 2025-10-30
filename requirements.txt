@@ -13,4 +13,5 @@ openpyxl
 pandas
 rank-bm25
 cohere
+markdown
 textract

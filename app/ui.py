@@ -385,11 +385,11 @@ _HTML_SHELL = """
 def ensure_markdown_deps() -> None:
     try:  # pragma: no cover - dependency management
         import markdown  # noqa: F401
-    except Exception:  # pragma: no cover - dependency management
-        import subprocess
-        import sys
-
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "markdown"], stdout=subprocess.DEVNULL)
+    except Exception as exc:  # pragma: no cover - dependency management
+        raise RuntimeError(
+            "The 'markdown' package is required but not installed. "
+            "Add `markdown` to requirements.txt for deployment environments."
+        ) from exc
 
 
 def compose_result_markdown(result: Dict) -> str:
