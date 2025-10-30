@@ -121,25 +121,31 @@ _CUSTOM_THEME = """
         background: rgba(255, 255, 255, 0.24);
         border-radius: 4px;
     }
-    .chat-thread-wrapper {
-        height: calc(100vh - 15rem);
-        max-height: calc(100vh - 15rem);
-        overflow-y: auto;
-        padding-right: 0.35rem;
+    .chat-thread-anchor {
+        display: none;
     }
-    .chat-thread-wrapper::-webkit-scrollbar {
-        width: 6px;
+    .stApp main .block-container {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
     }
-    .chat-thread-wrapper::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.24);
-        border-radius: 4px;
-    }
-    .chat-thread {
+    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor) {
         display: flex;
         flex-direction: column;
         gap: 1.6rem;
         margin-top: 1.5rem;
         padding-bottom: 4rem;
+        height: calc(100vh - 15rem);
+        max-height: calc(100vh - 15rem);
+        overflow-y: auto;
+        padding-right: 0.35rem;
+    }
+    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar {
+        width: 6px;
+    }
+    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.24);
+        border-radius: 4px;
     }
     .chat-message {
         display: flex;
@@ -956,10 +962,7 @@ def render_app(
             placeholder = chat_placeholder.empty()
             with placeholder.container():
                 if app_state.query_history:
-                    st.markdown(
-                        "<div class='chat-thread-wrapper'><div class='chat-thread'>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown("<div class='chat-thread-anchor'></div>", unsafe_allow_html=True)
                     for idx, result in enumerate(app_state.query_history):
                         query_text = html.escape(result.get("query", "").strip() or "Untitled query")
                         st.markdown(
@@ -972,7 +975,6 @@ def render_app(
                             unsafe_allow_html=True,
                         )
                         render_chat_feedback_row(app_state, result, key_prefix=str(idx))
-                    st.markdown("</div></div>", unsafe_allow_html=True)
                 else:
                     st.info("Ask a question to get started.")
 
