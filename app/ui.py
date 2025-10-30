@@ -161,8 +161,86 @@ _CUSTOM_THEME = """
         background: transparent;
         padding: 0;
     }
-    .chat-message.assistant .bubble .result-markdown .sources-list {
+    .chat-message.assistant .bubble .response-meta {
         font-size: 0.78rem;
+        color: rgba(233, 242, 249, 0.72);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    .chat-message.assistant .bubble .response-meta .meta-divider {
+        color: rgba(233, 242, 249, 0.38);
+    }
+    .chat-message.assistant .bubble .result-markdown details {
+        margin-top: 1rem;
+    }
+    .chat-message.assistant .bubble .result-markdown details summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-weight: 600;
+        color: rgba(233, 242, 249, 0.9);
+    }
+    .chat-message.assistant .bubble .result-markdown details summary::-webkit-details-marker {
+        display: none;
+    }
+    .chat-message.assistant .bubble details.sources-expander {
+        background: rgba(4, 18, 32, 0.78);
+        border: 1px solid rgba(116, 197, 255, 0.22);
+        border-radius: 18px;
+        padding: 0.85rem 1rem;
+        transition: background 0.25s ease, border-color 0.25s ease;
+    }
+    .chat-message.assistant .bubble details.sources-expander[open] {
+        background: rgba(4, 18, 32, 0.92);
+        border-color: rgba(116, 197, 255, 0.4);
+    }
+    .chat-message.assistant .bubble details.sources-expander summary {
+        color: rgba(233, 242, 249, 0.96);
+    }
+    .chat-message.assistant .bubble details.sources-expander summary::after {
+        content: "⌄";
+        font-size: 0.9rem;
+        color: rgba(233, 242, 249, 0.55);
+        margin-left: auto;
+        transition: transform 0.2s ease;
+    }
+    .chat-message.assistant .bubble details.sources-expander[open] summary::after {
+        transform: rotate(180deg);
+    }
+    .chat-message.assistant .bubble details.sources-expander .sources-list {
+        margin: 0.8rem 0 0;
+        padding-left: 1.2rem;
+        font-size: 0.78rem;
+        color: rgba(217, 236, 255, 0.92);
+    }
+    .chat-message.assistant .bubble details.sources-expander .sources-list li {
+        margin-bottom: 0.5rem;
+    }
+    .chat-message.assistant .bubble details.sources-expander .empty-sources {
+        margin: 0.6rem 0 0;
+        color: rgba(217, 236, 255, 0.7);
+        font-size: 0.78rem;
+    }
+    .chat-message.assistant .bubble details.result-expander {
+        background: rgba(4, 18, 32, 0.62);
+        border: 1px solid rgba(116, 197, 255, 0.2);
+        border-radius: 18px;
+        padding: 0.8rem 1rem;
+    }
+    .chat-message.assistant .bubble details.result-expander summary::after {
+        content: "⌄";
+        font-size: 0.85rem;
+        color: rgba(233, 242, 249, 0.5);
+        margin-left: auto;
+        transition: transform 0.2s ease;
+    }
+    .chat-message.assistant .bubble details.result-expander[open] summary::after {
+        transform: rotate(180deg);
     }
     .chat-feedback-marker {
         display: none;
@@ -322,15 +400,82 @@ _CUSTOM_THEME = """
         font-weight: 600;
         color: #8dd2ff;
     }
-    .result-markdown .sources-list {
+    .result-markdown .response-meta {
+        font-size: 0.9rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: rgba(210, 232, 255, 0.8);
+    }
+    .result-markdown .response-meta .meta-divider {
+        color: rgba(210, 232, 255, 0.45);
+    }
+    .result-markdown details {
+        margin-top: 1.1rem;
+    }
+    .result-markdown details summary {
+        list-style: none;
+        cursor: pointer;
+        font-weight: 600;
+        color: #d4ecff;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
+    .result-markdown details summary::-webkit-details-marker {
+        display: none;
+    }
+    .result-markdown details.sources-expander {
+        background: rgba(6, 20, 32, 0.78);
+        border: 1px solid rgba(148, 226, 255, 0.24);
+        border-radius: 16px;
+        padding: 0.9rem 1.05rem;
+    }
+    .result-markdown details.sources-expander[open] {
+        background: rgba(6, 20, 32, 0.92);
+        border-color: rgba(148, 226, 255, 0.38);
+    }
+    .result-markdown details.sources-expander summary::after {
+        content: "⌄";
+        font-size: 0.9rem;
+        color: rgba(210, 232, 255, 0.6);
+        margin-left: auto;
+        transition: transform 0.2s ease;
+    }
+    .result-markdown details.sources-expander[open] summary::after {
+        transform: rotate(180deg);
+    }
+    .result-markdown details.sources-expander .sources-list {
+        margin: 0.75rem 0 0;
+        padding-left: 1.2rem;
         font-size: 0.95rem;
         line-height: 1.4rem;
         color: #ddeeff;
-        margin: 0;
-        padding-left: 1.2rem;
     }
-    .result-markdown .sources-list li {
-        margin-bottom: 0.35rem;
+    .result-markdown details.sources-expander .sources-list li {
+        margin-bottom: 0.45rem;
+    }
+    .result-markdown details.sources-expander .empty-sources {
+        margin: 0.6rem 0 0;
+        color: rgba(210, 232, 255, 0.7);
+    }
+    .result-markdown details.result-expander {
+        background: rgba(6, 20, 32, 0.62);
+        border: 1px solid rgba(148, 226, 255, 0.22);
+        border-radius: 16px;
+        padding: 0.85rem 1.05rem;
+    }
+    .result-markdown details.result-expander summary::after {
+        content: "⌄";
+        font-size: 0.85rem;
+        color: rgba(210, 232, 255, 0.55);
+        margin-left: auto;
+        transition: transform 0.2s ease;
+    }
+    .result-markdown details.result-expander[open] summary::after {
+        transform: rotate(180deg);
     }
     .result-markdown .answer-body {
         font-size: 0.95rem;
@@ -466,6 +611,7 @@ _HTML_SHELL = """
 """
 
 
+
 def compose_result_markdown(result: Dict) -> str:
     """Compose a styled HTML fragment for a chat response."""
     original_query = (result.get("query") or "No original query").strip() or "Untitled query"
@@ -482,17 +628,8 @@ def compose_result_markdown(result: Dict) -> str:
 
     parts: List[str] = ["<div class='result-markdown'>"]
 
-    parts.append("<section class='result-summary'>")
-    parts.append("<h3>Query overview</h3>")
-    parts.append("<dl class='summary-grid'>")
-
-    def render_summary_row(label: str, value_html: str) -> None:
-        parts.append(
-            "<div class='summary-row'>"
-            f"<dt>{html.escape(label)}:</dt>"
-            f"<dd>{value_html}</dd>"
-            "</div>"
-        )
+    answer_html = md(answer, extensions=_DEF_EXTS) if answer else "<p>No answer available.</p>"
+    parts.append(f"<div class='answer-body'>{answer_html}</div>")
 
     conf_pct_str = "N/A" if conf_pct is None else str(conf_pct)
     if isinstance(conf_pct, (int, float)) and not conf_pct_str.endswith('%'):
@@ -500,63 +637,40 @@ def compose_result_markdown(result: Dict) -> str:
     if conf_pct_str != "N/A" and not conf_pct_str.endswith('%'):
         conf_pct_str = f"{conf_pct_str}%"
 
-    render_summary_row("Query", html.escape(original_query))
-    render_summary_row("Confidence", f"{html.escape(conf_pct_str)} ({html.escape(conf_level)})")
-    sources_str = "N/A" if num_sources is None else str(num_sources)
-    render_summary_row("Sources analysed", html.escape(sources_str))
+    source_count = len(sources)
+    if num_sources is not None:
+        try:
+            parsed_num_sources = int(num_sources)
+            source_count = max(source_count, parsed_num_sources)
+        except (TypeError, ValueError):
+            pass
 
-    if final_query and final_query.lower() != original_query.lower():
-        render_summary_row("Final query used", html.escape(final_query))
+    if conf_pct_str == "N/A":
+        conf_text = "Confidence: Not available"
+    else:
+        conf_text = f"Confidence: {conf_pct_str}"
+        if conf_level and conf_level.upper() != "N/A":
+            conf_text += f" ({conf_level})"
 
-    if refinement_history:
-        total_attempts = attempts or len(refinement_history)
-        suffix = f"; best attempt {best_attempt}" if best_attempt else ""
-        render_summary_row("Attempts", f"{html.escape(str(total_attempts))}{html.escape(suffix)}")
+    meta_parts = [html.escape(conf_text), html.escape(f"Sources: {source_count}")]
+    meta_html = " <span class='meta-divider'>&middot;</span> ".join(
+        f"<span>{part}</span>" for part in meta_parts if part
+    )
+    parts.append(f"<div class='response-meta'>{meta_html}</div>")
 
-    parts.append("</dl>")
-    parts.append("</section>")
+    parts.append("<details class='sources-expander'>")
+    parts.append(f"<summary>Sources ({source_count})</summary>")
 
-    if refinement_history:
-        parts.append("<section class='result-refinement'>")
-        parts.append("<h4>Refinement history</h4>")
-        parts.append("<ol class='refinement-list'>")
-        for entry in refinement_history:
-            attempt_no = entry.get("attempt")
-            entry_query = (entry.get("query") or "").strip() or "n/a"
-            confidence = entry.get("confidence")
-            label = "Initial query" if attempt_no in (None, 1) else f"Attempt {attempt_no}"
-            confidence_bits = ""
-            if confidence is not None:
-                try:
-                    confidence_bits = f" &middot; {int(confidence)}%"
-                except (TypeError, ValueError):
-                    confidence_bits = f" &middot; {html.escape(str(confidence))}%"
-            parts.append(
-                "<li>"
-                f"<span class='ref-label'>{label}</span>: "
-                f"{html.escape(entry_query)}{confidence_bits}"
-                "</li>"
-            )
-        parts.append("</ol>")
-        parts.append("</section>")
+    type_labels = {
+        "PROC": "PROCEDURE",
+        "FORM": "FORM",
+        "REG": "REGULATION",
+        "POLICY": "POLICY",
+        "REPORT": "REPORT",
+        "CHECKLIST": "CHECKLIST",
+    }
 
-    parts.append("<section class='result-answer'>")
-    parts.append("<h4>Answer</h4>")
-    answer_html = md(answer, extensions=_DEF_EXTS) if answer else "<p>No answer available.</p>"
-    parts.append(f"<div class='answer-body'>{answer_html}</div>")
-    parts.append("</section>")
-
-    parts.append("<section class='result-sources'>")
-    parts.append("<h4>Sources</h4>")
     if sources:
-        type_labels = {
-            "PROC": "PROCEDURE",
-            "FORM": "FORM",
-            "REG": "REGULATION",
-            "POLICY": "POLICY",
-            "REPORT": "REPORT",
-            "CHECKLIST": "CHECKLIST",
-        }
         parts.append("<ol class='sources-list'>")
         for idx, src in enumerate(sources[:5], 1):
             source_file = src.get("source", "Unknown")
@@ -595,15 +709,90 @@ def compose_result_markdown(result: Dict) -> str:
                 location_html += '&hellip;'
 
             parts.append(
-                "<li>"
-                f"<strong>{idx}. {html.escape(display_title)}</strong><br>"
-                f"<span class='source-location'>Location: {location_html}</span>"
+                "<li>",
+                f"<strong>{idx}. {html.escape(display_title)}</strong><br>",
+                f"<span class='source-location'>Location: {location_html}</span>",
                 "</li>"
             )
         parts.append("</ol>")
     else:
         parts.append("<p class='empty-sources'><em>No sources available.</em></p>")
-    parts.append("</section>")
+
+    parts.append("</details>")
+
+    summary_rows: List[str] = []
+    summary_rows.append(
+        "<div class='summary-row'>"
+        f"<dt>Query:</dt><dd>{html.escape(original_query)}</dd>"
+        "</div>"
+    )
+
+    if conf_pct_str == "N/A":
+        conf_summary = "Not available"
+    else:
+        conf_summary = conf_pct_str
+        if conf_level and conf_level.upper() != "N/A":
+            conf_summary += f" ({conf_level})"
+    summary_rows.append(
+        "<div class='summary-row'>"
+        f"<dt>Confidence:</dt><dd>{html.escape(conf_summary)}</dd>"
+        "</div>"
+    )
+
+    if num_sources is not None:
+        summary_rows.append(
+            "<div class='summary-row'>"
+            f"<dt>Sources analysed:</dt><dd>{html.escape(str(num_sources))}</dd>"
+            "</div>"
+        )
+
+    if final_query and final_query.lower() != original_query.lower():
+        summary_rows.append(
+            "<div class='summary-row'>"
+            f"<dt>Final query used:</dt><dd>{html.escape(final_query)}</dd>"
+            "</div>"
+        )
+
+    if refinement_history:
+        total_attempts = attempts or len(refinement_history)
+        suffix = f"; best attempt {best_attempt}" if best_attempt else ""
+        summary_rows.append(
+            "<div class='summary-row'>"
+            f"<dt>Attempts:</dt><dd>{html.escape(str(total_attempts))}{html.escape(suffix)}</dd>"
+            "</div>"
+        )
+
+    if summary_rows:
+        parts.append("<details class='result-expander'>")
+        parts.append("<summary>Query details</summary>")
+        parts.append("<dl class='summary-grid'>")
+        parts.extend(summary_rows)
+        parts.append("</dl>")
+        parts.append("</details>")
+
+    if refinement_history:
+        parts.append("<details class='result-expander'>")
+        parts.append("<summary>Refinement history</summary>")
+        parts.append("<ol class='refinement-list'>")
+        for entry in refinement_history:
+            attempt_no = entry.get("attempt")
+            entry_query = (entry.get("query") or "").strip() or "n/a"
+            confidence = entry.get("confidence")
+            label = "Initial query" if attempt_no in (None, 1) else f"Attempt {attempt_no}"
+            confidence_bits = ""
+            if confidence is not None:
+                try:
+                    confidence_bits = f" &middot; {int(confidence)}%"
+                except (TypeError, ValueError):
+                    confidence_bits = f" &middot; {html.escape(str(confidence))}%"
+            parts.append(
+                "<li>",
+                f"<span class='ref-label'>{label}</span>: ",
+                f"{html.escape(entry_query)}{confidence_bits}",
+                "</li>"
+            )
+        parts.append("</ol>")
+        parts.append("</details>")
 
     if confidence_note:
         parts.append(f"<p class='confidence-note'>Note: {html.escape(confidence_note)}</p>")
