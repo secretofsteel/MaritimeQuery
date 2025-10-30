@@ -168,26 +168,41 @@ _CUSTOM_THEME = """
         display: none;
     }
     .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) {
-        gap: 0.6rem;
-        margin-top: 0.75rem;
-        justify-content: flex-start;
+        gap: 0.35rem;
+        margin-top: 0.35rem;
+        justify-content: flex-end;
+        align-items: center;
+        align-self: flex-end;
+        margin-left: auto;
+        margin-right: 0;
+        flex-wrap: nowrap;
     }
     .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) > div[data-testid="column"] {
         padding-left: 0 !important;
         padding-right: 0 !important;
+        flex: 0 0 auto !important;
     }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button {
-        width: 100%;
+    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button,
+    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) .stDownloadButton button {
+        width: 2.4rem;
+        height: 2.4rem;
         border-radius: 999px;
-        border: 1px solid rgba(19, 196, 255, 0.35);
-        background: rgba(19, 196, 255, 0.16);
-        color: #e9f2f9;
-        font-size: 0.82rem;
-        padding: 0.45rem 0.6rem;
+        border: 1px solid rgba(233, 242, 249, 0.18);
+        background: transparent;
+        color: rgba(233, 242, 249, 0.85);
+        font-size: 1.15rem;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
     }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button:hover {
-        background: rgba(19, 196, 255, 0.35);
-        box-shadow: 0 0 14px rgba(19, 196, 255, 0.25);
+    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button:hover,
+    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) .stDownloadButton button:hover {
+        background: rgba(19, 196, 255, 0.18);
+        border-color: rgba(19, 196, 255, 0.45);
+        color: #f6fbff;
+        box-shadow: none;
     }
     .chat-feedback-correction {
         margin-top: 0.75rem;
@@ -727,29 +742,42 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
 def render_chat_feedback_row(app_state: AppState, result: Dict, key_prefix: str) -> None:
     """Render inline export + feedback controls for a chat response."""
     st.markdown("<div class='chat-feedback-marker'></div>", unsafe_allow_html=True)
-    controls = st.columns([1, 1, 1, 1], gap="small")
+    controls = st.columns(4, gap="small")
 
     export_html = build_result_export_html(result)
     file_name = f"query_result_{key_prefix}.html"
     controls[0].download_button(
-        "\u2193 Download",
+        "⬇️",
         data=export_html,
         file_name=file_name,
         mime="text/html",
         key=f"export_{key_prefix}",
+        help="Download this response as an HTML file.",
     )
 
-    if controls[1].button("Helpful", key=f"helpful_{key_prefix}"):
+    if controls[1].button(
+        "👍",
+        key=f"helpful_{key_prefix}",
+        help="Mark this response as helpful.",
+    ):
         app_state.feedback_system.log_feedback(result, "helpful")
         st.success("Thanks! Feedback recorded.")
 
-    if controls[2].button("Needs work", key=f"not_helpful_{key_prefix}"):
+    if controls[2].button(
+        "👎",
+        key=f"not_helpful_{key_prefix}",
+        help="Mark this response as not helpful.",
+    ):
         app_state.feedback_system.log_feedback(result, "not_helpful")
         st.info("Thanks! Feedback recorded.")
 
     incorrect_key = f"incorrect_{key_prefix}"
     correction_toggle_key = f"correction_toggle_{key_prefix}"
-    if controls[3].button("Flag issue", key=incorrect_key):
+    if controls[3].button(
+        "⚠️",
+        key=incorrect_key,
+        help="Report an issue and provide a correction.",
+    ):
         st.session_state[correction_toggle_key] = not st.session_state.get(correction_toggle_key, False)
 
     if st.session_state.get(correction_toggle_key, False):
