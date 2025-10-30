@@ -1,4 +1,4 @@
-﻿"""Streamlit UI helpers and rendering functions."""
+"""Streamlit UI helpers and rendering functions."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Dict, List
 import html
+from markdown import markdown as md
 
 import streamlit as st
 
@@ -33,7 +34,6 @@ def _reset_chat_state(app_state: AppState) -> None:
     for key in list(st.session_state.keys()):
         if key.startswith("correction_toggle_") or key.startswith("correction_text_"):
             st.session_state.pop(key)
-    _rerun_app()
 
 
 def hide_streamlit_branding() -> None:
@@ -272,24 +272,92 @@ _CUSTOM_THEME = """
         font-weight: 600;
         color: #8fd3ff;
     }
+    .result-markdown {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        color: #f2f7ff;
+    }
+    .result-markdown h3,
+    .result-markdown h4 {
+        margin: 0;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: #b9e0ff;
+    }
+    .result-markdown h3 {
+        font-size: 1.05rem;
+    }
+    .result-markdown h4 {
+        font-size: 0.95rem;
+        color: #9ed4ff;
+    }
     .result-markdown p,
     .result-markdown li {
-        font-size: 20px;
-        line-height: 1.8rem;
+        font-size: 0.95rem;
+        line-height: 1.55rem;
+        color: #f2f7ff;
+    }
+    .result-markdown .summary-grid {
+        margin-top: 0.55rem;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        row-gap: 0.35rem;
+        column-gap: 0.75rem;
+    }
+    .result-markdown .summary-row dt {
+        font-weight: 600;
+        color: #7acbff;
+    }
+    .result-markdown .summary-row dd {
+        margin: 0;
+        color: #f2f7ff;
+    }
+    .result-markdown .refinement-list {
+        margin: 0.5rem 0 0;
+        padding-left: 1.2rem;
+        color: #f2f7ff;
+    }
+    .result-markdown .ref-label {
+        font-weight: 600;
+        color: #8dd2ff;
     }
     .result-markdown .sources-list {
-        font-size: 14px;
-        line-height: 1.35rem;
-        color: rgba(233, 242, 249, 0.85);
+        font-size: 0.95rem;
+        line-height: 1.4rem;
+        color: #ddeeff;
         margin: 0;
-        padding-left: 1.4rem;
+        padding-left: 1.2rem;
     }
     .result-markdown .sources-list li {
         margin-bottom: 0.35rem;
     }
+    .result-markdown .answer-body {
+        font-size: 0.95rem;
+        line-height: 1.6rem;
+        background: rgba(4, 16, 24, 0.85);
+        border: 1px solid rgba(148, 226, 255, 0.18);
+        border-radius: 16px;
+        padding: 1.1rem 1.2rem;
+        color: #f6fbff;
+    }
+    .result-markdown .answer-body * {
+        color: inherit;
+    }
     .result-markdown .source-location {
         font-size: 12px;
-        opacity: 0.78;
+        opacity: 0.82;
+        color: #c5daff;
+    }
+    .result-markdown .confidence-note {
+        font-size: 0.9rem;
+        opacity: 0.75;
+        font-style: italic;
+        color: #f2f7ff;
+    }
+    .result-markdown .empty-sources {
+        opacity: 0.75;
+        color: #d5e9ff;
     }
     .sidebar-panel {
         font-size: 0.85rem;
@@ -348,19 +416,35 @@ _CUSTOM_THEME = """
 """
 
 _GITHUBISH_CSS = """
-:root { color-scheme: light dark; }
-body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif; margin: 0; padding: 0; }
-.container { max-width: 900px; margin: 2rem auto; padding: 2rem; }
-.markdown-body { line-height: 1.75; font-size: 18px; }
-.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { margin-top: 1.5em; }
-.markdown-body h3 { border-bottom: 1px solid rgba(127,127,127,.25); padding-bottom: .3em; }
-.markdown-body pre { background: rgba(127,127,127,.1); padding: 1rem; overflow: auto; border-radius: 8px; }
-.markdown-body code { padding: .1em .3em; background: rgba(127,127,127,.15); border-radius: 4px; }
-.markdown-body blockquote { margin: 1em 0; padding: .5em 1em; border-left: 4px solid rgba(127,127,127,.4); background: rgba(127,127,127,.08); border-radius: 4px; }
-.markdown-body table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-.markdown-body th, .markdown-body td { border: 1px solid rgba(127,127,127,.3); padding: .5em .75em; }
-hr { border: 0; border-top: 1px solid rgba(127,127,127,.25); margin: 2rem 0; }
-.smallmeta { color: rgba(127,127,127,.9); font-size: 12px; margin-top: 2rem; }
+:root { color-scheme: dark; }
+body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif; margin: 0; padding: 0; background: #040b14; color: #f2f7ff; }
+.container { max-width: 900px; margin: 2rem auto; padding: 2.5rem; background: linear-gradient(155deg, rgba(5, 20, 35, 0.96), rgba(2, 12, 22, 0.9)); border: 1px solid rgba(120, 210, 255, 0.12); border-radius: 24px; box-shadow: 0 32px 70px rgba(0, 0, 0, 0.45); }
+.markdown-body { line-height: 1.75; font-size: 18px; color: #f2f7ff; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { margin-top: 1.5em; color: #c6e6ff; }
+.markdown-body h3 { border-bottom: 1px solid rgba(110, 195, 255, 0.3); padding-bottom: .3em; }
+.markdown-body pre { background: rgba(11, 31, 52, .78); padding: 1rem; overflow: auto; border-radius: 10px; border: 1px solid rgba(116, 197, 255, 0.22); color: #f2f7ff; }
+.markdown-body code { padding: .1em .3em; background: rgba(21, 55, 88, .55); border-radius: 4px; color: #f2f7ff; }
+.markdown-body blockquote { margin: 1em 0; padding: .5em 1em; border-left: 4px solid rgba(102, 180, 255, .55); background: rgba(8, 26, 44, .72); border-radius: 6px; color: #ddeeff; }
+.markdown-body table { border-collapse: collapse; width: 100%; margin: 1em 0; color: #f2f7ff; }
+.markdown-body th, .markdown-body td { border: 1px solid rgba(102, 180, 255, .28); padding: .5em .75em; }
+.result-markdown { display: flex; flex-direction: column; gap: 1.35rem; color: #f2f7ff; }
+.result-markdown h3 { font-size: 1.2rem; margin: 0; color: #c3e7ff; }
+.result-markdown h4 { font-size: 1.05rem; margin: 0; color: #9ed4ff; }
+.result-markdown p, .result-markdown li { font-size: 1rem; line-height: 1.65rem; color: #f2f7ff; }
+.result-markdown .summary-grid { margin-top: 0.65rem; display: grid; grid-template-columns: auto 1fr; row-gap: 0.4rem; column-gap: 0.85rem; }
+.result-markdown .summary-row dt { font-weight: 600; color: #7acbff; }
+.result-markdown .summary-row dd { margin: 0; color: #f2f7ff; }
+.result-markdown .refinement-list { padding-left: 1.2rem; margin: 0.5rem 0 0; color: #f2f7ff; }
+.result-markdown .ref-label { font-weight: 600; color: #8dd2ff; }
+.result-markdown .sources-list { margin: 0.6rem 0 0; padding-left: 1.2rem; color: #ddeeff; }
+.result-markdown .sources-list li { margin-bottom: 0.5rem; }
+.result-markdown .answer-body { background: rgba(4, 18, 32, 0.88); border: 1px solid rgba(116, 197, 255, 0.25); border-radius: 18px; padding: 1.2rem 1.3rem; color: #f6fbff; }
+.result-markdown .answer-body * { color: inherit; }
+.result-markdown .source-location { font-size: 0.85rem; color: #c5daff; }
+.result-markdown .confidence-note { font-size: 0.9rem; font-style: italic; color: #e4f3ff; }
+.result-markdown .empty-sources { margin: 0; color: #d5e9ff; opacity: 0.75; }
+hr { border: 0; border-top: 1px solid rgba(102,180,255,.25); margin: 2rem 0; }
+.smallmeta { color: rgba(190, 221, 255, .55); font-size: 12px; margin-top: 2rem; text-align: right; }
 """
 
 _HTML_SHELL = """
@@ -382,116 +466,151 @@ _HTML_SHELL = """
 """
 
 
-def ensure_markdown_deps() -> None:
-    try:  # pragma: no cover - dependency management
-        import markdown  # noqa: F401
-    except Exception as exc:  # pragma: no cover - dependency management
-        raise RuntimeError(
-            "The 'markdown' package is required but not installed. "
-            "Add `markdown` to requirements.txt for deployment environments."
-        ) from exc
-
-
 def compose_result_markdown(result: Dict) -> str:
-    original_query = result.get("query", "No original query")
-    conf_pct = result.get("confidence_pct", "N/A")
-    conf_level = result.get("confidence_level", "N/A")
-    num_sources = result.get("num_sources", "N/A")
+    """Compose a styled HTML fragment for a chat response."""
+    original_query = (result.get("query") or "No original query").strip() or "Untitled query"
+    final_query = (result.get("final_query") or "").strip()
+    conf_pct = result.get("confidence_pct")
+    conf_level = (result.get("confidence_level") or "N/A").strip() or "N/A"
+    num_sources = result.get("num_sources")
     attempts = result.get("attempts")
     best_attempt = result.get("best_attempt")
-    refinement_history = result.get("refinement_history", [])
-    answer = result.get("answer", "No answer available.")
-    sources = result.get("sources", [])
-    confidence_note = result.get("confidence_note", "")
+    refinement_history = result.get("refinement_history") or []
+    answer = (result.get("answer") or "No answer available.").strip()
+    sources = result.get("sources") or []
+    confidence_note = (result.get("confidence_note") or "").strip()
 
-    header_md = f"""
-### ðŸ§­ Query Result
+    parts: List[str] = ["<div class='result-markdown'>"]
 
-- **Query:** {original_query}
-- **Confidence:** {conf_pct}% ({conf_level})
-- **Sources analyzed:** {num_sources}
-"""
+    parts.append("<section class='result-summary'>")
+    parts.append("<h3>Query overview</h3>")
+    parts.append("<dl class='summary-grid'>")
+
+    def render_summary_row(label: str, value_html: str) -> None:
+        parts.append(
+            "<div class='summary-row'>"
+            f"<dt>{html.escape(label)}:</dt>"
+            f"<dd>{value_html}</dd>"
+            "</div>"
+        )
+
+    conf_pct_str = "N/A" if conf_pct is None else str(conf_pct)
+    if isinstance(conf_pct, (int, float)) and not conf_pct_str.endswith('%'):
+        conf_pct_str = f"{int(conf_pct)}"
+    if conf_pct_str != "N/A" and not conf_pct_str.endswith('%'):
+        conf_pct_str = f"{conf_pct_str}%"
+
+    render_summary_row("Query", html.escape(original_query))
+    render_summary_row("Confidence", f"{html.escape(conf_pct_str)} ({html.escape(conf_level)})")
+    sources_str = "N/A" if num_sources is None else str(num_sources)
+    render_summary_row("Sources analysed", html.escape(sources_str))
+
+    if final_query and final_query.lower() != original_query.lower():
+        render_summary_row("Final query used", html.escape(final_query))
+
     if refinement_history:
-        header_md += f"**Query refinements:** {attempts} attempts  \n"
-        header_md += f"**Best result:** Attempt {best_attempt}\n"
+        total_attempts = attempts or len(refinement_history)
+        suffix = f"; best attempt {best_attempt}" if best_attempt else ""
+        render_summary_row("Attempts", f"{html.escape(str(total_attempts))}{html.escape(suffix)}")
+
+    parts.append("</dl>")
+    parts.append("</section>")
 
     if refinement_history:
-        refinements_md = "\n#### ðŸ”„ Query Refinement History\n"
-        refinements_md += f"- Original: â€œ{result.get('query','')}â€\n"
-        for item in refinement_history[1:]:
-            refinements_md += f"- Attempt {item.get('attempt')}: â€œ{item.get('query')}â€ (confidence: {item.get('confidence')}%)\n"
-        if best_attempt:
-            refinements_md += f"- âœ… Best: Attempt {best_attempt} (confidence: {conf_pct}%)\n"
-    else:
-        refinements_md = ""
+        parts.append("<section class='result-refinement'>")
+        parts.append("<h4>Refinement history</h4>")
+        parts.append("<ol class='refinement-list'>")
+        for entry in refinement_history:
+            attempt_no = entry.get("attempt")
+            entry_query = (entry.get("query") or "").strip() or "n/a"
+            confidence = entry.get("confidence")
+            label = "Initial query" if attempt_no in (None, 1) else f"Attempt {attempt_no}"
+            confidence_bits = ""
+            if confidence is not None:
+                try:
+                    confidence_bits = f" &middot; {int(confidence)}%"
+                except (TypeError, ValueError):
+                    confidence_bits = f" &middot; {html.escape(str(confidence))}%"
+            parts.append(
+                "<li>"
+                f"<span class='ref-label'>{label}</span>: "
+                f"{html.escape(entry_query)}{confidence_bits}"
+                "</li>"
+            )
+        parts.append("</ol>")
+        parts.append("</section>")
 
-    answer_md = f"""
-#### ðŸ“ Answer
-{answer}
-"""
+    parts.append("<section class='result-answer'>")
+    parts.append("<h4>Answer</h4>")
+    answer_html = md(answer, extensions=_DEF_EXTS) if answer else "<p>No answer available.</p>"
+    parts.append(f"<div class='answer-body'>{answer_html}</div>")
+    parts.append("</section>")
 
+    parts.append("<section class='result-sources'>")
+    parts.append("<h4>Sources</h4>")
     if sources:
-        sources_md = "\n#### ðŸ“š Sources\n<ol class=\"sources-list\">"
+        type_labels = {
+            "PROC": "PROCEDURE",
+            "FORM": "FORM",
+            "REG": "REGULATION",
+            "POLICY": "POLICY",
+            "REPORT": "REPORT",
+            "CHECKLIST": "CHECKLIST",
+        }
+        parts.append("<ol class='sources-list'>")
         for idx, src in enumerate(sources[:5], 1):
             source_file = src.get("source", "Unknown")
-            title = src.get("title", "")
-            doc_type = src.get("doc_type", "")
-            hierarchy = src.get("hierarchy", "")
-            section = src.get("section", "")
-            tab_name = src.get("tab_name", "")
-            form_number = src.get("form_number", "")
-            form_category_name = src.get("form_category_name", "")
+            title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
+            doc_type = (src.get("doc_type") or "").upper()
+            type_label = type_labels.get(doc_type, doc_type)
+            display_title = f"{title} ({type_label})" if type_label else title
 
-            type_labels = {
-                "PROC": "PROCEDURE",
-                "FORM": "FORM",
-                "REG": "REGULATION",
-                "POLICY": "POLICY",
-                "REPORT": "REPORT",
-                "CHECKLIST": "CHECKLIST",
-            }
-            type_label = type_labels.get(doc_type, doc_type.upper() if doc_type else "")
-
-            display_title = title if title else source_file.rsplit(".", 1)[0].replace("_", " ")
-            title_line = display_title
-            if type_label:
-                title_line += f" ({type_label})"
-
+            location_segments: List[str] = []
+            hierarchy = src.get("hierarchy")
+            if hierarchy:
+                location_segments.append(str(hierarchy))
+            tab_name = src.get("tab_name")
             if tab_name:
-                location = f"Tab: {tab_name}"
-            elif hierarchy and hierarchy.strip():
-                location = hierarchy
-            elif doc_type == "FORM":
-                if form_number and form_category_name:
-                    location = f"Form {form_number} - {form_category_name}"
-                elif form_number:
-                    location = f"Form {form_number}"
-                elif section and section not in ["Document Content", ""]:
-                    clean_section = section.split("|")[0].strip() if "|" in section else section
-                    location = clean_section[:60] if len(clean_section) > 60 else clean_section
-                else:
-                    location = "Form document"
-            else:
-                if section and section not in ["Document Content", "Main document", ""]:
-                    clean_section = section.split("|")[0].strip() if "|" in section else section
-                    location = clean_section[:60] if len(clean_section) > 60 else clean_section
-                else:
-                    location = "Main document"
+                location_segments.append(f"Tab: {tab_name}")
+            section = src.get("section")
+            if section and section not in {"Document Content", "Main document"}:
+                location_segments.append(str(section))
 
-            truncated_location = (location[:147] + "...") if len(location) > 150 else location
-            sources_md += (
-                f"<li><strong>{idx}. {title_line}</strong><br><span class='source-location'>Location: {truncated_location}</span></li>"
+            form_number = src.get("form_number")
+            form_category = src.get("form_category_name")
+            if doc_type == "FORM" and form_number:
+                form_desc = f"Form {form_number}"
+                if form_category:
+                    form_desc += f" - {form_category}"
+                location_segments = [form_desc]
+
+            location_text = " • ".join(filter(None, location_segments)) or "Main document"
+            location_text = location_text.replace("\n", " ").strip()
+            truncated = False
+            if len(location_text) > 120:
+                location_text = location_text[:117].rstrip()
+                truncated = True
+            location_html = html.escape(location_text)
+            if truncated:
+                location_html += '&hellip;'
+
+            parts.append(
+                "<li>"
+                f"<strong>{idx}. {html.escape(display_title)}</strong><br>"
+                f"<span class='source-location'>Location: {location_html}</span>"
+                "</li>"
             )
-        sources_md += "</ol>"
+        parts.append("</ol>")
     else:
-        sources_md = "\n_No sources available._\n"
+        parts.append("<p class='empty-sources'><em>No sources available.</em></p>")
+    parts.append("</section>")
 
-    note_md = f"\n> âš ï¸ {confidence_note}\n" if confidence_note else ""
-    return (
-        "<div class='result-markdown'>\n"
-        f"{header_md}\n---\n{refinements_md}\n{answer_md}\n---\n{sources_md}\n---\n{note_md}\n"
-        "</div>"
-    )
+    if confidence_note:
+        parts.append(f"<p class='confidence-note'>Note: {html.escape(confidence_note)}</p>")
+
+    parts.append("</div>")
+    return "\n".join(parts)
+
 
 
 def apply_custom_theme() -> None:
@@ -500,11 +619,7 @@ def apply_custom_theme() -> None:
 
 def build_result_export_html(result: Dict, title: str = "RAG Query Result") -> str:
     """Generate an HTML export representation for a query result."""
-    ensure_markdown_deps()
-    from markdown import markdown
-
-    markdown_body = compose_result_markdown(result)
-    html_body = markdown(markdown_body, extensions=_DEF_EXTS)
+    html_body = compose_result_markdown(result)
     return _HTML_SHELL.format(
         title=title,
         css=_GITHUBISH_CSS,
@@ -624,17 +739,17 @@ def render_chat_feedback_row(app_state: AppState, result: Dict, key_prefix: str)
         key=f"export_{key_prefix}",
     )
 
-    if controls[1].button("👍 Helpful", key=f"helpful_{key_prefix}"):
+    if controls[1].button("Helpful", key=f"helpful_{key_prefix}"):
         app_state.feedback_system.log_feedback(result, "helpful")
         st.success("Thanks! Feedback recorded.")
 
-    if controls[2].button("👎 Needs work", key=f"not_helpful_{key_prefix}"):
+    if controls[2].button("Needs work", key=f"not_helpful_{key_prefix}"):
         app_state.feedback_system.log_feedback(result, "not_helpful")
         st.info("Thanks! Feedback recorded.")
 
     incorrect_key = f"incorrect_{key_prefix}"
     correction_toggle_key = f"correction_toggle_{key_prefix}"
-    if controls[3].button("⚠️ Incorrect", key=incorrect_key):
+    if controls[3].button("Flag issue", key=incorrect_key):
         st.session_state[correction_toggle_key] = not st.session_state.get(correction_toggle_key, False)
 
     if st.session_state.get(correction_toggle_key, False):
@@ -687,8 +802,7 @@ def render_app(
     with top_container:
         st.markdown("<div class='sidebar-top'>", unsafe_allow_html=True)
         if st.button("Start new chat", use_container_width=True):
-            _reset_chat_state(app_state)
-            _rerun_app()
+            st.session_state["__chat_reset_requested"] = True
         with st.expander("Assistant options", expanded=True):
             retrieval_type = st.selectbox(
                 "Retrieval method",
@@ -712,6 +826,10 @@ def render_app(
             auto_refine_option = st.checkbox("Auto-refine low confidence queries", key="auto_refine_option")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    if st.session_state.pop("__chat_reset_requested", False):
+        _reset_chat_state(app_state)
+        _rerun_app()
+
     scroll_container = st.sidebar.container()
     with scroll_container:
         st.markdown("<div class='sidebar-scroll'>", unsafe_allow_html=True)
@@ -731,7 +849,6 @@ def render_app(
 
             if st.button("Clear history", key="clear_history_button", use_container_width=True):
                 app_state.clear_history()
-                _rerun_app()
 
         if allow_library_controls:
             with st.expander("Library management", expanded=False):
@@ -751,7 +868,6 @@ def render_app(
                     try:
                         AppConfig.get().update_paths(Path(docs_input), Path(chroma_input), Path(cache_input))
                         st.success("Paths updated. Reload or resync to apply changes.")
-                        _rerun_app()
                     except Exception as exc:  # pragma: no cover - defensive path
                         st.error(f"Failed to update paths: {exc}")
 
@@ -793,25 +909,30 @@ def render_app(
     main_col = st.container()
 
     with main_col:
-        chat_container = st.container()
-        with chat_container:
-            if app_state.query_history:
-                st.markdown("<div class='chat-thread'>", unsafe_allow_html=True)
-                for idx, result in enumerate(app_state.query_history):
-                    query_text = html.escape(result.get("query", "").strip() or "Untitled query")
-                    st.markdown(
-                        f"<div class='chat-message user'><div class='bubble'>{query_text}</div></div>",
-                        unsafe_allow_html=True,
-                    )
-                    assistant_body = compose_result_markdown(result)
-                    st.markdown(
-                        f"<div class='chat-message assistant'><div class='bubble'>{assistant_body}</div></div>",
-                        unsafe_allow_html=True,
-                    )
-                    render_chat_feedback_row(app_state, result, key_prefix=str(idx))
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.info("Ask a question to get started.")
+        chat_placeholder = st.container()
+
+        def draw_chat_thread() -> None:
+            placeholder = chat_placeholder.empty()
+            with placeholder.container():
+                if app_state.query_history:
+                    st.markdown("<div class='chat-thread'>", unsafe_allow_html=True)
+                    for idx, result in enumerate(app_state.query_history):
+                        query_text = html.escape(result.get("query", "").strip() or "Untitled query")
+                        st.markdown(
+                            f"<div class='chat-message user'><div class='bubble'>{query_text}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        assistant_body = compose_result_markdown(result)
+                        st.markdown(
+                            f"<div class='chat-message assistant'><div class='bubble'>{assistant_body}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        render_chat_feedback_row(app_state, result, key_prefix=str(idx))
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.info("Ask a question to get started.")
+
+        draw_chat_thread()
 
         user_prompt = st.chat_input("Ask about the maritime library...")
         if user_prompt is not None:
@@ -830,7 +951,7 @@ def render_app(
                             rerank=rerank_option,
                         )
                         app_state.append_history(result)
-                        _rerun_app()
+                        draw_chat_thread()
                     except Exception as exc:
                         st.error(f"Search failed: {exc}")
 
