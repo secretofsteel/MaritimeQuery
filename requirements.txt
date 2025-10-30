@@ -1,0 +1,16 @@
+pip==24
+streamlit
+google-genai
+llama-index-core
+llama-index-llms-gemini
+llama-index-embeddings-gemini
+llama-index-vector-stores-chroma
+llama-index-retrievers-bm25
+chromadb
+PyPDF2
+python-docx
+openpyxl
+pandas
+rank-bm25
+cohere
+textract
