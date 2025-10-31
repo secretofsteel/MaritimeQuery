@@ -402,14 +402,21 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         div[data-testid="stHorizontalBlock"] > div {
             gap: 0.25rem !important;
         }
-        .stDownloadButton button, div[data-testid="baseButton-secondary"] {
+        /* Remove all button borders and boxes */
+        .stDownloadButton button, 
+        div[data-testid="baseButton-secondary"],
+        button[kind="secondary"] {
             padding: 0.25rem 0.5rem !important;
             min-width: 2.5rem !important;
             border: none !important;
             background: transparent !important;
+            box-shadow: none !important;
         }
-        .stDownloadButton button:hover, div[data-testid="baseButton-secondary"]:hover {
+        .stDownloadButton button:hover, 
+        div[data-testid="baseButton-secondary"]:hover,
+        button[kind="secondary"]:hover {
             background: rgba(255, 255, 255, 0.1) !important;
+            box-shadow: none !important;
         }
         </style>
         """, unsafe_allow_html=True)
@@ -477,6 +484,30 @@ def render_app(
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    
+    # Add custom CSS for centered chat layout (75% width)
+    st.markdown("""
+    <style>
+    /* Center the main content area and limit to 75% width */
+    .main .block-container {
+        max-width: 75%;
+        padding-left: 12.5%;
+        padding-right: 12.5%;
+    }
+    
+    /* Center and limit chat input width */
+    .stChatFloatingInputContainer {
+        max-width: 75%;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    /* Ensure chat messages stay within the centered column */
+    .stChatMessage {
+        max-width: 100%;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
     st.title("⚓ Maritime RAG Assistant")
     st.caption("Intelligent document search powered by Gemini + LlamaIndex")

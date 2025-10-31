@@ -17,6 +17,10 @@ textColor = "#e9f2f9"
 # Font family
 font = "sans serif"
 
+[client]
+# Limit chat content width to 75% of screen
+showSidebarNavigation = false
+
 [server]
 # Enable file watcher for auto-reload during development
 fileWatcherType = "auto"
