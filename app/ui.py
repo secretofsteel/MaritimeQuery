@@ -549,12 +549,12 @@ def render_app(
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
 
-    # Sidebar configuration with sticky header and scrollable sections
+    # Sidebar configuration
     with st.sidebar:
-        # Custom CSS for sticky header and scrollable sections
+        # Custom CSS for button styling (not feedback buttons)
         st.markdown("""
         <style>
-        /* Restore button styling for sidebar buttons (not feedback buttons) */
+        /* Restore button styling for sidebar buttons only */
         section[data-testid="stSidebar"] button[kind="primary"],
         section[data-testid="stSidebar"] button[kind="secondary"] {
             border: 1px solid rgba(255, 255, 255, 0.2) !important;
@@ -569,63 +569,85 @@ def render_app(
             border-color: rgba(10, 132, 255, 0.5) !important;
         }
         
-        /* Limit documents expander content height with internal scroll */
-        section[data-testid="stSidebar"] div[data-testid="stExpander"]:has(div:contains("Documents on file")) div[data-testid="stExpanderDetails"] {
-            max-height: 300px !important;
-            overflow-y: auto !important;
+        /* Scrollable panel styling from original code */
+        .sidebar-panel {
+            font-size: 0.85rem;
+            line-height: 1.25rem;
+            color: rgba(233, 242, 249, 0.78);
+            max-height: 280px;
+            overflow-y: auto;
+            padding-right: 0.35rem;
         }
         
-        /* Custom scrollbar for documents list */
-        section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stExpanderDetails"]::-webkit-scrollbar {
+        .sidebar-panel ul {
+            margin: 0;
+            padding-left: 1rem;
+        }
+        
+        .sidebar-panel::-webkit-scrollbar {
             width: 6px;
         }
         
-        section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stExpanderDetails"]::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 3px;
+        .sidebar-panel::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.28);
+            border-radius: 4px;
+        }
+        
+        .sidebar-panel.docs {
+            max-height: 320px;
+        }
+        
+        .sidebar-panel.docs .doc-type {
+            margin-bottom: 0.75rem;
+        }
+        
+        .sidebar-panel.docs .doc-type h4 {
+            margin: 0 0 0.3rem;
+            font-size: 0.95rem;
+            color: rgba(143, 211, 255, 0.9);
+            letter-spacing: 0.02em;
+        }
+        
+        .sidebar-panel.docs .doc-type li {
+            list-style: disc;
+            margin-bottom: 0.2rem;
         }
         </style>
         """, unsafe_allow_html=True)
         
         st.header("⚙️ Settings")
         
-        # Use container to try to keep this section visible
-        sticky_container = st.container()
+        if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
+            _reset_chat_state(app_state)
+            _rerun_app()
         
-        with sticky_container:
-            if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
-                _reset_chat_state(app_state)
-                _rerun_app()
+        with st.expander("🔍 Retrieval Options", expanded=True):
+            retrieval_type = st.selectbox(
+                "Method",
+                ["hybrid", "vector", "bm25"],
+                key="retrieval_method",
+                help="Hybrid combines vector and keyword search"
+            )
             
-            with st.expander("🔍 Retrieval Options", expanded=True):
-                retrieval_type = st.selectbox(
-                    "Method",
-                    ["hybrid", "vector", "bm25"],
-                    key="retrieval_method",
-                    help="Hybrid combines vector and keyword search"
-                )
-                
-                rerank_available = cohere_client is not None
-                rerank_option = st.checkbox(
-                    "Enable reranking",
-                    key="rerank_enabled",
-                    disabled=not rerank_available,
-                    help="Re-rank results with Cohere (requires API key)"
-                )
-                
-                fortify_option = st.checkbox(
-                    "Fortify query",
-                    key="fortify_option",
-                    help="Enhance query with Gemini before searching"
-                )
-                
-                auto_refine_option = st.checkbox(
-                    "Auto-refine queries",
-                    key="auto_refine_option",
-                    help="Automatically rephrase low-confidence queries"
-                )
+            rerank_available = cohere_client is not None
+            rerank_option = st.checkbox(
+                "Enable reranking",
+                key="rerank_enabled",
+                disabled=not rerank_available,
+                help="Re-rank results with Cohere (requires API key)"
+            )
             
-            st.markdown("---")
+            fortify_option = st.checkbox(
+                "Fortify query",
+                key="fortify_option",
+                help="Enhance query with Gemini before searching"
+            )
+            
+            auto_refine_option = st.checkbox(
+                "Auto-refine queries",
+                key="auto_refine_option",
+                help="Automatically rephrase low-confidence queries"
+            )
         
         # Library management (only if not read-only)
         if not read_only_mode:
@@ -650,18 +672,32 @@ def render_app(
                 app_state.clear_history()
                 _rerun_app()
         
-        # Documents on file - with internal scrolling
+        # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
         with st.expander("📄 Documents on file", expanded=False):
             if grouped:
                 order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
+                heading_map = {
+                    "FORM": "Forms",
+                    "CHECKLIST": "Checklists",
+                    "PROCEDURE": "Procedures",
+                    "MANUAL": "Manuals",
+                    "POLICY": "Policies",
+                    "REGULATION": "Regulations",
+                }
+                sections = []
                 for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
                     titles = grouped[doc_type]
                     if not titles:
                         continue
-                    st.markdown(f"**{doc_type}** ({len(titles)})")
-                    for title in titles:
-                        st.caption(f"• {title}")
+                    heading = heading_map.get(doc_type, doc_type.title())
+                    items = "".join(f"<li>{title}</li>" for title in titles)
+                    sections.append(f"<div class='doc-type'><h4>{heading}</h4><ul>{items}</ul></div>")
+                docs_html = "".join(sections)
+                st.markdown(
+                    f"<div class='sidebar-panel docs'>{docs_html}</div>",
+                    unsafe_allow_html=True,
+                )
             else:
                 st.caption("No documents indexed yet.")
         
