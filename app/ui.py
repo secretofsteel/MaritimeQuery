@@ -100,19 +100,7 @@ def export_result_to_html(result: Dict, out_dir: Path) -> str | None:
     md_content = compose_result_markdown(result)
     html_body = md(md_content, extensions=_DEF_EXTS)
 
-def load_or_warn(app_state: AppState) -> None:
-    """Load cached index or warn the user."""
-    nodes, index = load_cached_nodes_and_index()
-    if nodes and index:
-        app_state.nodes = nodes
-        app_state.index = index
-        app_state.vector_retriever = None  # Reset retrievers to force recreation
-        app_state.bm25_retriever = None
-        app_state.ensure_retrievers() # Ensure retrievers are created after loading index
-        app_state.ensure_manager().nodes = nodes # Update manager's node list
-        st.success(f"✅ Loaded {len(nodes)} cached nodes and index.")
-    else:
-        st.warning("⚠️ No cached index found. Rebuild or sync to initialize the system.")
+
 
     # Define the HTML template
     full_html = f"""<!DOCTYPE html>
@@ -148,6 +136,56 @@ def load_or_warn(app_state: AppState) -> None:
     export_path.write_text(full_html, encoding="utf-8")
     return str(export_path)
 
+def load_or_warn(app_state: AppState) -> None:
+    """Load cached index or warn the user."""
+    nodes, index = load_cached_nodes_and_index()
+    if nodes and index:
+        app_state.nodes = nodes
+        app_state.index = index
+        app_state.vector_retriever = None  # Reset retrievers to force recreation
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers() # Ensure retrievers are created after loading index
+        app_state.ensure_manager().nodes = nodes # Update manager's node list
+        st.success(f"✅ Loaded {len(nodes)} cached nodes and index.")
+    else:
+        st.warning("⚠️ No cached index found. Rebuild or sync to initialize the system.")
+
+def rebuild_index(app_state: AppState) -> None:
+    """Rebuild the index from the library."""
+    with st.spinner("🔄 Building index from library (this may take several minutes)..."):
+        try:
+            nodes, index = build_index_from_library()
+            app_state.nodes = nodes
+            app_state.index = index
+            app_state.vector_retriever = None  # Reset retrievers
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers() # Ensure retrievers are created after rebuilding index
+            app_state.ensure_manager().nodes = nodes # Update manager's node list
+            st.success(f"✅ Rebuilt index with {len(nodes)} chunks.")
+        except Exception as e:
+            st.error(f"❌ Failed to rebuild index: {e}")
+            import traceback
+            traceback.print_exc()
+
+def sync_library(app_state: AppState) -> None:
+    """Sync the library using the IncrementalIndexManager."""
+    manager = app_state.ensure_manager()
+    manager.nodes = app_state.nodes # Ensure manager has the latest nodes from app_state
+
+    with st.spinner("🔄 Syncing library..."):
+        try:
+            changes = manager.sync_library(app_state.index)
+            st.success(f"✅ Sync complete. Added: {len(changes.added)}, Modified: {len(changes.modified)}, Deleted: {len(changes.deleted)}.")
+            # Update app_state nodes after sync
+            app_state.nodes = manager.nodes
+            # Reset and recreate retrievers after sync
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+        except Exception as e:
+            st.error(f"❌ Failed to sync library: {e}")
+            import traceback
+            traceback.print_exc()
 
 # --- UI Rendering Functions ---
 
