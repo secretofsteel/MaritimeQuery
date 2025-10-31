@@ -565,6 +565,20 @@ def render_app(
 
     # Sidebar configuration
     with st.sidebar:
+        # Admin/User mode toggle button at the top
+        if read_only_mode:
+            # In viewer mode - show Admin button
+            if st.button("🔓 Admin", use_container_width=True, key="mode_toggle", type="primary"):
+                st.query_params["read_only"] = "false"
+                _rerun_app()
+        else:
+            # In admin mode - show User button
+            if st.button("👤 User", use_container_width=True, key="mode_toggle", type="secondary"):
+                st.query_params["read_only"] = "true"
+                _rerun_app()
+
+        st.markdown("---")
+
         # Custom CSS for button styling (not feedback buttons)
         st.markdown("""
         <style>
@@ -576,7 +590,7 @@ def render_app(
             box-shadow: none !important;
             padding: 0.5rem 1rem !important;
         }
-        
+
         section[data-testid="stSidebar"] button[kind="primary"]:hover,
         section[data-testid="stSidebar"] button[kind="secondary"]:hover {
             background: rgba(10, 132, 255, 0.2) !important;
