@@ -267,10 +267,20 @@ def render_feedback_stats(app_state: AppState) -> None:
     st.sidebar.divider()
     st.sidebar.subheader("📊 Feedback Stats")
     analysis = app_state.feedback_system.analyze_feedback()
-    st.sidebar.write(f"Total Feedback: {analysis['summary']['total_entries']}")
-    st.sidebar.write(f"Helpful: {analysis['summary']['helpful']}")
-    st.sidebar.write(f"Not Helpful: {analysis['summary']['not_helpful']}")
-    st.sidebar.write(f"Incorrect: {analysis['summary']['incorrect']}")
+
+    # Check if there's an error in the analysis result
+    if "error" in analysis:
+        st.sidebar.info("No feedback data yet. Start using the system!")
+        return
+
+    # Use the correct keys from the analysis dictionary
+    total_feedback = analysis.get('total_feedback', 0)
+    helpful = analysis.get('satisfaction_rate', 0)
+    incorrect = analysis.get('incorrect_rate', 0)
+
+    st.sidebar.write(f"Total Feedback: {total_feedback}")
+    st.sidebar.write(f"Helpful: {helpful:.1f}%")
+    st.sidebar.write(f"Not Helpful: {incorrect:.1f}%")
 
     if st.sidebar.button("🔍 Show Detailed Analysis"):
         with st.sidebar.expander("Detailed Analysis"):
@@ -278,8 +288,6 @@ def render_feedback_stats(app_state: AppState) -> None:
             st.write("#### Confidence calibration")
             st.write(f"High confidence correct: {cal['high_conf_accurate']}")
             st.write(f"High confidence wrong: {cal['high_conf_wrong']}")
-            st.write(f"Low confidence correct: {cal['low_conf_accurate']}")
-            st.write(f"Low confidence wrong: {cal['low_conf_wrong']}")
             st.write(f"Underconfidence rate: {cal['underconfidence_rate']:.1f}%")
 
             ref = analysis["query_refinement"]
