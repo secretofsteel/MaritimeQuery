@@ -554,19 +554,34 @@ def render_app(
         # Custom CSS for sticky header and scrollable sections
         st.markdown("""
         <style>
-        /* Sticky header section */
-        section[data-testid="stSidebar"] > div:first-child {
-            padding-top: 1rem;
+        /* Make sidebar content container use flexbox */
+        section[data-testid="stSidebar"] > div {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
         }
         
-        /* Scrollable container for expandable sections */
+        /* Sticky header - fixed at top */
+        .sidebar-sticky-header {
+            flex-shrink: 0;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: var(--background-color);
+            position: sticky;
+            top: 0;
+            z-index: 999;
+        }
+        
+        /* Scrollable container */
         .sidebar-scrollable {
-            max-height: calc(100vh - 300px);
+            flex-grow: 1;
             overflow-y: auto;
-            margin-top: 1rem;
+            overflow-x: hidden;
+            padding-top: 1rem;
             padding-right: 0.5rem;
         }
         
+        /* Custom scrollbar */
         .sidebar-scrollable::-webkit-scrollbar {
             width: 6px;
         }
@@ -579,13 +594,21 @@ def render_app(
         .sidebar-scrollable::-webkit-scrollbar-thumb:hover {
             background: rgba(255, 255, 255, 0.5);
         }
+        
+        /* Limit documents expander content height */
+        .sidebar-scrollable div[data-testid="stExpander"] > div > div {
+            max-height: 300px;
+            overflow-y: auto;
+        }
         </style>
         """, unsafe_allow_html=True)
         
+        # STICKY HEADER - wrapped in a container
+        st.markdown("<div class='sidebar-sticky-header'>", unsafe_allow_html=True)
+        
         st.header("⚙️ Settings")
         
-        # STICKY SECTION - Always visible at top
-        if st.button("🔄 Start new chat", use_container_width=True):
+        if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn"):
             _reset_chat_state(app_state)
             _rerun_app()
         
@@ -617,10 +640,9 @@ def render_app(
                 help="Automatically rephrase low-confidence queries"
             )
         
-        # Separator
-        st.markdown("---")
+        st.markdown("</div>", unsafe_allow_html=True)
         
-        # SCROLLABLE SECTION - Everything below can scroll
+        # SCROLLABLE SECTION - wrapped in scrollable container
         st.markdown("<div class='sidebar-scrollable'>", unsafe_allow_html=True)
         
         # Library management (only if not read-only)
@@ -646,7 +668,7 @@ def render_app(
                 app_state.clear_history()
                 _rerun_app()
         
-        # Documents on file - restored with scrollable list
+        # Documents on file - with internal scrolling
         grouped = app_state.documents_grouped_by_type()
         with st.expander("📄 Documents on file", expanded=False):
             if grouped:
@@ -656,18 +678,15 @@ def render_app(
                     if not titles:
                         continue
                     st.markdown(f"**{doc_type}** ({len(titles)})")
-                    # Show first 5, with "show more" option
-                    display_titles = titles[:5]
-                    for title in display_titles:
+                    for title in titles:
                         st.caption(f"• {title}")
-                    if len(titles) > 5:
-                        st.caption(f"... and {len(titles) - 5} more")
             else:
                 st.caption("No documents indexed yet.")
         
-        # Feedback stats
-        with st.expander("📊 Feedback stats", expanded=False):
-            render_feedback_stats_panel(app_state)
+        # Feedback stats (ONLY for admin, not viewer)
+        if not read_only_mode:
+            with st.expander("📊 Feedback stats", expanded=False):
+                render_feedback_stats_panel(app_state)
         
         st.markdown("</div>", unsafe_allow_html=True)
 
