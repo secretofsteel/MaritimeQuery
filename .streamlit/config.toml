@@ -1,0 +1,42 @@
+[theme]
+# Base theme
+base = "dark"
+
+# Primary accent color (used for buttons, links, etc.)
+primaryColor = "#0a84ff"
+
+# Background color for the main content area
+backgroundColor = "#0b1d2e"
+
+# Background color for sidebar and other secondary elements
+secondaryBackgroundColor = "#0a1a24"
+
+# Text color
+textColor = "#e9f2f9"
+
+# Font family
+font = "sans serif"
+
+[server]
+# Enable file watcher for auto-reload during development
+fileWatcherType = "auto"
+
+# Max upload size (200MB for large PDFs)
+maxUploadSize = 200
+
+# Enable CORS for API access (if needed)
+enableCORS = false
+
+# Enable XSS protection
+enableXsrfProtection = true
+
+[browser]
+# Automatically open browser on startup
+gatherUsageStats = false
+
+[runner]
+# Faster reruns
+fastReruns = true
+
+# Magic commands disabled (we're using explicit st calls)
+magicEnabled = false

@@ -15,6 +15,7 @@ from .config import AppConfig
 from .indexing import build_index_from_library, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
+from .logger import LOGGER
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
@@ -35,419 +36,6 @@ def _reset_chat_state(app_state: AppState) -> None:
         if key.startswith("correction_toggle_") or key.startswith("correction_text_"):
             st.session_state.pop(key)
 
-
-def hide_streamlit_branding() -> None:
-    """Remove Streamlit header/footer branding."""
-    st.markdown(
-        """
-        <style>
-            #MainMenu {visibility: hidden;}
-            header {visibility: hidden;}
-            footer {visibility: hidden;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-_CUSTOM_THEME = """
-<style>
-    .stApp {
-        background: radial-gradient(circle at top, #0f3d58 0%, #07141d 45%, #03080c 100%);
-        color: #e9f2f9;
-    }
-    .stApp [data-testid="stSidebar"] {
-        background: rgba(10, 26, 36, 0.85);
-        border-right: 1px solid rgba(255, 255, 255, 0.05);
-        width: 350px;
-        min-width: 350px;
-        max-width: 350px;
-        flex: 0 0 350px;
-    }
-    .stApp [data-testid="stSidebar"] section[data-testid="stSidebarContent"] {
-        width: 100%;
-    }
-    .stApp [data-testid="stSidebar"] .stButton {
-        width: 100%;
-    }
-    .stApp [data-testid="stSidebar"] .stButton>button {
-        width: 100%;
-        display: inline-flex;
-        justify-content: center;
-    }
-    .sidebar-top {
-        position: sticky;
-        top: 0;
-        z-index: 5;
-        background: rgba(10, 26, 36, 0.95);
-        padding-bottom: 1rem;
-    }
-    .sidebar-scroll {
-        max-height: calc(100vh - 5.2rem);
-        overflow-y: auto;
-        padding-right: 0.35rem;
-    }
-    .sidebar-scroll::-webkit-scrollbar {
-        width: 6px;
-    }
-    .sidebar-scroll::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.28);
-        border-radius: 4px;
-    }
-    .chat-history-list {
-        margin: 0.4rem 0 0;
-        padding: 0;
-        max-height: 260px;
-        overflow-y: auto;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 12px;
-        background: rgba(4, 16, 24, 0.65);
-    }
-    .chat-history-list ol {
-        list-style: decimal;
-        padding: 0.85rem 1.25rem;
-        margin: 0;
-        color: rgba(233, 242, 249, 0.85);
-        font-size: 0.9rem;
-        line-height: 1.45rem;
-    }
-    .chat-history-list ol li {
-        margin-bottom: 0.35rem;
-        word-break: break-word;
-    }
-    .chat-history-list::-webkit-scrollbar {
-        width: 6px;
-    }
-    .chat-history-list::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.24);
-        border-radius: 4px;
-    }
-    .chat-thread-anchor {
-        display: none;
-    }
-    .stApp main .block-container {
-        display: flex;
-        flex-direction: column;
-        min-height: 100vh;
-    }
-    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor) {
-        display: flex;
-        flex-direction: column;
-        gap: 1.6rem;
-        margin-top: 1.5rem;
-        padding-bottom: 4rem;
-        height: calc(100vh - 15rem);
-        max-height: calc(100vh - 15rem);
-        overflow-y: auto;
-        padding-right: 0.35rem;
-    }
-    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar {
-        width: 6px;
-    }
-    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.24);
-        border-radius: 4px;
-    }
-    .chat-message {
-        display: flex;
-        flex-direction: column;
-        gap: 0.6rem;
-        max-width: min(780px, calc(100% - 140px));
-    }
-    .chat-message.user {
-        align-self: flex-end;
-        text-align: left;
-    }
-    .chat-message.assistant {
-        align-self: flex-start;
-    }
-    .chat-message .bubble {
-        border-radius: 22px;
-        padding: 1rem 1.3rem;
-        box-shadow: 0 12px 35px rgba(0, 0, 0, 0.25);
-        line-height: 1.55rem;
-    }
-    .chat-message.user .bubble {
-        background: linear-gradient(135deg, #0a84ff, #13c4ff);
-        color: #fff;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-    }
-    .chat-message.assistant .bubble {
-        background: rgba(7, 24, 34, 0.85);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        color: #e9f2f9;
-    }
-    .chat-message.assistant .bubble .result-markdown {
-        background: transparent;
-        padding: 0;
-    }
-    .chat-message.assistant .bubble .result-markdown .sources-list {
-        font-size: 0.78rem;
-    }
-    .chat-feedback-marker {
-        display: none;
-    }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) {
-        gap: 0.35rem;
-        margin-top: 0.35rem;
-        justify-content: flex-end;
-        align-items: center;
-        align-self: flex-end;
-        margin-left: auto;
-        margin-right: 0;
-        flex-wrap: nowrap;
-    }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) > div[data-testid="column"] {
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-        flex: 0 0 auto !important;
-    }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button,
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) .stDownloadButton button {
-        width: 2.4rem;
-        height: 2.4rem;
-        border-radius: 999px;
-        border: 1px solid rgba(233, 242, 249, 0.18);
-        background: transparent;
-        color: rgba(233, 242, 249, 0.85);
-        font-size: 1.15rem;
-        padding: 0;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-    }
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button:hover,
-    .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) .stDownloadButton button:hover {
-        background: rgba(19, 196, 255, 0.18);
-        border-color: rgba(19, 196, 255, 0.45);
-        color: #f6fbff;
-        box-shadow: none;
-    }
-    .chat-feedback-correction {
-        margin-top: 0.75rem;
-        background: rgba(4, 16, 24, 0.75);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 14px;
-        padding: 0.9rem;
-    }
-    .chat-feedback-correction textarea {
-        background: rgba(8, 30, 43, 0.78) !important;
-        border-radius: 10px !important;
-        border: 1px solid rgba(255, 255, 255, 0.12) !important;
-        color: #e9f2f9 !important;
-        font-size: 0.9rem !important;
-    }
-    .chat-feedback-correction .stButton>button {
-        width: 100%;
-        border-radius: 999px;
-        background: linear-gradient(135deg, #1dd1a1, #10ac84);
-        border: none;
-        color: #041017;
-        font-weight: 600;
-    }
-    .chat-feedback-correction .stButton>button:hover {
-        box-shadow: 0 0 16px rgba(29, 209, 161, 0.35);
-    }
-    .stApp .stButton>button {
-        border-radius: 999px;
-        border: none;
-        padding: 0.6rem 1.6rem;
-        background: linear-gradient(135deg, #0a84ff, #13c4ff);
-        color: #fff;
-        font-weight: 600;
-    }
-    .stApp .stButton>button:hover {
-        box-shadow: 0 0 18px rgba(19, 196, 255, 0.35);
-    }
-    .stApp .stTextArea textarea,
-    .stApp .stSelectbox div[data-baseweb="select"] {
-        background: rgba(8, 30, 43, 0.68);
-        border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        color: #e9f2f9;
-    }
-    .stApp .stTextArea textarea:focus,
-    .stApp .stSelectbox div[data-baseweb="select"]:focus {
-        border-color: #13c4ff;
-        box-shadow: 0 0 0 2px rgba(19, 196, 255, 0.25);
-    }
-    .stApp .stMarkdown h2, .stApp .stMarkdown h3, .stApp .stMarkdown h4 {
-        color: #f2f9ff;
-    }
-    .stApp .stAlert {
-        border-radius: 12px;
-        background: rgba(8, 30, 43, 0.72);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-    }
-    .stApp .stDownloadButton button {
-        border-radius: 999px;
-        border: none;
-        background: linear-gradient(135deg, #1dd1a1, #10ac84);
-        color: #041017;
-        font-weight: 600;
-    }
-    .block-container {
-        padding-top: 2.5rem;
-        padding-left: 2.5rem;
-        padding-right: 2.5rem;
-        max-width: 100%;
-    }
-    .config-panel {
-        border: 1px solid rgba(255, 255, 255, 0.25);
-        border-radius: 12px;
-        padding: 0.75rem 0.9rem;
-        margin-bottom: 1rem;
-        background: rgba(7, 24, 34, 0.6);
-        font-size: 0.9rem;
-        line-height: 1.4rem;
-        color: rgba(233, 242, 249, 0.85);
-    }
-    .config-panel .label {
-        font-weight: 600;
-        color: #8fd3ff;
-    }
-    .result-markdown {
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-        color: #f2f7ff;
-    }
-    .result-markdown h3,
-    .result-markdown h4 {
-        margin: 0;
-        font-weight: 600;
-        letter-spacing: 0.01em;
-        color: #b9e0ff;
-    }
-    .result-markdown h3 {
-        font-size: 1.05rem;
-    }
-    .result-markdown h4 {
-        font-size: 0.95rem;
-        color: #9ed4ff;
-    }
-    .result-markdown p,
-    .result-markdown li {
-        font-size: 0.95rem;
-        line-height: 1.55rem;
-        color: #f2f7ff;
-    }
-    .result-markdown .summary-grid {
-        margin-top: 0.55rem;
-        display: grid;
-        grid-template-columns: auto 1fr;
-        row-gap: 0.35rem;
-        column-gap: 0.75rem;
-    }
-    .result-markdown .summary-row dt {
-        font-weight: 600;
-        color: #7acbff;
-    }
-    .result-markdown .summary-row dd {
-        margin: 0;
-        color: #f2f7ff;
-    }
-    .result-markdown .refinement-list {
-        margin: 0.5rem 0 0;
-        padding-left: 1.2rem;
-        color: #f2f7ff;
-    }
-    .result-markdown .ref-label {
-        font-weight: 600;
-        color: #8dd2ff;
-    }
-    .result-markdown .sources-list {
-        font-size: 0.95rem;
-        line-height: 1.4rem;
-        color: #ddeeff;
-        margin: 0;
-        padding-left: 1.2rem;
-    }
-    .result-markdown .sources-list li {
-        margin-bottom: 0.35rem;
-    }
-    .result-markdown .answer-body {
-        font-size: 0.95rem;
-        line-height: 1.6rem;
-        background: rgba(4, 16, 24, 0.85);
-        border: 1px solid rgba(148, 226, 255, 0.18);
-        border-radius: 16px;
-        padding: 1.1rem 1.2rem;
-        color: #f6fbff;
-    }
-    .result-markdown .answer-body * {
-        color: inherit;
-    }
-    .result-markdown .source-location {
-        font-size: 12px;
-        opacity: 0.82;
-        color: #c5daff;
-    }
-    .result-markdown .confidence-note {
-        font-size: 0.9rem;
-        opacity: 0.75;
-        font-style: italic;
-        color: #f2f7ff;
-    }
-    .result-markdown .empty-sources {
-        opacity: 0.75;
-        color: #d5e9ff;
-    }
-    .sidebar-panel {
-        font-size: 0.85rem;
-        line-height: 1.25rem;
-        color: rgba(233, 242, 249, 0.78);
-        max-height: 280px;
-        overflow-y: auto;
-        padding-right: 0.35rem;
-    }
-    .sidebar-panel ul {
-        margin: 0;
-        padding-left: 1rem;
-    }
-    .sidebar-panel::-webkit-scrollbar {
-        width: 6px;
-    }
-    .sidebar-panel::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.28);
-        border-radius: 4px;
-    }
-    .sidebar-panel.docs {
-        max-height: 320px;
-    }
-    .sidebar-panel.docs .doc-type {
-        margin-bottom: 0.75rem;
-    }
-    .sidebar-panel.docs .doc-type h4 {
-        margin: 0 0 0.3rem;
-        font-size: 0.95rem;
-        color: rgba(143, 211, 255, 0.9);
-        letter-spacing: 0.02em;
-    }
-    .sidebar-panel.docs .doc-type li {
-        list-style: disc;
-        margin-bottom: 0.2rem;
-    }
-    .sidebar-panel.feedback {
-        max-height: 220px;
-        overflow-y: auto;
-        font-size: 0.82rem;
-        line-height: 1.15rem;
-        padding-right: 0.2rem;
-    }
-    .sidebar-panel.feedback *,
-    .sidebar-panel.feedback .stMarkdown p,
-    .sidebar-panel.feedback .stMarkdown li {
-        font-size: 0.82rem !important;
-        line-height: 1.2rem !important;
-    }
-    .sidebar-panel.feedback h3,
-    .sidebar-panel.feedback h4 {
-        font-size: 0.9rem !important;
-        margin-bottom: 0.35rem !important;
-    }
-</style>
-"""
 
 _GITHUBISH_CSS = """
 :root { color-scheme: dark; }
@@ -646,11 +234,6 @@ def compose_result_markdown(result: Dict) -> str:
     return "\n".join(parts)
 
 
-
-def apply_custom_theme() -> None:
-    st.markdown(_CUSTOM_THEME, unsafe_allow_html=True)
-
-
 def build_result_export_html(result: Dict, title: str = "RAG Query Result") -> str:
     """Generate an HTML export representation for a query result."""
     html_body = compose_result_markdown(result)
@@ -680,43 +263,45 @@ def save_result_as_html(result: Dict, output_file: str = "rag_result.html", titl
 
 
 def load_or_warn(app_state: AppState) -> None:
-    nodes, index = load_cached_nodes_and_index()
-    if nodes and index:
-        app_state.nodes = nodes
-        app_state.index = index
-        app_state.vector_retriever = None
-        app_state.bm25_retriever = None
-        app_state.ensure_retrievers()
-        app_state.ensure_manager().nodes = nodes
-        st.success(f"Loaded {len(nodes)} cached nodes.")
-    else:
-        st.warning("No cached index found. Rebuild to initialize.")
+    """DEPRECATED: Use app_state.ensure_index_loaded() instead."""
+    if not app_state.ensure_index_loaded():
+        st.warning("⚠️ No cached index found. Please build the index first.")
 
 
 def rebuild_index(app_state: AppState) -> None:
     with st.spinner("Building index from library (this may take several minutes)..."):
-        nodes, index = build_index_from_library()
-    app_state.nodes = nodes
-    app_state.index = index
-    app_state.vector_retriever = None
-    app_state.bm25_retriever = None
-    app_state.ensure_retrievers()
-    app_state.ensure_manager().nodes = nodes
-    st.success(f"Rebuilt index with {len(nodes)} chunks.")
+        try:
+            nodes, index = build_index_from_library()
+            app_state.nodes = nodes
+            app_state.index = index
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+            app_state.ensure_manager().nodes = nodes
+            st.success(f"✅ Rebuilt index with {len(nodes)} chunks.")
+            LOGGER.info("Index rebuilt successfully: %d nodes", len(nodes))
+        except Exception as exc:
+            LOGGER.exception("Failed to rebuild index")
+            st.error(f"❌ Failed to rebuild index: {exc}")
 
 
 def sync_library(app_state: AppState) -> None:
     manager = app_state.ensure_manager()
     manager.nodes = app_state.nodes
     with st.spinner("Syncing library..."):
-        changes = manager.sync_library(app_state.index)
-    st.success(
-        f"Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
-    )
-    app_state.nodes = manager.nodes
-    app_state.vector_retriever = None
-    app_state.bm25_retriever = None
-    app_state.ensure_retrievers()
+        try:
+            changes = manager.sync_library(app_state.index)
+            st.success(
+                f"✅ Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
+            )
+            app_state.nodes = manager.nodes
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+            LOGGER.info("Library synced: +%d, ~%d, -%d", len(changes.added), len(changes.modified), len(changes.deleted))
+        except Exception as exc:
+            LOGGER.exception("Failed to sync library")
+            st.error(f"❌ Failed to sync library: {exc}")
 
 
 def render_feedback_stats_panel(app_state: AppState) -> None:
@@ -758,235 +343,220 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
                 st.write(f"   User feedback: {item['correction'][:100]}")
 
 
-def render_chat_feedback_row(app_state: AppState, result: Dict, key_prefix: str) -> None:
-    """Render inline export + feedback controls for a chat response."""
-    st.markdown("<div class='chat-feedback-marker'></div>", unsafe_allow_html=True)
-    controls = st.columns(4, gap="small")
+def render_chat_message_with_feedback(app_state: AppState, result: Dict, message_index: int) -> None:
+    """Render a single assistant message with inline feedback controls."""
+    
+    # Extract key info
+    answer = result.get("answer", "No answer available.")
+    conf_pct = result.get("confidence_pct", 0)
+    conf_level = result.get("confidence_level", "N/A")
+    num_sources = result.get("num_sources", 0)
+    sources = result.get("sources", [])
+    confidence_note = result.get("confidence_note", "")
+    
+    # Render the answer
+    with st.chat_message("assistant"):
+        st.markdown(answer)
+        
+        # Confidence badge
+        confidence_color = {
+            "HIGH 🟢": "🟢",
+            "MEDIUM 🟡": "🟡", 
+            "LOW 🔴": "🔴"
+        }
+        badge_emoji = confidence_color.get(conf_level, "⚪")
+        st.caption(f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level}) • **Sources:** {num_sources}")
+        
+        # Expandable sources
+        if sources:
+            with st.expander("📚 View sources", expanded=False):
+                for idx, src in enumerate(sources[:5], 1):
+                    source_file = src.get("source", "Unknown")
+                    title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
+                    section = src.get("section", "Main document")
+                    st.markdown(f"**{idx}. {title}**")
+                    st.caption(f"└─ {section}")
+        
+        if confidence_note:
+            st.info(confidence_note)
+        
+        # Feedback buttons
+        cols = st.columns([1, 1, 1, 1, 8])
+        
+        # Export button
+        export_html = build_result_export_html(result)
+        file_name = f"query_result_{message_index}.html"
+        with cols[0]:
+            st.download_button(
+                "⬇️",
+                data=export_html,
+                file_name=file_name,
+                mime="text/html",
+                key=f"export_{message_index}",
+                help="Download as HTML"
+            )
+        
+        # Helpful button
+        with cols[1]:
+            if st.button("👍", key=f"helpful_{message_index}", help="Helpful"):
+                app_state.feedback_system.log_feedback(result, "helpful")
+                st.toast("✅ Feedback recorded", icon="👍")
+        
+        # Not helpful button
+        with cols[2]:
+            if st.button("👎", key=f"not_helpful_{message_index}", help="Not helpful"):
+                app_state.feedback_system.log_feedback(result, "not_helpful")
+                st.toast("📝 Feedback recorded", icon="👎")
+        
+        # Report issue button
+        correction_toggle_key = f"correction_toggle_{message_index}"
+        with cols[3]:
+            if st.button("⚠️", key=f"incorrect_{message_index}", help="Report issue"):
+                st.session_state[correction_toggle_key] = not st.session_state.get(correction_toggle_key, False)
+        
+        # Correction input (shown when toggled)
+        if st.session_state.get(correction_toggle_key, False):
+            correction = st.text_area(
+                "What was wrong? What should the answer be?",
+                key=f"correction_text_{message_index}",
+                placeholder="Describe the issue...",
+                height=100
+            )
+            if st.button("Submit correction", key=f"submit_correction_{message_index}"):
+                if correction.strip():
+                    app_state.feedback_system.log_feedback(result, "incorrect", correction.strip())
+                    st.toast("✅ Correction submitted", icon="⚠️")
+                    st.session_state[correction_toggle_key] = False
+                    st.session_state.pop(f"correction_text_{message_index}", None)
+                    _rerun_app()
+                else:
+                    st.warning("Please provide details before submitting.")
 
-    export_html = build_result_export_html(result)
-    file_name = f"query_result_{key_prefix}.html"
-    controls[0].download_button(
-        "⬇️",
-        data=export_html,
-        file_name=file_name,
-        mime="text/html",
-        key=f"export_{key_prefix}",
-        help="Download this response as an HTML file.",
-    )
-
-    if controls[1].button(
-        "👍",
-        key=f"helpful_{key_prefix}",
-        help="Mark this response as helpful.",
-    ):
-        app_state.feedback_system.log_feedback(result, "helpful")
-        st.success("Thanks! Feedback recorded.")
-
-    if controls[2].button(
-        "👎",
-        key=f"not_helpful_{key_prefix}",
-        help="Mark this response as not helpful.",
-    ):
-        app_state.feedback_system.log_feedback(result, "not_helpful")
-        st.info("Thanks! Feedback recorded.")
-
-    incorrect_key = f"incorrect_{key_prefix}"
-    correction_toggle_key = f"correction_toggle_{key_prefix}"
-    if controls[3].button(
-        "⚠️",
-        key=incorrect_key,
-        help="Report an issue and provide a correction.",
-    ):
-        st.session_state[correction_toggle_key] = not st.session_state.get(correction_toggle_key, False)
-
-    if st.session_state.get(correction_toggle_key, False):
-        st.markdown("<div class='chat-feedback-correction'>", unsafe_allow_html=True)
-        correction = st.text_area(
-            "What was wrong? What should the answer be?",
-            key=f"correction_text_{key_prefix}",
-            placeholder="Tell us what needs to be fixed...",
-            label_visibility="collapsed",
-        )
-        if st.button("Submit correction", key=f"submit_correction_{key_prefix}"):
-            if correction.strip():
-                app_state.feedback_system.log_feedback(result, "incorrect", correction.strip())
-                st.success("Thank you! Your correction has been recorded.")
-                st.session_state[correction_toggle_key] = False
-                st.session_state.pop(f"correction_text_{key_prefix}", None)
-            else:
-                st.warning("Please provide correction details before submitting.")
-        st.markdown("</div>", unsafe_allow_html=True)
 
 def render_app(
     app_state: AppState,
     *,
-    allow_library_controls: bool = True,
-    rerank_checkbox_disabled: bool = False,
+    read_only_mode: bool = False,
 ) -> None:
-    st.set_page_config(page_title="Maritime RAG Assistant", layout="wide")
-    apply_custom_theme()
-    st.title("Maritime RAG Assistant")
-    st.caption("Modular Streamlit interface powered by Gemini + LlamaIndex")
+    st.set_page_config(
+        page_title="Maritime RAG Assistant",
+        page_icon="⚓",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    st.title("⚓ Maritime RAG Assistant")
+    st.caption("Intelligent document search powered by Gemini + LlamaIndex")
 
-    paths = AppConfig.get().paths
-
-    if not hasattr(app_state, "ensure_history_loaded"):
-        app_state = AppState()
-        st.session_state["app_state"] = app_state
-
-    if "sidebar_loaded_cache" not in st.session_state:
-        load_or_warn(app_state)
-        st.session_state["sidebar_loaded_cache"] = True
-
+    # Ensure index is loaded
+    if not app_state.ensure_index_loaded():
+        st.error("⚠️ **No index found.** Please build the index first using the sidebar controls.")
+        if not read_only_mode:
+            if st.button("🔨 Build Index Now"):
+                rebuild_index(app_state)
+                _rerun_app()
+        st.stop()
+    
+    # Ensure retrievers are ready
+    if not app_state.is_ready_for_queries():
+        st.error("⚠️ **System not ready.** Retrievers failed to initialize.")
+        st.stop()
+    
+    # Load chat history
     app_state.ensure_history_loaded()
-
+    
+    # Session state defaults
     st.session_state.setdefault("retrieval_method", "hybrid")
     st.session_state.setdefault("rerank_enabled", cohere_client is not None)
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
 
-    top_container = st.sidebar.container()
-    with top_container:
-        st.markdown("<div class='sidebar-top'>", unsafe_allow_html=True)
-        if st.button("Start new chat", use_container_width=True):
-            st.session_state["__chat_reset_requested"] = True
-        with st.expander("Assistant options", expanded=True):
+    # Sidebar configuration (keeping your existing sidebar for now)
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        if st.button("🔄 Start new chat", use_container_width=True):
+            _reset_chat_state(app_state)
+            _rerun_app()
+        
+        with st.expander("🔍 Retrieval Options", expanded=True):
             retrieval_type = st.selectbox(
-                "Retrieval method",
+                "Method",
                 ["hybrid", "vector", "bm25"],
                 key="retrieval_method",
+                help="Hybrid combines vector and keyword search"
             )
-
+            
             rerank_available = cohere_client is not None
-            rerank_disabled = rerank_checkbox_disabled or not rerank_available
             rerank_option = st.checkbox(
-                "Enable reranking (Cohere)",
+                "Enable reranking",
                 key="rerank_enabled",
-                help="Re-rank top candidates with Cohere for improved relevance." if rerank_available else "Cohere key not configured.",
-                disabled=rerank_disabled,
+                disabled=not rerank_available,
+                help="Re-rank results with Cohere (requires API key)"
             )
-            if rerank_disabled:
-                rerank_option = False
-                st.session_state["rerank_enabled"] = False
-
-            fortify_option = st.checkbox("Fortify query with Gemini", key="fortify_option")
-            auto_refine_option = st.checkbox("Auto-refine low confidence queries", key="auto_refine_option")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    if st.session_state.pop("__chat_reset_requested", False):
-        _reset_chat_state(app_state)
-        _rerun_app()
-
-    scroll_container = st.sidebar.container()
-    with scroll_container:
-        st.markdown("<div class='sidebar-scroll'>", unsafe_allow_html=True)
-
-        with st.expander("Chat history", expanded=True):
-            history_entries = app_state.history_log
-            if history_entries:
-                items: List[str] = []
-                for result in reversed(history_entries):
-                    label = result.get("query", "Untitled query").strip() or "Untitled query"
-                    safe_label = label if len(label) <= 120 else f"{label[:117]}..."
-                    items.append(f"<li>{safe_label}</li>")
-                list_html = "<div class='chat-history-list'><ol>{}</ol></div>".format("".join(items))
-                st.markdown(list_html, unsafe_allow_html=True)
-            else:
-                st.caption("No queries yet.")
-
-            if st.button("Clear history", key="clear_history_button", use_container_width=True):
-                app_state.clear_history()
-
-        if allow_library_controls:
-            with st.expander("Library management", expanded=False):
-                button_kwargs = {"use_container_width": True}
-                if st.button("Load cache", **button_kwargs):
+            
+            fortify_option = st.checkbox(
+                "Fortify query",
+                key="fortify_option",
+                help="Enhance query with Gemini before searching"
+            )
+            
+            auto_refine_option = st.checkbox(
+                "Auto-refine queries",
+                key="auto_refine_option",
+                help="Automatically rephrase low-confidence queries"
+            )
+        
+        # Library management (only if not read-only)
+        if not read_only_mode:
+            with st.expander("📚 Library Management", expanded=False):
+                if st.button("📥 Load cache", use_container_width=True):
                     load_or_warn(app_state)
-                if st.button("Rebuild index", **button_kwargs):
+                if st.button("🔨 Rebuild index", use_container_width=True):
                     rebuild_index(app_state)
-                if st.button("Sync library", **button_kwargs):
+                if st.button("🔄 Sync library", use_container_width=True):
                     sync_library(app_state)
-
-            with st.expander("Customize paths", expanded=False):
-                docs_input = st.text_input("Documents directory", value=str(paths.docs_path))
-                chroma_input = st.text_input("Chroma directory", value=str(paths.chroma_path))
-                cache_input = st.text_input("Cache directory", value=str(paths.cache_dir))
-                if st.button("Apply paths", use_container_width=True):
-                    try:
-                        AppConfig.get().update_paths(Path(docs_input), Path(chroma_input), Path(cache_input))
-                        st.success("Paths updated. Reload or resync to apply changes.")
-                    except Exception as exc:  # pragma: no cover - defensive path
-                        st.error(f"Failed to update paths: {exc}")
-
-        grouped = app_state.documents_grouped_by_type()
-        with st.expander("Documents on file", expanded=False):
-            if grouped:
-                order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
-                heading_map = {
-                    "FORM": "Forms",
-                    "CHECKLIST": "Checklists",
-                    "PROCEDURE": "Procedures",
-                    "MANUAL": "Manuals",
-                    "POLICY": "Policies",
-                    "REGULATION": "Regulations",
-                }
-                sections = []
-                for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
-                    titles = grouped[doc_type]
-                    if not titles:
-                        continue
-                    heading = heading_map.get(doc_type, doc_type.title())
-                    items = "".join(f"<li>{title}</li>" for title in titles)
-                    sections.append(f"<div class='doc-type'><h4>{heading}</h4><ul>{items}</ul></div>")
-                docs_html = "".join(sections)
-                st.markdown(
-                    f"<div class='sidebar-panel docs'>{docs_html}</div>",
-                    unsafe_allow_html=True,
-                )
+        
+        # Chat history
+        with st.expander("💬 Chat History", expanded=False):
+            if app_state.query_history:
+                for idx, hist in enumerate(reversed(app_state.query_history), 1):
+                    query_preview = hist.get("query", "Untitled")[:50]
+                    st.caption(f"{idx}. {query_preview}...")
             else:
-                st.caption("No documents indexed yet.")
+                st.caption("No queries yet")
+            
+            if st.button("🗑️ Clear history", use_container_width=True):
+                app_state.clear_history()
+                _rerun_app()
 
-        with st.expander("Feedback stats", expanded=False):
-            st.markdown("<div class='sidebar-panel feedback'>", unsafe_allow_html=True)
-            render_feedback_stats_panel(app_state)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    main_col = st.container()
-
-    with main_col:
-        chat_placeholder = st.container()
-
-        def draw_chat_thread() -> None:
-            placeholder = chat_placeholder.empty()
-            with placeholder.container():
-                if app_state.query_history:
-                    st.markdown("<div class='chat-thread-anchor'></div>", unsafe_allow_html=True)
-                    for idx, result in enumerate(app_state.query_history):
-                        query_text = html.escape(result.get("query", "").strip() or "Untitled query")
-                        st.markdown(
-                            f"<div class='chat-message user'><div class='bubble'>{query_text}</div></div>",
-                            unsafe_allow_html=True,
-                        )
-                        assistant_body = compose_result_markdown(result)
-                        st.markdown(
-                            f"<div class='chat-message assistant'><div class='bubble'>{assistant_body}</div></div>",
-                            unsafe_allow_html=True,
-                        )
-                        render_chat_feedback_row(app_state, result, key_prefix=str(idx))
-                else:
-                    st.info("Ask a question to get started.")
-
-        draw_chat_thread()
-
-        user_prompt = st.chat_input("Ask about the maritime library...")
-        if user_prompt is not None:
-            trimmed = user_prompt.strip()
-            if not trimmed:
-                st.warning("Please enter a question first.")
-            else:
-                with st.spinner("Searching..."):
+    # Main chat interface
+    st.markdown("---")
+    
+    # Render chat history using native st.chat_message
+    for idx, result in enumerate(app_state.query_history):
+        # User message
+        with st.chat_message("user"):
+            st.markdown(result.get("query", "Untitled query"))
+        
+        # Assistant message with feedback
+        render_chat_message_with_feedback(app_state, result, idx)
+    
+    # Chat input
+    user_prompt = st.chat_input("Ask about the maritime library...")
+    
+    if user_prompt:
+        trimmed = user_prompt.strip()
+        if not trimmed:
+            st.warning("⚠️ Please enter a question.")
+        else:
+            # Show user message immediately
+            with st.chat_message("user"):
+                st.markdown(trimmed)
+            
+            # Process query with spinner
+            with st.chat_message("assistant"):
+                with st.spinner("🔍 Searching documents..."):
                     try:
                         result = query_with_confidence(
                             app_state,
@@ -997,26 +567,19 @@ def render_app(
                             rerank=rerank_option,
                         )
                         app_state.append_history(result)
-                        draw_chat_thread()
+                        LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
+                                   result.get("confidence_pct", 0), result.get("num_sources", 0))
+                        _rerun_app()
+                        
                     except Exception as exc:
-                        st.error(f"Search failed: {exc}")
-
-    if app_state.query_history:
-        app_state.last_result = app_state.query_history[-1]
-    else:
-        app_state.last_result = None
+                        LOGGER.exception("Query failed: %s", exc)
+                        st.error(f"❌ **Search failed:** {exc}")
+                        st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
 
 
 def render_viewer_app(app_state: AppState) -> None:
-    """Restricted UI for read-only testing of retrieval."""
-    hide_streamlit_branding()
-    if not app_state.nodes or not app_state.index:
-        load_or_warn(app_state)
-    render_app(
-        app_state,
-        allow_library_controls=False,
-        rerank_checkbox_disabled=False,
-    )
+    """Restricted UI for read-only querying (no database management)."""
+    render_app(app_state, read_only_mode=True)
 
 
 __all__ = [
@@ -1025,6 +588,3 @@ __all__ = [
     "render_app",
     "render_viewer_app",
 ]
-
-
-
