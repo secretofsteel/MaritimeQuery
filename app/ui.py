@@ -481,37 +481,44 @@ def render_app(
     st.set_page_config(
         page_title="Maritime RAG Assistant",
         page_icon="⚓",
-        layout="wide",
+        layout="centered",  # Changed from "wide" to enable max-width control
         initial_sidebar_state="expanded"
     )
     
     # Add custom CSS for centered chat layout (60% width, like Claude)
     st.markdown("""
     <style>
-    /* Center the main content area and limit to 60% width */
-    .main .block-container {
-        max-width: 60% !important;
-        padding-left: 20% !important;
-        padding-right: 20% !important;
+    /* Override Streamlit's default block-container styling */
+    section.main > div.block-container {
+        max-width: 800px !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+        margin: 0 auto !important;
     }
     
     /* Center and limit chat input width to match */
+    div[data-testid="stChatInput"] {
+        max-width: 800px !important;
+        margin: 0 auto !important;
+    }
+    
+    /* Fix floating input container if it exists */
     .stChatFloatingInputContainer {
-        max-width: 60% !important;
+        max-width: 800px !important;
         left: 50% !important;
         transform: translateX(-50%) !important;
     }
     
-    /* Ensure chat messages stay within the centered column */
-    .stChatMessage {
-        max-width: 100% !important;
+    /* Ensure chat messages stay within bounds */
+    div[data-testid="stChatMessageContainer"] {
+        max-width: 800px !important;
+        margin: 0 auto !important;
     }
     
-    /* Also center the title and caption */
-    .main h1, .main .stCaption {
-        max-width: 60%;
-        margin-left: auto;
-        margin-right: auto;
+    /* Center title and caption */
+    section.main h1,
+    section.main > div > div > div > p {
+        text-align: center;
     }
     </style>
     """, unsafe_allow_html=True)
