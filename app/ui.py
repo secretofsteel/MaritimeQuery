@@ -418,6 +418,20 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
             background: rgba(255, 255, 255, 0.1) !important;
             box-shadow: none !important;
         }
+        
+        /* FORCE horizontal layout on mobile - prevent stacking */
+        @media (max-width: 768px) {
+            div[data-testid="stHorizontalBlock"]:has(button[kind="secondary"]) {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: nowrap !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(button[kind="secondary"]) > div[data-testid="column"] {
+                flex: 0 0 auto !important;
+                width: auto !important;
+                min-width: auto !important;
+            }
+        }
         </style>
         """, unsafe_allow_html=True)
         
