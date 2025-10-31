@@ -16,7 +16,8 @@ from llama_index.retrievers.bm25 import BM25Retriever
 
 from .config import AppConfig
 from .feedback import FeedbackSystem
-from .indexing import IncrementalIndexManager
+from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
+from .logger import LOGGER
 
 
 @dataclass
@@ -32,15 +33,79 @@ class AppState:
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
+    _index_load_attempted: bool = False  # Track if we've tried loading
+
+    def ensure_index_loaded(self) -> bool:
+        """
+        Lazy-load the index if not already present.
+        
+        Returns:
+            True if index is ready (loaded or already present)
+            False if index could not be loaded
+        """
+        # Already loaded and ready
+        if self.nodes and self.index:
+            LOGGER.debug("Index already loaded: %d nodes", len(self.nodes))
+            return True
+        
+        # Already tried and failed, don't spam attempts
+        if self._index_load_attempted and not self.nodes:
+            LOGGER.debug("Index load previously failed, skipping retry")
+            return False
+        
+        # Mark that we're attempting to load
+        self._index_load_attempted = True
+        
+        LOGGER.info("Attempting to load cached index...")
+        try:
+            nodes, index = load_cached_nodes_and_index()
+            
+            if nodes and index:
+                self.nodes = nodes
+                self.index = index
+                # Force retriever recreation
+                self.vector_retriever = None
+                self.bm25_retriever = None
+                self.ensure_retrievers()
+                
+                # Update manager if it exists
+                if self.manager:
+                    self.manager.nodes = nodes
+                
+                LOGGER.info("Successfully loaded %d cached nodes", len(nodes))
+                return True
+            else:
+                LOGGER.warning("No cached index found. User must build index first.")
+                return False
+                
+        except Exception as exc:
+            LOGGER.exception("Failed to load cached index: %s", exc)
+            return False
 
     def ensure_retrievers(self) -> None:
         """Initialise retrievers if nodes and index are ready."""
         if not self.nodes or not self.index:
+            LOGGER.debug("Skipping retriever init: nodes=%s, index=%s", 
+                        bool(self.nodes), bool(self.index))
             return
+        
         if self.vector_retriever is None:
             self.vector_retriever = VectorIndexRetriever(index=self.index, similarity_top_k=40)
+            LOGGER.debug("Initialized vector retriever")
+            
         if self.bm25_retriever is None:
             self.bm25_retriever = BM25Retriever.from_defaults(nodes=self.nodes, similarity_top_k=40)
+            LOGGER.debug("Initialized BM25 retriever")
+
+    def is_ready_for_queries(self) -> bool:
+        """Check if the system is ready to handle queries."""
+        return (
+            self.nodes is not None 
+            and len(self.nodes) > 0
+            and self.index is not None
+            and self.vector_retriever is not None
+            and self.bm25_retriever is not None
+        )
 
     def ensure_manager(self) -> IncrementalIndexManager:
         """Provide an incremental manager bound to the current state."""
@@ -83,6 +148,7 @@ class AppState:
         """Clear the in-memory conversation without touching the persisted log."""
         self.query_history.clear()
         self.last_result = None
+        LOGGER.debug("Session reset: cleared query history")
 
     def _ensure_history_path(self) -> Path:
         if self.history_log_path is None:
@@ -105,6 +171,7 @@ class AppState:
                 if isinstance(record, dict):
                     self.history_log.append(record)
         self.history_loaded = True
+        LOGGER.debug("Loaded %d history entries", len(self.history_log))
 
     def append_history(self, result: Dict) -> None:
         self.ensure_history_loaded()
@@ -122,6 +189,7 @@ class AppState:
         if log_path.exists():
             log_path.unlink()
         self.history_loaded = True
+        LOGGER.info("History cleared")
 
 
 __all__ = ["AppState"]
