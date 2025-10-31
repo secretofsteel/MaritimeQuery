@@ -434,6 +434,21 @@ def render_app(app_state: AppState, *, allow_library_controls: bool = True, rera
             """, height=0) # height=0 hides the HTML component itself
 
 
+def render_viewer_app(app_state: AppState) -> None:
+    """Restricted UI for read-only testing of retrieval."""
+    # Apply theme and title
+    st.set_page_config(page_title="Maritime RAG Viewer", layout="wide")
+    apply_custom_theme()
+    st.title("Maritime RAG Viewer")
+    st.caption("Read-only mode for query testing.")
+
+    # Load cache if not already loaded
+    if not app_state.nodes or not app_state.index:
+        load_or_warn(app_state) # Assumes load_or_warn is accessible or defined similarly
+
+    # Call the main render_app function but restrict controls
+    render_app(app_state, allow_library_controls=False, rerank_checkbox_disabled=False)
+
 # --- CSS Definitions ---
 # (Keep your existing CSS definitions here)
 _DARK_THEME_CSS = """
