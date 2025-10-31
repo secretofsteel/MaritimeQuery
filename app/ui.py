@@ -51,121 +51,47 @@ def hide_streamlit_branding() -> None:
 
 _CUSTOM_THEME = """
 <style>
-    :root { color-scheme: dark; }
     .stApp {
         background: radial-gradient(circle at top, #0f3d58 0%, #07141d 45%, #03080c 100%);
         color: #e9f2f9;
     }
-    .stApp main .block-container {
-        max-width: 100%;
-        padding: 2.4rem 3rem 2.8rem;
-        display: flex;
-        flex-direction: column;
-        gap: 1.6rem;
-        min-height: 100vh;
+    .stApp [data-testid="stSidebar"] {
+        background: rgba(10, 26, 36, 0.85);
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+        width: 350px;
+        min-width: 350px;
+        max-width: 350px;
+        flex: 0 0 350px;
     }
-    .chat-header {
-        background: linear-gradient(135deg, rgba(10, 26, 36, 0.9), rgba(5, 16, 26, 0.9));
-        border: 1px solid rgba(148, 226, 255, 0.18);
-        border-radius: 22px;
-        padding: 1.4rem 1.8rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-        gap: 1.6rem;
-        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+    .stApp [data-testid="stSidebar"] section[data-testid="stSidebarContent"] {
+        width: 100%;
     }
-    .chat-header h1 {
-        margin: 0;
-        font-size: 1.8rem;
-        letter-spacing: 0.02em;
-        color: #f4fbff;
+    .stApp [data-testid="stSidebar"] .stButton {
+        width: 100%;
     }
-    .chat-header p {
-        margin: 0.35rem 0 0;
-        color: rgba(233, 242, 249, 0.75);
-        font-size: 0.95rem;
+    .stApp [data-testid="stSidebar"] .stButton>button {
+        width: 100%;
+        display: inline-flex;
+        justify-content: center;
     }
-    .chat-header .chat-tags {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        justify-content: flex-end;
-    }
-    .status-pill {
-        background: linear-gradient(135deg, #0a84ff, #13c4ff);
-        color: #fff;
-        padding: 0.35rem 0.75rem;
-        border-radius: 999px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        letter-spacing: 0.03em;
-        box-shadow: 0 12px 26px rgba(19, 196, 255, 0.35);
-    }
-    .status-pill.off {
-        background: rgba(8, 30, 43, 0.85);
-        color: rgba(233, 242, 249, 0.65);
-        border: 1px solid rgba(148, 226, 255, 0.22);
-        box-shadow: none;
-    }
-    .status-pill.muted {
-        background: rgba(12, 40, 56, 0.82);
-        color: rgba(233, 242, 249, 0.75);
-        border: 1px solid rgba(148, 226, 255, 0.16);
-        box-shadow: none;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type {
-        gap: 2.2rem !important;
-        align-items: stretch;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"] {
-        align-items: stretch;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child {
-        max-width: 360px;
-        flex: 0 0 360px !important;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child > div > div[data-testid="stVerticalBlock"] {
-        background: rgba(7, 24, 34, 0.9);
-        border: 1px solid rgba(148, 226, 255, 0.18);
-        border-radius: 24px;
-        box-shadow: 0 26px 60px rgba(0, 0, 0, 0.38);
-        padding: 1.5rem;
-        display: flex;
-        flex-direction: column;
-        gap: 1.2rem;
-        height: calc(100vh - 13rem);
+    .sidebar-top {
         position: sticky;
-        top: 8.4rem;
+        top: 0;
+        z-index: 5;
+        background: rgba(10, 26, 36, 0.95);
+        padding-bottom: 1rem;
     }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:first-child {
-        flex: 0 0 auto;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2) {
-        flex: 1 1 auto;
+    .sidebar-scroll {
+        max-height: calc(100vh - 5.2rem);
         overflow-y: auto;
-        padding-right: 0.4rem;
+        padding-right: 0.35rem;
     }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2)::-webkit-scrollbar {
+    .sidebar-scroll::-webkit-scrollbar {
         width: 6px;
     }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:first-child > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2)::-webkit-scrollbar-thumb {
+    .sidebar-scroll::-webkit-scrollbar-thumb {
         background: rgba(255, 255, 255, 0.28);
         border-radius: 4px;
-    }
-    .stApp .stExpander {
-        background: rgba(5, 18, 28, 0.9);
-        border: 1px solid rgba(148, 226, 255, 0.14);
-        border-radius: 16px;
-        box-shadow: none;
-    }
-    .stApp .stExpander > div {
-        background: transparent;
-    }
-    .stApp .stExpander .streamlit-expanderHeader {
-        color: #cde9ff;
-        font-weight: 600;
-        letter-spacing: 0.02em;
     }
     .chat-history-list {
         margin: 0.4rem 0 0;
@@ -173,8 +99,8 @@ _CUSTOM_THEME = """
         max-height: 260px;
         overflow-y: auto;
         border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 14px;
-        background: rgba(4, 16, 24, 0.7);
+        border-radius: 12px;
+        background: rgba(4, 16, 24, 0.65);
     }
     .chat-history-list ol {
         list-style: decimal;
@@ -195,130 +121,74 @@ _CUSTOM_THEME = """
         background: rgba(255, 255, 255, 0.24);
         border-radius: 4px;
     }
-    .panel-scroll {
-        font-size: 0.85rem;
-        line-height: 1.25rem;
-        color: rgba(233, 242, 249, 0.78);
-    }
-    .panel-scroll::-webkit-scrollbar {
-        width: 6px;
-    }
-    .panel-scroll::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.24);
-        border-radius: 4px;
-    }
-    .panel-scroll.docs {
-        max-height: 320px;
-        overflow-y: auto;
-        padding-right: 0.35rem;
-    }
-    .panel-scroll.docs .doc-type {
-        margin-bottom: 0.75rem;
-    }
-    .panel-scroll.docs .doc-type h4 {
-        margin: 0 0 0.3rem;
-        font-size: 0.95rem;
-        color: rgba(143, 211, 255, 0.9);
-        letter-spacing: 0.02em;
-    }
-    .panel-scroll.docs .doc-type li {
-        list-style: disc;
-        margin-bottom: 0.2rem;
-    }
-    .panel-scroll.feedback {
-        font-size: 0.82rem;
-        line-height: 1.15rem;
-        max-height: 220px;
-        overflow-y: auto;
-        padding-right: 0.2rem;
-    }
-    .panel-scroll.feedback *,
-    .panel-scroll.feedback .stMarkdown p,
-    .panel-scroll.feedback .stMarkdown li {
-        font-size: 0.82rem !important;
-        line-height: 1.2rem !important;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] {
-        background: rgba(6, 18, 28, 0.92);
-        border: 1px solid rgba(148, 226, 255, 0.14);
-        border-radius: 30px;
-        box-shadow: 0 30px 64px rgba(0, 0, 0, 0.45);
-        padding: 1.9rem 2.1rem;
-        display: flex;
-        flex-direction: column;
-        gap: 1.5rem;
-        height: calc(100vh - 13rem);
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:first-child {
-        flex: 0 0 auto;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2) {
-        flex: 1 1 auto;
-        overflow-y: auto;
-        padding-right: 0.5rem;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2)::-webkit-scrollbar {
-        width: 6px;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(2)::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.24);
-        border-radius: 4px;
-    }
-    .stApp main .block-container div[data-testid="stHorizontalBlock"]:first-of-type > div[data-testid="column"]:nth-child(2) > div > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"]:nth-child(3) {
-        flex: 0 0 auto;
-    }
     .chat-thread-anchor {
         display: none;
+    }
+    .stApp main .block-container {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
     }
     .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor) {
         display: flex;
         flex-direction: column;
-        gap: 1.4rem;
+        gap: 1.6rem;
+        margin-top: 1.5rem;
+        padding-bottom: 4rem;
+        height: calc(100vh - 15rem);
+        max-height: calc(100vh - 15rem);
+        overflow-y: auto;
+        padding-right: 0.35rem;
+    }
+    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar {
+        width: 6px;
+    }
+    .stApp div[data-testid="stVerticalBlock"]:has(> .chat-thread-anchor)::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.24);
+        border-radius: 4px;
     }
     .chat-message {
         display: flex;
         flex-direction: column;
         gap: 0.6rem;
-        max-width: min(780px, calc(100% - 120px));
+        max-width: min(780px, calc(100% - 140px));
     }
     .chat-message.user {
         align-self: flex-end;
         text-align: left;
     }
     .chat-message.assistant {
-        align-self: stretch;
+        align-self: flex-start;
     }
     .chat-message .bubble {
-        border-radius: 24px;
-        padding: 1rem 1.35rem;
-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+        border-radius: 22px;
+        padding: 1rem 1.3rem;
+        box-shadow: 0 12px 35px rgba(0, 0, 0, 0.25);
         line-height: 1.55rem;
     }
     .chat-message.user .bubble {
         background: linear-gradient(135deg, #0a84ff, #13c4ff);
         color: #fff;
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        margin-left: 8rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
     }
     .chat-message.assistant .bubble {
-        background: rgba(4, 16, 24, 0.78);
-        border: 1px solid rgba(148, 226, 255, 0.22);
+        background: rgba(7, 24, 34, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.08);
         color: #e9f2f9;
-        margin-right: 2rem;
     }
     .chat-message.assistant .bubble .result-markdown {
         background: transparent;
         padding: 0;
     }
     .chat-message.assistant .bubble .result-markdown .sources-list {
-        font-size: 0.82rem;
+        font-size: 0.78rem;
     }
     .chat-feedback-marker {
         display: none;
     }
     .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) {
-        gap: 0.45rem;
-        margin-top: 0.45rem;
+        gap: 0.35rem;
+        margin-top: 0.35rem;
         justify-content: flex-end;
         align-items: center;
         align-self: flex-end;
@@ -333,13 +203,13 @@ _CUSTOM_THEME = """
     }
     .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) button,
     .stApp div[data-testid="stHorizontalBlock"]:has(.chat-feedback-marker) .stDownloadButton button {
-        width: 2.5rem;
-        height: 2.5rem;
+        width: 2.4rem;
+        height: 2.4rem;
         border-radius: 999px;
         border: 1px solid rgba(233, 242, 249, 0.18);
-        background: rgba(5, 18, 28, 0.85);
-        color: rgba(233, 242, 249, 0.9);
-        font-size: 1.1rem;
+        background: transparent;
+        color: rgba(233, 242, 249, 0.85);
+        font-size: 1.15rem;
         padding: 0;
         display: inline-flex;
         align-items: center;
@@ -355,14 +225,14 @@ _CUSTOM_THEME = """
     }
     .chat-feedback-correction {
         margin-top: 0.75rem;
-        background: rgba(4, 16, 24, 0.82);
+        background: rgba(4, 16, 24, 0.75);
         border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 0.95rem;
+        border-radius: 14px;
+        padding: 0.9rem;
     }
     .chat-feedback-correction textarea {
         background: rgba(8, 30, 43, 0.78) !important;
-        border-radius: 12px !important;
+        border-radius: 10px !important;
         border: 1px solid rgba(255, 255, 255, 0.12) !important;
         color: #e9f2f9 !important;
         font-size: 0.9rem !important;
@@ -393,7 +263,7 @@ _CUSTOM_THEME = """
     .stApp .stSelectbox div[data-baseweb="select"] {
         background: rgba(8, 30, 43, 0.68);
         border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.08);
         color: #e9f2f9;
     }
     .stApp .stTextArea textarea:focus,
@@ -401,31 +271,7 @@ _CUSTOM_THEME = """
         border-color: #13c4ff;
         box-shadow: 0 0 0 2px rgba(19, 196, 255, 0.25);
     }
-    .stApp [data-testid="stChatInput"] textarea {
-        background: rgba(8, 30, 43, 0.82);
-        border-radius: 14px;
-        border: 1px solid rgba(148, 226, 255, 0.24);
-        color: #e9f2f9;
-        font-size: 0.95rem;
-    }
-    .stApp [data-testid="stChatInput"] textarea:focus {
-        border-color: #0a84ff;
-        box-shadow: 0 0 0 2px rgba(19, 196, 255, 0.3);
-    }
-    .stApp [data-testid="stChatInput"] button {
-        border-radius: 999px;
-        border: none;
-        background: linear-gradient(135deg, #1dd1a1, #10ac84);
-        color: #041017;
-        font-weight: 700;
-        padding: 0.4rem 1.2rem;
-    }
-    .stApp [data-testid="stChatInput"] button:hover {
-        box-shadow: 0 0 16px rgba(29, 209, 161, 0.35);
-    }
-    .stApp .stMarkdown h2,
-    .stApp .stMarkdown h3,
-    .stApp .stMarkdown h4 {
+    .stApp .stMarkdown h2, .stApp .stMarkdown h3, .stApp .stMarkdown h4 {
         color: #f2f9ff;
     }
     .stApp .stAlert {
@@ -440,10 +286,30 @@ _CUSTOM_THEME = """
         color: #041017;
         font-weight: 600;
     }
+    .block-container {
+        padding-top: 2.5rem;
+        padding-left: 2.5rem;
+        padding-right: 2.5rem;
+        max-width: 100%;
+    }
+    .config-panel {
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        border-radius: 12px;
+        padding: 0.75rem 0.9rem;
+        margin-bottom: 1rem;
+        background: rgba(7, 24, 34, 0.6);
+        font-size: 0.9rem;
+        line-height: 1.4rem;
+        color: rgba(233, 242, 249, 0.85);
+    }
+    .config-panel .label {
+        font-weight: 600;
+        color: #8fd3ff;
+    }
     .result-markdown {
         display: flex;
         flex-direction: column;
-        gap: 1.1rem;
+        gap: 1rem;
         color: #f2f7ff;
     }
     .result-markdown h3,
@@ -490,18 +356,6 @@ _CUSTOM_THEME = """
         font-weight: 600;
         color: #8dd2ff;
     }
-    .result-markdown .answer-body {
-        font-size: 0.95rem;
-        line-height: 1.6rem;
-        background: rgba(4, 16, 24, 0.85);
-        border: 1px solid rgba(148, 226, 255, 0.18);
-        border-radius: 18px;
-        padding: 1.1rem 1.2rem;
-        color: #f6fbff;
-    }
-    .result-markdown .answer-body * {
-        color: inherit;
-    }
     .result-markdown .sources-list {
         font-size: 0.95rem;
         line-height: 1.4rem;
@@ -511,6 +365,18 @@ _CUSTOM_THEME = """
     }
     .result-markdown .sources-list li {
         margin-bottom: 0.35rem;
+    }
+    .result-markdown .answer-body {
+        font-size: 0.95rem;
+        line-height: 1.6rem;
+        background: rgba(4, 16, 24, 0.85);
+        border: 1px solid rgba(148, 226, 255, 0.18);
+        border-radius: 16px;
+        padding: 1.1rem 1.2rem;
+        color: #f6fbff;
+    }
+    .result-markdown .answer-body * {
+        color: inherit;
     }
     .result-markdown .source-location {
         font-size: 12px;
@@ -527,24 +393,58 @@ _CUSTOM_THEME = """
         opacity: 0.75;
         color: #d5e9ff;
     }
-    .result-sources details {
-        background: rgba(5, 18, 28, 0.78);
-        border: 1px solid rgba(148, 226, 255, 0.2);
-        border-radius: 16px;
-        padding: 0.8rem 1rem;
+    .sidebar-panel {
+        font-size: 0.85rem;
+        line-height: 1.25rem;
+        color: rgba(233, 242, 249, 0.78);
+        max-height: 280px;
+        overflow-y: auto;
+        padding-right: 0.35rem;
     }
-    .result-sources details summary {
-        cursor: pointer;
-        list-style: none;
-        font-weight: 600;
-        color: #9ed4ff;
+    .sidebar-panel ul {
+        margin: 0;
+        padding-left: 1rem;
+    }
+    .sidebar-panel::-webkit-scrollbar {
+        width: 6px;
+    }
+    .sidebar-panel::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.28);
+        border-radius: 4px;
+    }
+    .sidebar-panel.docs {
+        max-height: 320px;
+    }
+    .sidebar-panel.docs .doc-type {
+        margin-bottom: 0.75rem;
+    }
+    .sidebar-panel.docs .doc-type h4 {
+        margin: 0 0 0.3rem;
         font-size: 0.95rem;
+        color: rgba(143, 211, 255, 0.9);
+        letter-spacing: 0.02em;
     }
-    .result-sources details summary::-webkit-details-marker {
-        display: none;
+    .sidebar-panel.docs .doc-type li {
+        list-style: disc;
+        margin-bottom: 0.2rem;
     }
-    .result-sources details[open] summary {
-        color: #c3e7ff;
+    .sidebar-panel.feedback {
+        max-height: 220px;
+        overflow-y: auto;
+        font-size: 0.82rem;
+        line-height: 1.15rem;
+        padding-right: 0.2rem;
+    }
+    .sidebar-panel.feedback *,
+    .sidebar-panel.feedback .stMarkdown p,
+    .sidebar-panel.feedback .stMarkdown li {
+        font-size: 0.82rem !important;
+        line-height: 1.2rem !important;
+    }
+    .sidebar-panel.feedback h3,
+    .sidebar-panel.feedback h4 {
+        font-size: 0.9rem !important;
+        margin-bottom: 0.35rem !important;
     }
 </style>
 """
@@ -681,8 +581,7 @@ def compose_result_markdown(result: Dict) -> str:
     parts.append("</section>")
 
     parts.append("<section class='result-sources'>")
-    parts.append("<details class='sources-details' open>")
-    parts.append("<summary>Sources</summary>")
+    parts.append("<h4>Sources</h4>")
     if sources:
         type_labels = {
             "PROC": "PROCEDURE",
@@ -738,7 +637,6 @@ def compose_result_markdown(result: Dict) -> str:
         parts.append("</ol>")
     else:
         parts.append("<p class='empty-sources'><em>No sources available.</em></p>")
-    parts.append("</details>")
     parts.append("</section>")
 
     if confidence_note:
@@ -927,6 +825,8 @@ def render_app(
 ) -> None:
     st.set_page_config(page_title="Maritime RAG Assistant", layout="wide")
     apply_custom_theme()
+    st.title("Maritime RAG Assistant")
+    st.caption("Modular Streamlit interface powered by Gemini + LlamaIndex")
 
     paths = AppConfig.get().paths
 
@@ -945,204 +845,161 @@ def render_app(
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
 
-    retrieval_type = st.session_state["retrieval_method"]
-    rerank_option = st.session_state["rerank_enabled"]
-    fortify_option = st.session_state["fortify_option"]
-    auto_refine_option = st.session_state["auto_refine_option"]
+    top_container = st.sidebar.container()
+    with top_container:
+        st.markdown("<div class='sidebar-top'>", unsafe_allow_html=True)
+        if st.button("Start new chat", use_container_width=True):
+            st.session_state["__chat_reset_requested"] = True
+        with st.expander("Assistant options", expanded=True):
+            retrieval_type = st.selectbox(
+                "Retrieval method",
+                ["hybrid", "vector", "bm25"],
+                key="retrieval_method",
+            )
 
-    layout_block = st.container()
-    with layout_block:
-        control_col, chat_col = st.columns([0.38, 0.62], gap="large")
+            rerank_available = cohere_client is not None
+            rerank_disabled = rerank_checkbox_disabled or not rerank_available
+            rerank_option = st.checkbox(
+                "Enable reranking (Cohere)",
+                key="rerank_enabled",
+                help="Re-rank top candidates with Cohere for improved relevance." if rerank_available else "Cohere key not configured.",
+                disabled=rerank_disabled,
+            )
+            if rerank_disabled:
+                rerank_option = False
+                st.session_state["rerank_enabled"] = False
 
-        with control_col:
-            panel_wrapper = st.container()
-            with panel_wrapper:
-                top_panel = st.container()
-                with top_panel:
-                    if st.button("Start new chat", use_container_width=True):
-                        st.session_state["__chat_reset_requested"] = True
-                    with st.expander("Assistant options", expanded=True):
-                        retrieval_type = st.selectbox(
-                            "Retrieval method",
-                            ["hybrid", "vector", "bm25"],
-                            key="retrieval_method",
+            fortify_option = st.checkbox("Fortify query with Gemini", key="fortify_option")
+            auto_refine_option = st.checkbox("Auto-refine low confidence queries", key="auto_refine_option")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.pop("__chat_reset_requested", False):
+        _reset_chat_state(app_state)
+        _rerun_app()
+
+    scroll_container = st.sidebar.container()
+    with scroll_container:
+        st.markdown("<div class='sidebar-scroll'>", unsafe_allow_html=True)
+
+        with st.expander("Chat history", expanded=True):
+            history_entries = app_state.history_log
+            if history_entries:
+                items: List[str] = []
+                for result in reversed(history_entries):
+                    label = result.get("query", "Untitled query").strip() or "Untitled query"
+                    safe_label = label if len(label) <= 120 else f"{label[:117]}..."
+                    items.append(f"<li>{safe_label}</li>")
+                list_html = "<div class='chat-history-list'><ol>{}</ol></div>".format("".join(items))
+                st.markdown(list_html, unsafe_allow_html=True)
+            else:
+                st.caption("No queries yet.")
+
+            if st.button("Clear history", key="clear_history_button", use_container_width=True):
+                app_state.clear_history()
+
+        if allow_library_controls:
+            with st.expander("Library management", expanded=False):
+                button_kwargs = {"use_container_width": True}
+                if st.button("Load cache", **button_kwargs):
+                    load_or_warn(app_state)
+                if st.button("Rebuild index", **button_kwargs):
+                    rebuild_index(app_state)
+                if st.button("Sync library", **button_kwargs):
+                    sync_library(app_state)
+
+            with st.expander("Customize paths", expanded=False):
+                docs_input = st.text_input("Documents directory", value=str(paths.docs_path))
+                chroma_input = st.text_input("Chroma directory", value=str(paths.chroma_path))
+                cache_input = st.text_input("Cache directory", value=str(paths.cache_dir))
+                if st.button("Apply paths", use_container_width=True):
+                    try:
+                        AppConfig.get().update_paths(Path(docs_input), Path(chroma_input), Path(cache_input))
+                        st.success("Paths updated. Reload or resync to apply changes.")
+                    except Exception as exc:  # pragma: no cover - defensive path
+                        st.error(f"Failed to update paths: {exc}")
+
+        grouped = app_state.documents_grouped_by_type()
+        with st.expander("Documents on file", expanded=False):
+            if grouped:
+                order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
+                heading_map = {
+                    "FORM": "Forms",
+                    "CHECKLIST": "Checklists",
+                    "PROCEDURE": "Procedures",
+                    "MANUAL": "Manuals",
+                    "POLICY": "Policies",
+                    "REGULATION": "Regulations",
+                }
+                sections = []
+                for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
+                    titles = grouped[doc_type]
+                    if not titles:
+                        continue
+                    heading = heading_map.get(doc_type, doc_type.title())
+                    items = "".join(f"<li>{title}</li>" for title in titles)
+                    sections.append(f"<div class='doc-type'><h4>{heading}</h4><ul>{items}</ul></div>")
+                docs_html = "".join(sections)
+                st.markdown(
+                    f"<div class='sidebar-panel docs'>{docs_html}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption("No documents indexed yet.")
+
+        with st.expander("Feedback stats", expanded=False):
+            st.markdown("<div class='sidebar-panel feedback'>", unsafe_allow_html=True)
+            render_feedback_stats_panel(app_state)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    main_col = st.container()
+
+    with main_col:
+        chat_placeholder = st.container()
+
+        def draw_chat_thread() -> None:
+            placeholder = chat_placeholder.empty()
+            with placeholder.container():
+                if app_state.query_history:
+                    st.markdown("<div class='chat-thread-anchor'></div>", unsafe_allow_html=True)
+                    for idx, result in enumerate(app_state.query_history):
+                        query_text = html.escape(result.get("query", "").strip() or "Untitled query")
+                        st.markdown(
+                            f"<div class='chat-message user'><div class='bubble'>{query_text}</div></div>",
+                            unsafe_allow_html=True,
                         )
-
-                        rerank_available = cohere_client is not None
-                        rerank_disabled = rerank_checkbox_disabled or not rerank_available
-                        rerank_option = st.checkbox(
-                            "Enable reranking (Cohere)",
-                            key="rerank_enabled",
-                            help="Re-rank top candidates with Cohere for improved relevance."
-                            if rerank_available
-                            else "Cohere key not configured.",
-                            disabled=rerank_disabled,
+                        assistant_body = compose_result_markdown(result)
+                        st.markdown(
+                            f"<div class='chat-message assistant'><div class='bubble'>{assistant_body}</div></div>",
+                            unsafe_allow_html=True,
                         )
-                        if rerank_disabled:
-                            rerank_option = False
-                            st.session_state["rerank_enabled"] = False
+                        render_chat_feedback_row(app_state, result, key_prefix=str(idx))
+                else:
+                    st.info("Ask a question to get started.")
 
-                        fortify_option = st.checkbox(
-                            "Fortify query with Gemini",
-                            key="fortify_option",
+        draw_chat_thread()
+
+        user_prompt = st.chat_input("Ask about the maritime library...")
+        if user_prompt is not None:
+            trimmed = user_prompt.strip()
+            if not trimmed:
+                st.warning("Please enter a question first.")
+            else:
+                with st.spinner("Searching..."):
+                    try:
+                        result = query_with_confidence(
+                            app_state,
+                            trimmed,
+                            retriever_type=retrieval_type,
+                            auto_refine=auto_refine_option,
+                            fortify=fortify_option,
+                            rerank=rerank_option,
                         )
-                        auto_refine_option = st.checkbox(
-                            "Auto-refine low confidence queries",
-                            key="auto_refine_option",
-                        )
-
-                scroll_panel = st.container()
-                with scroll_panel:
-                    with st.expander("Chat history", expanded=True):
-                        history_entries = app_state.history_log
-                        if history_entries:
-                            items: List[str] = []
-                            for result in reversed(history_entries):
-                                label = result.get("query", "Untitled query").strip() or "Untitled query"
-                                safe_label = label if len(label) <= 120 else f"{label[:117]}..."
-                                items.append(f"<li>{safe_label}</li>")
-                            list_html = "<div class='chat-history-list'><ol>{}</ol></div>".format("".join(items))
-                            st.markdown(list_html, unsafe_allow_html=True)
-                        else:
-                            st.caption("No queries yet.")
-
-                        if st.button("Clear history", key="clear_history_button", use_container_width=True):
-                            app_state.clear_history()
-
-                    if allow_library_controls:
-                        with st.expander("Library management", expanded=False):
-                            button_kwargs = {"use_container_width": True}
-                            if st.button("Load cache", **button_kwargs):
-                                load_or_warn(app_state)
-                            if st.button("Rebuild index", **button_kwargs):
-                                rebuild_index(app_state)
-                            if st.button("Sync library", **button_kwargs):
-                                sync_library(app_state)
-
-                        with st.expander("Customize paths", expanded=False):
-                            docs_input = st.text_input("Documents directory", value=str(paths.docs_path))
-                            chroma_input = st.text_input("Chroma directory", value=str(paths.chroma_path))
-                            cache_input = st.text_input("Cache directory", value=str(paths.cache_dir))
-                            if st.button("Apply paths", use_container_width=True):
-                                try:
-                                    AppConfig.get().update_paths(Path(docs_input), Path(chroma_input), Path(cache_input))
-                                    st.success("Paths updated. Reload or resync to apply changes.")
-                                except Exception as exc:  # pragma: no cover - defensive path
-                                    st.error(f"Failed to update paths: {exc}")
-
-                    grouped = app_state.documents_grouped_by_type()
-                    with st.expander("Documents on file", expanded=False):
-                        if grouped:
-                            order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
-                            heading_map = {
-                                "FORM": "Forms",
-                                "CHECKLIST": "Checklists",
-                                "PROCEDURE": "Procedures",
-                                "MANUAL": "Manuals",
-                                "POLICY": "Policies",
-                                "REGULATION": "Regulations",
-                            }
-                            sections = []
-                            for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
-                                titles = grouped[doc_type]
-                                if not titles:
-                                    continue
-                                heading = heading_map.get(doc_type, doc_type.title())
-                                items = "".join(f"<li>{title}</li>" for title in titles)
-                                sections.append(f"<div class='doc-type'><h4>{heading}</h4><ul>{items}</ul></div>")
-                            docs_html = "".join(sections)
-                            st.markdown(
-                                f"<div class='panel-scroll docs'>{docs_html}</div>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.caption("No documents indexed yet.")
-
-                    with st.expander("Feedback stats", expanded=False):
-                        st.markdown("<div class='panel-scroll feedback'>", unsafe_allow_html=True)
-                        render_feedback_stats_panel(app_state)
-                        st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.session_state.pop("__chat_reset_requested", False):
-            _reset_chat_state(app_state)
-            _rerun_app()
-
-        with chat_col:
-            chat_wrapper = st.container()
-            with chat_wrapper:
-                header_section = st.container()
-                body_section = st.container()
-                input_section = st.container()
-
-                with header_section:
-                    retrieval_label = retrieval_type.title()
-                    rerank_class = "status-pill" if rerank_option else "status-pill off"
-                    fortify_class = "status-pill" if fortify_option else "status-pill muted"
-                    refine_class = "status-pill" if auto_refine_option else "status-pill muted"
-                    st.markdown(
-                        f"""
-                        <div class="chat-header">
-                            <div>
-                                <h1>Maritime RAG Assistant</h1>
-                                <p>Modular Streamlit interface powered by Gemini + LlamaIndex</p>
-                            </div>
-                            <div class="chat-tags">
-                                <span class="status-pill">{retrieval_label} retrieval</span>
-                                <span class="{rerank_class}">Rerank {'on' if rerank_option else 'off'}</span>
-                                <span class="{fortify_class}">Fortify {'on' if fortify_option else 'off'}</span>
-                                <span class="{refine_class}">Auto refine {'on' if auto_refine_option else 'off'}</span>
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                with body_section:
-                    chat_placeholder = st.container()
-
-                def draw_chat_thread() -> None:
-                    placeholder = chat_placeholder.empty()
-                    with placeholder.container():
-                        if app_state.query_history:
-                            st.markdown("<div class='chat-thread-anchor'></div>", unsafe_allow_html=True)
-                            for idx, result in enumerate(app_state.query_history):
-                                query_text = html.escape(result.get("query", "").strip() or "Untitled query")
-                                st.markdown(
-                                    f"<div class='chat-message user'><div class='bubble'>{query_text}</div></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                assistant_body = compose_result_markdown(result)
-                                st.markdown(
-                                    f"<div class='chat-message assistant'><div class='bubble'>{assistant_body}</div></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                render_chat_feedback_row(app_state, result, key_prefix=str(idx))
-                        else:
-                            st.info("Ask a question to get started.")
-
-                draw_chat_thread()
-
-                with input_section:
-                    user_prompt = st.chat_input("Ask about the maritime library...")
-                    if user_prompt is not None:
-                        trimmed = user_prompt.strip()
-                        if not trimmed:
-                            st.warning("Please enter a question first.")
-                        else:
-                            with st.spinner("Searching..."):
-                                try:
-                                    result = query_with_confidence(
-                                        app_state,
-                                        trimmed,
-                                        retriever_type=retrieval_type,
-                                        auto_refine=auto_refine_option,
-                                        fortify=fortify_option,
-                                        rerank=rerank_option,
-                                    )
-                                    app_state.append_history(result)
-                                    draw_chat_thread()
-                                except Exception as exc:
-                                    st.error(f"Search failed: {exc}")
+                        app_state.append_history(result)
+                        draw_chat_thread()
+                    except Exception as exc:
+                        st.error(f"Search failed: {exc}")
 
     if app_state.query_history:
         app_state.last_result = app_state.query_history[-1]
