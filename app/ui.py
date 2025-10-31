@@ -554,96 +554,78 @@ def render_app(
         # Custom CSS for sticky header and scrollable sections
         st.markdown("""
         <style>
-        /* Make sidebar content container use flexbox */
-        section[data-testid="stSidebar"] > div {
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
+        /* Restore button styling for sidebar buttons (not feedback buttons) */
+        section[data-testid="stSidebar"] button[kind="primary"],
+        section[data-testid="stSidebar"] button[kind="secondary"] {
+            border: 1px solid rgba(255, 255, 255, 0.2) !important;
+            background: rgba(10, 132, 255, 0.1) !important;
+            box-shadow: none !important;
+            padding: 0.5rem 1rem !important;
         }
         
-        /* Sticky header - fixed at top */
-        .sidebar-sticky-header {
-            flex-shrink: 0;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            background: var(--background-color);
-            position: sticky;
-            top: 0;
-            z-index: 999;
+        section[data-testid="stSidebar"] button[kind="primary"]:hover,
+        section[data-testid="stSidebar"] button[kind="secondary"]:hover {
+            background: rgba(10, 132, 255, 0.2) !important;
+            border-color: rgba(10, 132, 255, 0.5) !important;
         }
         
-        /* Scrollable container */
-        .sidebar-scrollable {
-            flex-grow: 1;
-            overflow-y: auto;
-            overflow-x: hidden;
-            padding-top: 1rem;
-            padding-right: 0.5rem;
+        /* Limit documents expander content height with internal scroll */
+        section[data-testid="stSidebar"] div[data-testid="stExpander"]:has(div:contains("Documents on file")) div[data-testid="stExpanderDetails"] {
+            max-height: 300px !important;
+            overflow-y: auto !important;
         }
         
-        /* Custom scrollbar */
-        .sidebar-scrollable::-webkit-scrollbar {
+        /* Custom scrollbar for documents list */
+        section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stExpanderDetails"]::-webkit-scrollbar {
             width: 6px;
         }
         
-        .sidebar-scrollable::-webkit-scrollbar-thumb {
+        section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stExpanderDetails"]::-webkit-scrollbar-thumb {
             background: rgba(255, 255, 255, 0.3);
             border-radius: 3px;
-        }
-        
-        .sidebar-scrollable::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.5);
-        }
-        
-        /* Limit documents expander content height */
-        .sidebar-scrollable div[data-testid="stExpander"] > div > div {
-            max-height: 300px;
-            overflow-y: auto;
         }
         </style>
         """, unsafe_allow_html=True)
         
-        # STICKY HEADER - wrapped in a container
-        st.markdown("<div class='sidebar-sticky-header'>", unsafe_allow_html=True)
-        
         st.header("⚙️ Settings")
         
-        if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn"):
-            _reset_chat_state(app_state)
-            _rerun_app()
+        # Use container to try to keep this section visible
+        sticky_container = st.container()
         
-        with st.expander("🔍 Retrieval Options", expanded=True):
-            retrieval_type = st.selectbox(
-                "Method",
-                ["hybrid", "vector", "bm25"],
-                key="retrieval_method",
-                help="Hybrid combines vector and keyword search"
-            )
+        with sticky_container:
+            if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
+                _reset_chat_state(app_state)
+                _rerun_app()
             
-            rerank_available = cohere_client is not None
-            rerank_option = st.checkbox(
-                "Enable reranking",
-                key="rerank_enabled",
-                disabled=not rerank_available,
-                help="Re-rank results with Cohere (requires API key)"
-            )
+            with st.expander("🔍 Retrieval Options", expanded=True):
+                retrieval_type = st.selectbox(
+                    "Method",
+                    ["hybrid", "vector", "bm25"],
+                    key="retrieval_method",
+                    help="Hybrid combines vector and keyword search"
+                )
+                
+                rerank_available = cohere_client is not None
+                rerank_option = st.checkbox(
+                    "Enable reranking",
+                    key="rerank_enabled",
+                    disabled=not rerank_available,
+                    help="Re-rank results with Cohere (requires API key)"
+                )
+                
+                fortify_option = st.checkbox(
+                    "Fortify query",
+                    key="fortify_option",
+                    help="Enhance query with Gemini before searching"
+                )
+                
+                auto_refine_option = st.checkbox(
+                    "Auto-refine queries",
+                    key="auto_refine_option",
+                    help="Automatically rephrase low-confidence queries"
+                )
             
-            fortify_option = st.checkbox(
-                "Fortify query",
-                key="fortify_option",
-                help="Enhance query with Gemini before searching"
-            )
-            
-            auto_refine_option = st.checkbox(
-                "Auto-refine queries",
-                key="auto_refine_option",
-                help="Automatically rephrase low-confidence queries"
-            )
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        # SCROLLABLE SECTION - wrapped in scrollable container
-        st.markdown("<div class='sidebar-scrollable'>", unsafe_allow_html=True)
+            st.markdown("---")
         
         # Library management (only if not read-only)
         if not read_only_mode:
@@ -664,7 +646,7 @@ def render_app(
             else:
                 st.caption("No queries yet")
             
-            if st.button("🗑️ Clear history", use_container_width=True):
+            if st.button("🗑️ Clear history", use_container_width=True, type="primary"):
                 app_state.clear_history()
                 _rerun_app()
         
@@ -687,8 +669,6 @@ def render_app(
         if not read_only_mode:
             with st.expander("📊 Feedback stats", expanded=False):
                 render_feedback_stats_panel(app_state)
-        
-        st.markdown("</div>", unsafe_allow_html=True)
 
     # Main chat interface
     st.markdown("---")
