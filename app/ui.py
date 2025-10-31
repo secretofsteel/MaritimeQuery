@@ -100,6 +100,20 @@ def export_result_to_html(result: Dict, out_dir: Path) -> str | None:
     md_content = compose_result_markdown(result)
     html_body = md(md_content, extensions=_DEF_EXTS)
 
+def load_or_warn(app_state: AppState) -> None:
+    """Load cached index or warn the user."""
+    nodes, index = load_cached_nodes_and_index()
+    if nodes and index:
+        app_state.nodes = nodes
+        app_state.index = index
+        app_state.vector_retriever = None  # Reset retrievers to force recreation
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers() # Ensure retrievers are created after loading index
+        app_state.ensure_manager().nodes = nodes # Update manager's node list
+        st.success(f"✅ Loaded {len(nodes)} cached nodes and index.")
+    else:
+        st.warning("⚠️ No cached index found. Rebuild or sync to initialize the system.")
+
     # Define the HTML template
     full_html = f"""<!DOCTYPE html>
 <html>
