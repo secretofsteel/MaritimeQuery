@@ -549,40 +549,42 @@ def render_app(
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
 
-    # Sidebar configuration
+    # Sidebar configuration with sticky header and scrollable sections
     with st.sidebar:
-        # Add CSS for sticky top section
+        # Custom CSS for sticky header and scrollable sections
         st.markdown("""
         <style>
-        /* Make sidebar scrollable with sticky top section */
-        section[data-testid="stSidebar"] > div {
-            overflow-y: auto !important;
+        /* Sticky header section */
+        section[data-testid="stSidebar"] > div:first-child {
+            padding-top: 1rem;
         }
         
-        /* Sticky top section */
-        .sidebar-sticky-top {
-            position: sticky;
-            top: 0;
-            z-index: 999;
-            background-color: #0a1a24;
-            padding-bottom: 1rem;
-            margin-bottom: 1rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        
-        /* Scrollable bottom section */
+        /* Scrollable container for expandable sections */
         .sidebar-scrollable {
-            max-height: calc(100vh - 400px);
+            max-height: calc(100vh - 300px);
             overflow-y: auto;
+            margin-top: 1rem;
+            padding-right: 0.5rem;
+        }
+        
+        .sidebar-scrollable::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .sidebar-scrollable::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 3px;
+        }
+        
+        .sidebar-scrollable::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
         }
         </style>
         """, unsafe_allow_html=True)
         
-        # Sticky top section
-        st.markdown('<div class="sidebar-sticky-top">', unsafe_allow_html=True)
-        
         st.header("⚙️ Settings")
         
+        # STICKY SECTION - Always visible at top
         if st.button("🔄 Start new chat", use_container_width=True):
             _reset_chat_state(app_state)
             _rerun_app()
@@ -615,10 +617,11 @@ def render_app(
                 help="Automatically rephrase low-confidence queries"
             )
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Separator
+        st.markdown("---")
         
-        # Scrollable section below
-        st.markdown('<div class="sidebar-scrollable">', unsafe_allow_html=True)
+        # SCROLLABLE SECTION - Everything below can scroll
+        st.markdown("<div class='sidebar-scrollable'>", unsafe_allow_html=True)
         
         # Library management (only if not read-only)
         if not read_only_mode:
@@ -643,35 +646,30 @@ def render_app(
                 app_state.clear_history()
                 _rerun_app()
         
-        # Documents on file - added back for viewer app
+        # Documents on file - restored with scrollable list
         grouped = app_state.documents_grouped_by_type()
-        with st.expander("📚 Documents on file", expanded=False):
+        with st.expander("📄 Documents on file", expanded=False):
             if grouped:
                 order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
-                heading_map = {
-                    "FORM": "Forms",
-                    "CHECKLIST": "Checklists",
-                    "PROCEDURE": "Procedures",
-                    "MANUAL": "Manuals",
-                    "POLICY": "Policies",
-                    "REGULATION": "Regulations",
-                }
-                
                 for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
                     titles = grouped[doc_type]
                     if not titles:
                         continue
-                    heading = heading_map.get(doc_type, doc_type.title())
-                    st.markdown(f"**{heading}** ({len(titles)})")
-                    
-                    # Show in a scrollable container
-                    with st.container():
-                        for title in titles:
-                            st.caption(f"• {title}")
+                    st.markdown(f"**{doc_type}** ({len(titles)})")
+                    # Show first 5, with "show more" option
+                    display_titles = titles[:5]
+                    for title in display_titles:
+                        st.caption(f"• {title}")
+                    if len(titles) > 5:
+                        st.caption(f"... and {len(titles) - 5} more")
             else:
                 st.caption("No documents indexed yet.")
         
-        st.markdown('</div>', unsafe_allow_html=True)  # Close scrollable section
+        # Feedback stats
+        with st.expander("📊 Feedback stats", expanded=False):
+            render_feedback_stats_panel(app_state)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Main chat interface
     st.markdown("---")
