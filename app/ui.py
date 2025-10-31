@@ -356,16 +356,29 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
     
     # Render the answer
     with st.chat_message("assistant"):
-        st.markdown(answer)
+        # Process answer to make inline citations smaller and italic
+        import re
         
-        # Confidence badge
+        # Pattern to match citations like [3, P 020 - PPE Inventory > PPE Inventory Table]
+        citation_pattern = r'\[([^\]]+)\]'
+        
+        def format_citation(match):
+            citation_text = match.group(1)
+            return f"<span style='font-size: 0.75em; font-style: italic; opacity: 0.7;'>[{citation_text}]</span>"
+        
+        formatted_answer = re.sub(citation_pattern, format_citation, answer)
+        st.markdown(formatted_answer, unsafe_allow_html=True)
+        
+        # Confidence badge (single emoji, removed duplicate)
         confidence_color = {
             "HIGH 🟢": "🟢",
             "MEDIUM 🟡": "🟡", 
             "LOW 🔴": "🔴"
         }
         badge_emoji = confidence_color.get(conf_level, "⚪")
-        st.caption(f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level}) • **Sources:** {num_sources}")
+        # Remove emoji from conf_level to avoid duplication
+        conf_level_text = conf_level.replace("🟢", "").replace("🟡", "").replace("🔴", "").strip()
+        st.caption(f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text}) • **Sources:** {num_sources}")
         
         # Expandable sources
         if sources:
@@ -380,15 +393,35 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         if confidence_note:
             st.info(confidence_note)
         
-        # Feedback buttons
-        cols = st.columns([1, 1, 1, 1, 8])
+        # Feedback buttons - tighter spacing with custom CSS
+        st.markdown("""
+        <style>
+        div[data-testid="column"] {
+            padding: 0 !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div {
+            gap: 0.25rem !important;
+        }
+        .stDownloadButton button, div[data-testid="baseButton-secondary"] {
+            padding: 0.25rem 0.5rem !important;
+            min-width: 2.5rem !important;
+            border: none !important;
+            background: transparent !important;
+        }
+        .stDownloadButton button:hover, div[data-testid="baseButton-secondary"]:hover {
+            background: rgba(255, 255, 255, 0.1) !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        cols = st.columns([0.5, 0.5, 0.5, 0.5, 8])
         
         # Export button
         export_html = build_result_export_html(result)
         file_name = f"query_result_{message_index}.html"
         with cols[0]:
             st.download_button(
-                "⬇️",
+                "📥",
                 data=export_html,
                 file_name=file_name,
                 mime="text/html",
