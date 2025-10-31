@@ -485,26 +485,33 @@ def render_app(
         initial_sidebar_state="expanded"
     )
     
-    # Add custom CSS for centered chat layout (75% width)
+    # Add custom CSS for centered chat layout (60% width, like Claude)
     st.markdown("""
     <style>
-    /* Center the main content area and limit to 75% width */
+    /* Center the main content area and limit to 60% width */
     .main .block-container {
-        max-width: 75%;
-        padding-left: 12.5%;
-        padding-right: 12.5%;
+        max-width: 60% !important;
+        padding-left: 20% !important;
+        padding-right: 20% !important;
     }
     
-    /* Center and limit chat input width */
+    /* Center and limit chat input width to match */
     .stChatFloatingInputContainer {
-        max-width: 75%;
-        margin-left: auto;
-        margin-right: auto;
+        max-width: 60% !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
     }
     
     /* Ensure chat messages stay within the centered column */
     .stChatMessage {
-        max-width: 100%;
+        max-width: 100% !important;
+    }
+    
+    /* Also center the title and caption */
+    .main h1, .main .stCaption {
+        max-width: 60%;
+        margin-left: auto;
+        margin-right: auto;
     }
     </style>
     """, unsafe_allow_html=True)
