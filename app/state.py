@@ -34,6 +34,11 @@ class AppState:
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
     _index_load_attempted: bool = False  # Track if we've tried loading
+    
+    # Context-aware conversation state
+    sticky_chunks: List[Any] = field(default_factory=list)  # Reused chunks for followups
+    context_turn_count: int = 0  # Track turns in current conversation thread
+    conversation_active: bool = False  # Is context mode enabled?
 
     def ensure_index_loaded(self) -> bool:
         """
@@ -148,7 +153,10 @@ class AppState:
         """Clear the in-memory conversation without touching the persisted log."""
         self.query_history.clear()
         self.last_result = None
-        LOGGER.debug("Session reset: cleared query history")
+        self.sticky_chunks.clear()
+        self.context_turn_count = 0
+        self.conversation_active = False
+        LOGGER.debug("Session reset: cleared query history and context state")
 
     def _ensure_history_path(self) -> Path:
         if self.history_log_path is None:

@@ -378,7 +378,20 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         badge_emoji = confidence_color.get(conf_level, "⚪")
         # Remove emoji from conf_level to avoid duplication
         conf_level_text = conf_level.replace("🟢", "").replace("🟡", "").replace("🔴", "").strip()
-        st.caption(f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text}) • **Sources:** {num_sources}")
+        
+        # Build caption with context info
+        caption_parts = [f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text})", f"**Sources:** {num_sources}"]
+        
+        # Add context mode indicator if applicable
+        if result.get("context_mode"):
+            context_turn = result.get("context_turn", 0)
+            caption_parts.append(f"💬 **Turn:** {context_turn}")
+            
+        # Add reset notification if applicable
+        if result.get("context_reset_note"):
+            st.info(result["context_reset_note"])
+        
+        st.caption(" • ".join(caption_parts))
         
         # Expandable sources
         if sources:
@@ -566,7 +579,7 @@ def render_app(
     """, unsafe_allow_html=True)
     
     st.title("⚓ Maritime RAG Assistant")
-    st.caption("Intelligent document search powered by dreams of electric sheep")
+    st.caption("Intelligent document search powered by Gemini + LlamaIndex")
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
@@ -590,6 +603,7 @@ def render_app(
     st.session_state.setdefault("rerank_enabled", cohere_client is not None)
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
+    st.session_state.setdefault("use_context", False)  # NEW: Context-aware chat toggle
 
     # Sidebar configuration
     with st.sidebar:
@@ -618,7 +632,7 @@ def render_app(
             box-shadow: none !important;
             padding: 0.5rem 1rem !important;
         }
-
+        
         section[data-testid="stSidebar"] button[kind="primary"]:hover,
         section[data-testid="stSidebar"] button[kind="secondary"]:hover {
             background: rgba(10, 132, 255, 0.2) !important;
@@ -704,6 +718,20 @@ def render_app(
                 key="auto_refine_option",
                 help="Automatically rephrase low-confidence queries"
             )
+            
+            # NEW: Context-aware conversation toggle
+            use_context = st.checkbox(
+                "💬 Context-aware chat",
+                key="use_context",
+                help=f"Remember previous exchanges (resets after {CONTEXT_HISTORY_WINDOW} turns)"
+            )
+            
+            # Show context status if enabled
+            if use_context and app_state.context_turn_count > 0:
+                from .constants import MAX_CONTEXT_TURNS
+                st.caption(f"📍 Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
+                if app_state.context_turn_count >= MAX_CONTEXT_TURNS - 1:
+                    st.caption("⚠️ Next query will start fresh")
         
         # Library management (only if not read-only)
         if not read_only_mode:
@@ -797,6 +825,7 @@ def render_app(
                             auto_refine=auto_refine_option,
                             fortify=fortify_option,
                             rerank=rerank_option,
+                            use_conversation_context=use_context,  # NEW: Pass context flag
                         )
                         app_state.append_history(result)
                         LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
@@ -819,6 +848,4 @@ __all__ = [
     "save_result_as_html",
     "render_app",
     "render_viewer_app",
-
 ]
-
