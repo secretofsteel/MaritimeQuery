@@ -535,9 +535,11 @@ def render_app(
         padding-bottom: 12px !important;
     }
 
-    /* Center the send button vertically */
-    div[data-testid="stChatInput"] button[kind="primary"] {
+    /* Center the send button vertically - multiple approaches */
+    div[data-testid="stChatInput"] button {
         align-self: center !important;
+        margin-top: auto !important;
+        margin-bottom: auto !important;
     }
 
     /* Alternative selector for send button icon */
@@ -819,3 +821,4 @@ __all__ = [
     "render_viewer_app",
 
 ]
+
