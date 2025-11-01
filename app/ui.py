@@ -529,6 +529,12 @@ def render_app(
         transform: translateX(-50%) !important;
     }
 
+    /* Add padding to make input bar thicker */
+    div[data-testid="stChatInput"] textarea {
+        padding-top: 12px !important;
+        padding-bottom: 12px !important;
+    }
+
     /* Ensure chat messages stay within bounds */
     div[data-testid="stChatMessageContainer"] {
         max-width: 800px !important;
