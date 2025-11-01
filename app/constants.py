@@ -104,7 +104,6 @@ CONFIDENCE_MEDIUM_THRESHOLD = 55
 # Context-aware conversation settings
 MAX_CONTEXT_TURNS = 6  # Hard reset after this many exchanges
 CONTEXT_HISTORY_WINDOW = 3  # Number of recent Q&A pairs to include in prompt
-TOPIC_SHIFT_THRESHOLD = 0.3  # Keyword overlap threshold for detecting topic changes (lower = more sensitive)
 
 __all__ = [
     "CHUNK_SIZE",
@@ -116,5 +115,4 @@ __all__ = [
     "CONFIDENCE_MEDIUM_THRESHOLD",
     "MAX_CONTEXT_TURNS",
     "CONTEXT_HISTORY_WINDOW",
-    "TOPIC_SHIFT_THRESHOLD",
 ]
