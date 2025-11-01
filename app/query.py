@@ -17,7 +17,6 @@ from .constants import (
     CONFIDENCE_MEDIUM_THRESHOLD,
     MAX_CONTEXT_TURNS,
     CONTEXT_HISTORY_WINDOW,
-    TOPIC_SHIFT_THRESHOLD,
 )
 from .logger import LOGGER
 from .state import AppState
@@ -157,48 +156,59 @@ def _apply_section_score_adjustments(nodes: List[NodeWithScore]) -> List[NodeWit
     return sorted(nodes, key=lambda n: n.score, reverse=True)
 
 
-def _detect_topic_shift(query: str, query_history: List[Dict], similarity_threshold: float = TOPIC_SHIFT_THRESHOLD) -> bool:
+def _detect_topic_shift(query: str, query_history: List[Dict]) -> bool:
     """
-    Detect if the current query represents a topic shift from recent conversation.
+    Use LLM to detect if the current query represents a topic shift.
     
-    Uses simple keyword overlap heuristic:
-    - Extract keywords from recent queries
-    - Compare with current query
-    - If overlap < threshold, it's likely a new topic
+    Returns:
+        True if topic shifted (should reset context)
+        False if followup question on same topic
     """
     if not query_history:
         return False  # No history, can't shift
     
-    # Get last 2 queries for comparison
-    recent_queries = [entry.get("query", "") for entry in query_history[-2:]]
+    # Get last query and answer for context
+    last_entry = query_history[-1]
+    last_query = last_entry.get("query", "")
+    last_answer = last_entry.get("answer", "")[:200]  # Brief preview
     
-    # Simple keyword extraction (lowercase, remove common words)
-    stop_words = {"the", "a", "an", "is", "are", "was", "were", "what", "which", "who", 
-                  "when", "where", "how", "about", "for", "to", "of", "in", "on"}
+    # Simple heuristics first (fast path)
+    # If query has pronouns, it's clearly a followup
+    pronouns = r'\b(it|that|this|these|those|they|them)\b'
+    if re.search(pronouns, query.lower()):
+        LOGGER.debug("Detected pronoun in query, assuming followup")
+        return False
     
-    def extract_keywords(text: str) -> set:
-        words = re.findall(r'\b\w+\b', text.lower())
-        return {w for w in words if len(w) > 3 and w not in stop_words}
+    # If query is very short and question-like, likely a followup
+    if len(query.split()) <= 5 and query.strip().endswith('?'):
+        LOGGER.debug("Short question detected, assuming followup")
+        return False
     
-    current_keywords = extract_keywords(query)
-    recent_keywords = set()
-    for q in recent_queries:
-        recent_keywords.update(extract_keywords(q))
+    # Ask LLM to classify (only for ambiguous cases)
+    prompt = f"""Previous question: "{last_query}"
+Previous answer preview: "{last_answer}"
+
+New question: "{query}"
+
+Is the new question a FOLLOWUP about the same topic, or a DIFFERENT topic?
+
+Reply with ONLY one word:
+- FOLLOWUP (if related to previous topic)
+- DIFFERENT (if completely new topic)
+
+Reply:"""
     
-    if not current_keywords or not recent_keywords:
-        return False  # Can't determine, assume same topic
-    
-    # Calculate overlap
-    overlap = len(current_keywords & recent_keywords) / len(current_keywords)
-    
-    # Topic shift if very low overlap
-    is_shift = overlap < similarity_threshold
-    
-    if is_shift:
-        LOGGER.info("Topic shift detected: overlap=%.2f, current=%s, recent=%s", 
-                   overlap, current_keywords, recent_keywords)
-    
-    return is_shift
+    try:
+        response = LlamaSettings.llm.complete(prompt)
+        classification = response.text.strip().upper()
+        
+        is_shift = "DIFFERENT" in classification
+        LOGGER.info("Topic classification: %s (is_shift=%s)", classification, is_shift)
+        return is_shift
+        
+    except Exception as exc:
+        LOGGER.warning("Topic detection failed: %s, assuming followup", exc)
+        return False  # Default to NOT resetting on errors
 
 
 def _build_conversation_history_context(app_state: AppState) -> str:
