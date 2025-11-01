@@ -512,6 +512,7 @@ def render_app(
         max-width: 800px !important;
         padding-left: 2rem !important;
         padding-right: 2rem !important;
+        padding-top: 1rem !important;
         margin: 0 auto !important;
     }
 
@@ -800,4 +801,5 @@ __all__ = [
     "save_result_as_html",
     "render_app",
     "render_viewer_app",
+
 ]
