@@ -16,6 +16,7 @@ from .indexing import build_index_from_library, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
 from .logger import LOGGER
+from .constants import MAX_CONTEXT_TURNS  # Import for context display
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
@@ -723,12 +724,11 @@ def render_app(
             use_context = st.checkbox(
                 "💬 Context-aware chat",
                 key="use_context",
-                help=f"Remember previous exchanges (resets after {CONTEXT_HISTORY_WINDOW} turns)"
+                help=f"Remember previous exchanges (resets after {MAX_CONTEXT_TURNS} turns)"
             )
             
             # Show context status if enabled
             if use_context and app_state.context_turn_count > 0:
-                from .constants import MAX_CONTEXT_TURNS
                 st.caption(f"📍 Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
                 if app_state.context_turn_count >= MAX_CONTEXT_TURNS - 1:
                     st.caption("⚠️ Next query will start fresh")
