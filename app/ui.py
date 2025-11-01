@@ -534,8 +534,12 @@ def render_app(
         margin: 0 auto !important;
     }
 
-    /* Center title and caption */
-    section.main h1,
+    /* Center title and caption, move title higher */
+    section.main h1 {
+        text-align: center;
+        margin-top: -2rem !important;
+    }
+
     section.main > div > div > div > p {
         text-align: center;
     }
@@ -543,7 +547,7 @@ def render_app(
     """, unsafe_allow_html=True)
     
     st.title("⚓ Maritime RAG Assistant")
-    st.caption("Intelligent document search powered by Gemini + LlamaIndex")
+    st.caption("Intelligent document search powered by dreams of electric sheep")
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
