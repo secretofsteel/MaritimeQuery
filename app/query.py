@@ -1,4 +1,4 @@
-"""Query orchestration, confidence scoring, and reranking."""
+"""Query orchestration, confidence scoring, and reranking - WITH CONTEXT-AWARE CHAT."""
 
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ from llama_index.core import Settings as LlamaSettings
 from google.genai import types
 
 from .config import AppConfig
-from .constants import CONFIDENCE_HIGH_THRESHOLD, CONFIDENCE_MEDIUM_THRESHOLD
+from .constants import (
+    CONFIDENCE_HIGH_THRESHOLD,
+    CONFIDENCE_MEDIUM_THRESHOLD,
+    MAX_CONTEXT_TURNS,
+    CONTEXT_HISTORY_WINDOW,
+    TOPIC_SHIFT_THRESHOLD,
+)
 from .logger import LOGGER
 from .state import AppState
 
@@ -151,6 +157,72 @@ def _apply_section_score_adjustments(nodes: List[NodeWithScore]) -> List[NodeWit
     return sorted(nodes, key=lambda n: n.score, reverse=True)
 
 
+def _detect_topic_shift(query: str, query_history: List[Dict], similarity_threshold: float = TOPIC_SHIFT_THRESHOLD) -> bool:
+    """
+    Detect if the current query represents a topic shift from recent conversation.
+    
+    Uses simple keyword overlap heuristic:
+    - Extract keywords from recent queries
+    - Compare with current query
+    - If overlap < threshold, it's likely a new topic
+    """
+    if not query_history:
+        return False  # No history, can't shift
+    
+    # Get last 2 queries for comparison
+    recent_queries = [entry.get("query", "") for entry in query_history[-2:]]
+    
+    # Simple keyword extraction (lowercase, remove common words)
+    stop_words = {"the", "a", "an", "is", "are", "was", "were", "what", "which", "who", 
+                  "when", "where", "how", "about", "for", "to", "of", "in", "on"}
+    
+    def extract_keywords(text: str) -> set:
+        words = re.findall(r'\b\w+\b', text.lower())
+        return {w for w in words if len(w) > 3 and w not in stop_words}
+    
+    current_keywords = extract_keywords(query)
+    recent_keywords = set()
+    for q in recent_queries:
+        recent_keywords.update(extract_keywords(q))
+    
+    if not current_keywords or not recent_keywords:
+        return False  # Can't determine, assume same topic
+    
+    # Calculate overlap
+    overlap = len(current_keywords & recent_keywords) / len(current_keywords)
+    
+    # Topic shift if very low overlap
+    is_shift = overlap < similarity_threshold
+    
+    if is_shift:
+        LOGGER.info("Topic shift detected: overlap=%.2f, current=%s, recent=%s", 
+                   overlap, current_keywords, recent_keywords)
+    
+    return is_shift
+
+
+def _build_conversation_history_context(app_state: AppState) -> str:
+    """Build a concise conversation history for context."""
+    if not app_state.query_history:
+        return ""
+    
+    # Get last N exchanges
+    recent_history = app_state.query_history[-CONTEXT_HISTORY_WINDOW:]
+    
+    history_parts = ["=== CONVERSATION HISTORY ==="]
+    for idx, entry in enumerate(recent_history, 1):
+        query = entry.get("query", "")
+        answer = entry.get("answer", "")
+        # Truncate long answers
+        answer_preview = answer[:300] + "..." if len(answer) > 300 else answer
+        history_parts.append(f"\nTurn {idx}:")
+        history_parts.append(f"User: {query}")
+        history_parts.append(f"Assistant: {answer_preview}")
+    
+    history_parts.append("\n=== END HISTORY ===\n")
+    return "\n".join(history_parts)
+
+
 def query_with_confidence(
     app_state: AppState,
     query_text: str,
@@ -161,6 +233,7 @@ def query_with_confidence(
     fortify: bool = False,
     expand_references: bool = True,
     rerank: bool = False,
+    use_conversation_context: bool = False,  # NEW: Enable context-aware mode
 ) -> Dict[str, Any]:
     config = AppConfig.get()
     app_state.ensure_retrievers()
@@ -170,6 +243,27 @@ def query_with_confidence(
         raise RuntimeError("Retrievers not initialized. Load or build the index first.")
 
     original_query = query_text
+    
+    # SOFT RESET: Detect topic shift and auto-reset context
+    topic_shift_detected = False
+    if use_conversation_context and app_state.context_turn_count > 0:
+        if _detect_topic_shift(query_text, app_state.query_history):
+            LOGGER.info("Topic shift detected, performing soft reset")
+            app_state.sticky_chunks.clear()
+            app_state.context_turn_count = 0
+            topic_shift_detected = True
+            context_reset_note = "🔄 Detected topic change - searching fresh sources"
+        # Check if we need to reset context (hard cap)
+        elif app_state.context_turn_count >= MAX_CONTEXT_TURNS:
+            LOGGER.info("Context turn limit reached (%d), forcing fresh retrieval", MAX_CONTEXT_TURNS)
+            app_state.sticky_chunks.clear()
+            app_state.context_turn_count = 0
+            context_reset_note = f"🔄 Starting fresh search (reached {MAX_CONTEXT_TURNS} turn limit)"
+        else:
+            context_reset_note = None
+    else:
+        context_reset_note = None
+    
     if fortify:
         prompt = textwrap.dedent(
             f"""You are a maritime documentation expert who helps improve search queries for maritime-related databases.
@@ -182,7 +276,7 @@ Instructions:
 3. Suggest 2–4 related or synonymous terms actually used in maritime manuals, forms, or procedures.
 4. Suggest 1–3 relevant maritime areas (e.g., 'crew management', 'safety procedures', 'ship maintenance', 'ISM Code compliance').
 5. Correct typos or unclear phrasing, but do not change the meaning.
-6. Keep everything tightly relevant to maritime terminology — no generic fluff.
+6. Keep everything tightly relevant to maritime terminology – no generic fluff.
 7. Avoid duplication.
 8. Return your answer strictly in the following readable format:
 
@@ -191,7 +285,7 @@ Keywords: term1, term2, term3
 Related Terms: term1, term2
 Maritime Areas: area1, area2
 
-Keep it clean, compact, and human-readable — not JSON, not a list, just plain text formatted as above."""
+Keep it clean, compact, and human-readable – not JSON, not a list, just plain text formatted as above."""
         )
         fortify_query = config.client.models.generate_content(
             model="gemini-flash-latest",
@@ -206,60 +300,68 @@ Keep it clean, compact, and human-readable — not JSON, not a list, just plain 
     refinement_history: List[Dict[str, Any]] = []
     best_result: Optional[Dict[str, Any]] = None
 
-    while attempt <= max_attempts:
-        if retriever_type == "vector":
-            vector_nodes = vector_retriever.retrieve(query_text)
-            bm25_nodes: List[NodeWithScore] = []
-            nodes = list(vector_nodes)
-        elif retriever_type == "bm25":
-            bm25_nodes = bm25_retriever.retrieve(query_text)
-            vector_nodes = []
-            nodes = list(bm25_nodes)
-        else:
-            vector_nodes = vector_retriever.retrieve(query_text)
-            bm25_nodes = bm25_retriever.retrieve(query_text)
-            nodes = reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=60, top_k=40)
+    # CONTEXT-AWARE LOGIC: Reuse chunks or retrieve fresh?
+    if use_conversation_context and app_state.sticky_chunks and app_state.context_turn_count > 0 and not topic_shift_detected:
+        # Reuse existing chunks from conversation (no topic shift)
+        nodes = app_state.sticky_chunks
+        retrieval_mode = f"conversation_context (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
+        LOGGER.info("Reusing %d sticky chunks for followup query", len(nodes))
+    else:
+        # Fresh retrieval
+        while attempt <= max_attempts:
+            if retriever_type == "vector":
+                vector_nodes = vector_retriever.retrieve(query_text)
+                bm25_nodes: List[NodeWithScore] = []
+                nodes = list(vector_nodes)
+            elif retriever_type == "bm25":
+                bm25_nodes = bm25_retriever.retrieve(query_text)
+                vector_nodes = []
+                nodes = list(bm25_nodes)
+            else:
+                vector_nodes = vector_retriever.retrieve(query_text)
+                bm25_nodes = bm25_retriever.retrieve(query_text)
+                nodes = reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=60, top_k=40)
 
-        nodes = _apply_section_score_adjustments(nodes)
+            nodes = _apply_section_score_adjustments(nodes)
 
-        if expand_references and nodes:
-            nodes = _expand_references(nodes, vector_retriever)
+            if expand_references and nodes:
+                nodes = _expand_references(nodes, vector_retriever)
 
-        if rerank and USE_RERANKER and cohere_client:
-            try:
-                documents = [node.node.text[:1000] for node in nodes]
-                rerank_results = cohere_client.rerank(
-                    model="rerank-v3.5",
-                    query=query_text,
-                    documents=documents,
-                    top_n=min(len(documents), 30),
-                )
-                nodes = [
-                    NodeWithScore(node=nodes[result.index].node, score=result.relevance_score)
-                    for result in rerank_results.results
-                ]
-            except Exception as exc:  # pragma: no cover - optional path
-                LOGGER.warning("Reranking failed: %s", exc)
+            if rerank and USE_RERANKER and cohere_client:
+                try:
+                    documents = [node.node.text[:1000] for node in nodes]
+                    rerank_results = cohere_client.rerank(
+                        model="rerank-v3.5",
+                        query=query_text,
+                        documents=documents,
+                        top_n=min(len(documents), 30),
+                    )
+                    nodes = [
+                        NodeWithScore(node=nodes[result.index].node, score=result.relevance_score)
+                        for result in rerank_results.results
+                    ]
+                except Exception as exc:  # pragma: no cover - optional path
+                    LOGGER.warning("Reranking failed: %s", exc)
 
-        nodes = maximal_marginal_relevance(nodes, top_k=30, lambda_param=0.6)
-        confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+            nodes = maximal_marginal_relevance(nodes, top_k=30, lambda_param=0.6)
+            confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
 
-        current_result = {
-            "attempt": attempt,
-            "query": query_text,
-            "nodes": nodes,
-            "confidence_pct": confidence_pct,
-            "confidence_level": confidence_level,
-            "confidence_note": confidence_note,
-        }
-        if best_result is None or confidence_pct > best_result["confidence_pct"]:
-            best_result = current_result
+            current_result = {
+                "attempt": attempt,
+                "query": query_text,
+                "nodes": nodes,
+                "confidence_pct": confidence_pct,
+                "confidence_level": confidence_level,
+                "confidence_note": confidence_note,
+            }
+            if best_result is None or confidence_pct > best_result["confidence_pct"]:
+                best_result = current_result
 
-        refinement_history.append({"attempt": attempt, "query": query_text, "confidence": confidence_pct})
+            refinement_history.append({"attempt": attempt, "query": query_text, "confidence": confidence_pct})
 
-        if confidence_pct < confidence_threshold and attempt < max_attempts and auto_refine:
-            prompt = textwrap.dedent(
-                f"""You are helping to search maritime company documentation (manuals, forms, procedures).
+            if confidence_pct < confidence_threshold and attempt < max_attempts and auto_refine:
+                prompt = textwrap.dedent(
+                    f"""You are helping to search maritime company documentation (manuals, forms, procedures).
 
 Original question: "{query_text}"
 
@@ -273,21 +375,29 @@ Avoid fancy language. Use simple words that would appear in a company manual.
 Previous attempts: {[entry['query'] for entry in refinement_history]}
 
 Rephrase this question to better match maritime documentation language. Do not over-complicate the language. Do not repeat the question as phrased by the user. Return ONLY the rephrased question, nothing else."""
-            )
-            refined = LlamaSettings.llm.complete(prompt)
-            query_text = refined.text.strip().strip('"').strip("'")
-            attempt += 1
-            continue
-        break
+                )
+                refined = LlamaSettings.llm.complete(prompt)
+                query_text = refined.text.strip().strip('"').strip("'")
+                attempt += 1
+                continue
+            break
+        
+        # Store chunks for potential reuse in followups
+        if use_conversation_context:
+            app_state.sticky_chunks = nodes
+            app_state.context_turn_count = 1
+            retrieval_mode = "fresh_retrieval (turn 1)"
+        else:
+            retrieval_mode = retriever_type
 
     if not best_result:
         raise RuntimeError("No retrieval results available.")
 
-    nodes = best_result["nodes"]
-    confidence_pct = best_result["confidence_pct"]
-    confidence_level = best_result["confidence_level"]
-    confidence_note = best_result["confidence_note"]
-    final_query_used = best_result["query"]
+    nodes = best_result.get("nodes", nodes)
+    confidence_pct = best_result.get("confidence_pct", 0)
+    confidence_level = best_result.get("confidence_level", "N/A")
+    confidence_note = best_result.get("confidence_note", "")
+    final_query_used = best_result.get("query", query_text)
 
     context_parts = []
     sources_info = []
@@ -312,6 +422,12 @@ Rephrase this question to better match maritime documentation language. Do not o
         )
 
     context = "\n".join(context_parts)
+    
+    # Add conversation history if context mode is enabled
+    conversation_history = ""
+    if use_conversation_context and app_state.query_history:
+        conversation_history = _build_conversation_history_context(app_state)
+    
     if confidence_pct >= 80:
         confidence_instruction = "You have HIGH confidence sources. Answer authoritatively based on the clear documentation."
     elif confidence_pct >= 60:
@@ -323,13 +439,15 @@ Rephrase this question to better match maritime documentation language. Do not o
 
 CONFIDENCE CONTEXT: {confidence_instruction}
 
+{conversation_history}
+
 CRITICAL RULES:
 - You ALWAYS answer in English, even if asked in another language.
 - Answer facts must come ONLY from the provided documents, but you can use logic, general well-established facts of life, and common sense in crafting your replies, as well.
 - General maritime knowledge needed to make logical connections between the provided documents can be used from your internal knowledge base
 - If information is missing or unclear, say so explicitly
 - When referencing forms, ALWAYS include the complete form name/number (e.g., "Form_DA 005 Drug and Alcohol Test Report")
-- Cite sources using [Source number, Source title > Section] format (e.g. [3, Chapter 5 MASTER'S RESPONSIBILITY AND AUTHORITY > Master’s Overriding Authority]). Don't use filenames as title, unless no actual title is available. If you have to use filenames, remove the extension.
+- Cite sources using [Source number, Source title > Section] format (e.g. [3, Chapter 5 MASTER'S RESPONSIBILITY AND AUTHORITY > Master's Overriding Authority]). Don't use filenames as title, unless no actual title is available. If you have to use filenames, remove the extension.
 - Keep answers concise (3-4 minute read maximum)
 - Use "Based on the documents on file..."
 - If the question asks "which form" or "what form", or "what checklist" start your answer with the exact form or checklist name
@@ -339,6 +457,7 @@ CRITICAL RULES:
 - ALWAYS double check that you have exhausted all available information from the context provided and ensure not to omit any detail that could relate to the query. Better to include extra info than omit parts of the answer that may be crucial to the user.
 - When asked to list details from a Form or Checklist, ensure that you don't omit any part or section. Providing the full picture is critical.
 - When making a table, don't make a column for the sources, instead place them after the table. If references within the table share the same source, include it only once.
+- If this is a followup question referring to previous conversation (using "it", "that", "this", etc.), use the conversation history above to understand the context.
 
 CONTEXT:
 {context}
@@ -349,8 +468,12 @@ Please provide a clear, concise answer with proper citations."""
 
     response = LlamaSettings.llm.complete(prompt)
     answer_text = response.text
+    
+    # Increment context turn counter if in conversation mode
+    if use_conversation_context and app_state.context_turn_count > 0:
+        app_state.context_turn_count += 1
 
-    return {
+    result = {
         "query": original_query,
         "final_query": final_query_used if final_query_used != original_query else None,
         "refinement_history": refinement_history if len(refinement_history) > 1 else None,
@@ -362,8 +485,13 @@ Please provide a clear, concise answer with proper citations."""
         "confidence_note": confidence_note,
         "sources": sources_info,
         "num_sources": len(nodes),
-        "retriever_type": retriever_type,
+        "retriever_type": retrieval_mode,
+        "context_mode": use_conversation_context,
+        "context_turn": app_state.context_turn_count if use_conversation_context else 0,
+        "context_reset_note": context_reset_note,
     }
+    
+    return result
 
 
 __all__ = ["calculate_confidence", "reciprocal_rank_fusion", "query_with_confidence"]
