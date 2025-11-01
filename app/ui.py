@@ -502,6 +502,11 @@ def render_app(
     # Add custom CSS for centered chat layout (60% width, like Claude)
     st.markdown("""
     <style>
+    /* Hide Streamlit settings bar and menu */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
     /* Override Streamlit's default block-container styling */
     section.main > div.block-container {
         max-width: 800px !important;
@@ -509,26 +514,26 @@ def render_app(
         padding-right: 2rem !important;
         margin: 0 auto !important;
     }
-    
+
     /* Center and limit chat input width to match */
     div[data-testid="stChatInput"] {
         max-width: 800px !important;
         margin: 0 auto !important;
     }
-    
+
     /* Fix floating input container if it exists */
     .stChatFloatingInputContainer {
         max-width: 800px !important;
         left: 50% !important;
         transform: translateX(-50%) !important;
     }
-    
+
     /* Ensure chat messages stay within bounds */
     div[data-testid="stChatMessageContainer"] {
         max-width: 800px !important;
         margin: 0 auto !important;
     }
-    
+
     /* Center title and caption */
     section.main h1,
     section.main > div > div > div > p {
