@@ -512,6 +512,7 @@ def render_app(
         max-width: 800px !important;
         padding-left: 2rem !important;
         padding-right: 2rem !important;
+        padding-top: 1rem !important;
         margin: 0 auto !important;
     }
 
@@ -543,7 +544,7 @@ def render_app(
     """, unsafe_allow_html=True)
     
     st.title("⚓ Maritime RAG Assistant")
-    st.caption("Intelligent document search powered by Gemini + LlamaIndex")
+    st.caption("Intelligent document search powered by dreams of electric sheep")
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
