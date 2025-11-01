@@ -535,6 +535,16 @@ def render_app(
         padding-bottom: 12px !important;
     }
 
+    /* Center the send button vertically */
+    div[data-testid="stChatInput"] button[kind="primary"] {
+        align-self: center !important;
+    }
+
+    /* Alternative selector for send button icon */
+    div[data-testid="stChatInput"] button[data-testid="baseButton-primary"] {
+        align-self: center !important;
+    }
+
     /* Ensure chat messages stay within bounds */
     div[data-testid="stChatMessageContainer"] {
         max-width: 800px !important;
