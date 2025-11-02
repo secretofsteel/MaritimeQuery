@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
-
 from collections import defaultdict
 
 from llama_index.core import Document, VectorStoreIndex
