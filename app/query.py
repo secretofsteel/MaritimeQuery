@@ -173,6 +173,9 @@ Examples:
 "tell me about MARPOL Annex V" → "MARPOL Annex V"
 "what form for enclosed space entry?" → "enclosed space entry"
 "how do I report an accident?" → "accident reporting"
+"how should bridge watches be handled in ice waters?" → "ice navigation operations"
+"vessel breaking ice without icebreaker" → "ice navigation operations"
+"hull breach in ice" → "ice navigation damage"
 
 Query: "{query}"
 
@@ -222,53 +225,62 @@ def _detect_doc_type_preference(query: str) -> Optional[str]:
     return None
 
 
-def _build_conversation_summary(query_history: List[Dict]) -> str:
+def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config: AppConfig) -> List[NodeWithScore]:
     """
-    Build a running summary of the last few turns instead of full history.
-    Saves tokens and keeps focus on current task.
+    Re-score cached chunks against the new query to ensure relevance.
+    Uses embedding similarity for accurate re-ranking.
+    
+    Args:
+        cached_nodes: Previously retrieved chunks
+        query: New query text
+        config: App configuration for embedding model access
+    
+    Returns:
+        Re-scored and re-sorted nodes
     """
-    if not query_history:
-        return ""
+    if not cached_nodes:
+        return cached_nodes
     
-    # Take last 3 exchanges
-    recent = query_history[-3:]
-    
-    if len(recent) == 1:
-        # Just one exchange, no need to summarize
-        entry = recent[0]
-        return f"Previous: User asked about {entry.get('query', 'something')}."
-    
-    # Build concise summary
-    summary_parts = ["Recent conversation:"]
-    for idx, entry in enumerate(recent, 1):
-        query = entry.get("query", "")[:60]
-        topic = entry.get("topic_extracted", "something")
-        summary_parts.append(f"{idx}. Asked about {topic}: \"{query}...\"")
-    
-    return " ".join(summary_parts)
+    try:
+        # Get query embedding using the same model as indexing
+        from llama_index.core import Settings as LlamaSettings
+        embed_model = LlamaSettings.embed_model
+        
+        query_embedding = embed_model.get_query_embedding(query)
+        
+        # Re-score each node based on cosine similarity with new query
+        for node in cached_nodes:
+            # Get node embedding (already exists in the node)
+            if hasattr(node.node, 'embedding') and node.node.embedding:
+                node_embedding = node.node.embedding
+            else:
+                # Fallback: get fresh embedding for node text
+                node_embedding = embed_model.get_text_embedding(node.node.text[:512])
+            
+            # Calculate cosine similarity
+            import numpy as np
+            similarity = np.dot(query_embedding, node_embedding) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(node_embedding)
+            )
+            
+            # Update score (blend old score with new similarity)
+            # 70% new relevance, 30% original quality score
+            node.score = 0.7 * float(similarity) + 0.3 * node.score
+        
+        # Re-sort by new scores
+        rescored = sorted(cached_nodes, key=lambda n: n.score, reverse=True)
+        LOGGER.info("Re-scored %d cached chunks against new query", len(rescored))
+        return rescored
+        
+    except Exception as exc:
+        LOGGER.warning("Re-scoring failed, using original chunks: %s", exc)
+        return cached_nodes
 
 
-def _apply_doc_type_boost(nodes: List[NodeWithScore], preferred_doc_type: Optional[str]) -> List[NodeWithScore]:
+def _detect_topic_shift_with_gemini(query: str, query_history: List[Dict]) -> bool:
     """
-    Boost nodes that match the user's preferred document type.
-    Uses metadata.doc_type, not filename patterns.
-    """
-    if not preferred_doc_type:
-        return nodes
-    
-    for node in nodes:
-        doc_type = node.node.metadata.get("doc_type", "")
-        if doc_type == preferred_doc_type:
-            node.score *= 1.3  # 30% boost for matching type
-            LOGGER.debug("Boosted %s (type: %s)", node.node.metadata.get("source", "unknown"), doc_type)
-    
-    # Re-sort after boosting
-    return sorted(nodes, key=lambda n: n.score, reverse=True)
-
-
-def _detect_topic_shift(query: str, query_history: List[Dict]) -> bool:
-    """
-    Use LLM to detect if the current query represents a topic shift.
+    Use Gemini Flash Lite to detect if the current query represents a topic shift.
+    Uses strict output format to avoid parsing ambiguity.
     
     Returns:
         True if topic shifted (should reset context)
@@ -282,19 +294,19 @@ def _detect_topic_shift(query: str, query_history: List[Dict]) -> bool:
     last_query = last_entry.get("query", "")
     last_answer = last_entry.get("answer", "")[:200]  # Brief preview
     
-    # Simple heuristics first (fast path)
-    # If query has pronouns, it's clearly a followup
+    # Simple heuristics first (fast path) - but demoted to weak hints
     pronouns = r'\b(it|that|this|these|those|they|them)\b'
-    if re.search(pronouns, query.lower()):
-        LOGGER.debug("Detected pronoun in query, assuming followup")
+    has_pronoun = bool(re.search(pronouns, query.lower()))
+    
+    # Short question-like queries are likely followups
+    is_short_question = len(query.split()) <= 5 and query.strip().endswith('?')
+    
+    # If both heuristics strongly suggest followup, trust them (save API call)
+    if has_pronoun and is_short_question:
+        LOGGER.debug("Strong followup signals detected (pronoun + short question)")
         return False
     
-    # If query is very short and question-like, likely a followup
-    if len(query.split()) <= 5 and query.strip().endswith('?'):
-        LOGGER.debug("Short question detected, assuming followup")
-        return False
-    
-    # Ask LLM to classify (only for ambiguous cases)
+    # Otherwise, ask Gemini with strict output format
     prompt = f"""Previous question: "{last_query}"
 Previous answer preview: "{last_answer}"
 
@@ -302,19 +314,43 @@ New question: "{query}"
 
 Is the new question a FOLLOWUP about the same topic, or a DIFFERENT topic?
 
-Reply with ONLY one word:
+CRITICAL: Reply with ONLY ONE WORD (exactly as shown, all caps):
 - FOLLOWUP (if related to previous topic)
 - DIFFERENT (if completely new topic)
 
-Reply:"""
+Examples:
+Previous: "What is the ballast water procedure?"
+New: "What about the discharge limits?" → FOLLOWUP
+New: "Tell me about fire drills" → DIFFERENT
+
+Previous: "How do I handle ice navigation?"
+New: "What if the hull gets breached?" → FOLLOWUP (same context: ice operations)
+New: "What's the alcohol policy?" → DIFFERENT
+
+Reply (one word only):"""
     
     try:
-        response = LlamaSettings.llm.complete(prompt)
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",  # Cheap, fast model
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,  # Deterministic output
+            ),
+        )
         classification = response.text.strip().upper()
         
-        is_shift = "DIFFERENT" in classification
-        LOGGER.info("Topic classification: %s (is_shift=%s)", classification, is_shift)
-        return is_shift
+        # Strict parsing: only accept exact matches
+        if "FOLLOWUP" in classification:
+            LOGGER.info("Topic classification: FOLLOWUP")
+            return False
+        elif "DIFFERENT" in classification:
+            LOGGER.info("Topic classification: DIFFERENT (topic shift detected)")
+            return True
+        else:
+            # Any other output = assume different (conservative approach)
+            LOGGER.warning("Ambiguous classification: '%s', treating as DIFFERENT", classification)
+            return True
         
     except Exception as exc:
         LOGGER.warning("Topic detection failed: %s, assuming followup", exc)
@@ -322,7 +358,10 @@ Reply:"""
 
 
 def _build_conversation_history_context(app_state: AppState) -> str:
-    """Build a concise conversation history for context."""
+    """
+    Build a concise conversation history for context.
+    Uses only the last N exchanges (no separate summary).
+    """
     if not app_state.query_history:
         return ""
     
@@ -341,6 +380,24 @@ def _build_conversation_history_context(app_state: AppState) -> str:
     
     history_parts.append("\n=== END HISTORY ===\n")
     return "\n".join(history_parts)
+
+
+def _apply_doc_type_boost(nodes: List[NodeWithScore], preferred_doc_type: Optional[str]) -> List[NodeWithScore]:
+    """
+    Boost nodes that match the user's preferred document type.
+    Uses metadata.doc_type, not filename patterns.
+    """
+    if not preferred_doc_type:
+        return nodes
+    
+    for node in nodes:
+        doc_type = node.node.metadata.get("doc_type", "")
+        if doc_type == preferred_doc_type:
+            node.score *= 1.3  # 30% boost for matching type
+            LOGGER.debug("Boosted %s (type: %s)", node.node.metadata.get("source", "unknown"), doc_type)
+    
+    # Re-sort after boosting
+    return sorted(nodes, key=lambda n: n.score, reverse=True)
 
 
 def query_with_confidence(
@@ -381,18 +438,19 @@ def query_with_confidence(
     
     LOGGER.info("Cache keys - current: %s, last: %s", cache_key, last_cache_key)
     
-    # STEP 5: Detect topic shift or hard cap
+    # STEP 5: Detect topic shift using Gemini (not pronoun heuristics alone)
     topic_shift_detected = False
     context_reset_note = None
     
     if use_conversation_context and app_state.context_turn_count > 0:
-        # Check for topic shift (semantic comparison)
-        if current_topic and app_state.last_topic and current_topic != app_state.last_topic:
-            LOGGER.info("Topic shift detected: %s → %s", app_state.last_topic, current_topic)
+        # Use Gemini to detect topic shift (replaces old pronoun-based logic)
+        topic_shift_detected = _detect_topic_shift_with_gemini(query_text, app_state.query_history)
+        
+        if topic_shift_detected:
+            LOGGER.info("Topic shift detected via Gemini classification")
             app_state.sticky_chunks.clear()
             app_state.context_turn_count = 0
-            topic_shift_detected = True
-            context_reset_note = f"🔄 Detected topic change ({app_state.last_topic} → {current_topic})"
+            context_reset_note = f"🔄 Detected topic change (starting fresh search)"
         # Check hard cap
         elif app_state.context_turn_count >= MAX_CONTEXT_TURNS:
             LOGGER.info("Context turn limit reached (%d), forcing fresh retrieval", MAX_CONTEXT_TURNS)
@@ -451,12 +509,13 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
     )
     
     if should_reuse_cache:
-        # Reuse existing chunks (same semantic task)
-        nodes = app_state.sticky_chunks
-        retrieval_mode = f"cached (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
-        LOGGER.info("Cache hit: reusing %d chunks for topic=%s", len(nodes), current_topic)
+        # HIGH PRIORITY FIX: Re-score cached chunks against new query
+        LOGGER.info("Cache hit: re-scoring %d chunks for topic=%s", len(app_state.sticky_chunks), current_topic)
+        nodes = _rescore_cached_chunks(app_state.sticky_chunks, query_text, config)
         
-        # Calculate confidence for cached nodes
+        retrieval_mode = f"cached+rescored (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
+        
+        # Calculate confidence for re-scored nodes
         confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
         
         # Set best_result immediately (skip retrieval loop)
@@ -604,10 +663,10 @@ Rephrase this question to better match maritime documentation language. Do not o
 
     context = "\n".join(context_parts)
     
-    # Build conversation summary (replaces full history for token efficiency)
-    conversation_summary = ""
+    # Build conversation history (single method, no duplication)
+    conversation_history = ""
     if use_conversation_context and app_state.query_history:
-        conversation_summary = _build_conversation_summary(app_state.query_history)
+        conversation_history = _build_conversation_history_context(app_state)
     
     if confidence_pct >= 80:
         confidence_instruction = "You have HIGH confidence sources. Answer authoritatively based on the clear documentation."
@@ -620,7 +679,7 @@ Rephrase this question to better match maritime documentation language. Do not o
 
 CONFIDENCE CONTEXT: {confidence_instruction}
 
-{conversation_summary}
+{conversation_history}
 
 CRITICAL RULES:
 - You ALWAYS answer in English, even if asked in another language.
@@ -655,7 +714,7 @@ Please provide a clear, concise answer with proper citations."""
         if app_state.context_turn_count > 0:
             app_state.context_turn_count += 1
         app_state.last_topic = current_topic
-        app_state.conversation_summary = conversation_summary
+        # Remove duplicate conversation_summary (we only use history now)
         # Safely set last_doc_type_pref (handles old AppState objects)
         if hasattr(app_state, 'last_doc_type_pref'):
             app_state.last_doc_type_pref = doc_type_preference

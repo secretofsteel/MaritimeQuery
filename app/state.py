@@ -33,7 +33,7 @@ class AppState:
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
-    _index_load_attempted: bool = False  # Track if we've tried loading
+    # REMOVED: _index_load_attempted (now in st.session_state)
     
     # Context-aware conversation state
     sticky_chunks: List[Any] = field(default_factory=list)  # Reused chunks for followups
@@ -51,18 +51,31 @@ class AppState:
             True if index is ready (loaded or already present)
             False if index could not be loaded
         """
+        # Import here to avoid circular dependency at module level
+        try:
+            import streamlit as st
+        except ImportError:
+            # Fallback for non-Streamlit contexts (testing, etc.)
+            LOGGER.warning("Streamlit not available, using in-memory flag for index loading")
+            st = None
+        
         # Already loaded and ready
         if self.nodes and self.index:
             LOGGER.debug("Index already loaded: %d nodes", len(self.nodes))
             return True
         
-        # Already tried and failed, don't spam attempts
-        if self._index_load_attempted and not self.nodes:
-            LOGGER.debug("Index load previously failed, skipping retry")
-            return False
-        
-        # Mark that we're attempting to load
-        self._index_load_attempted = True
+        # Check session state flag (persistent across Streamlit reruns)
+        if st is not None:
+            if "index_load_attempted" not in st.session_state:
+                st.session_state["index_load_attempted"] = False
+            
+            # Already tried and failed, don't spam attempts
+            if st.session_state["index_load_attempted"] and not self.nodes:
+                LOGGER.debug("Index load previously failed, skipping retry")
+                return False
+            
+            # Mark that we're attempting to load
+            st.session_state["index_load_attempted"] = True
         
         LOGGER.info("Attempting to load cached index...")
         try:
