@@ -373,7 +373,9 @@ def query_with_confidence(
     
     # STEP 4: Build cache key from semantic topic + doc type
     cache_key = (current_topic, doc_type_preference)
-    last_cache_key = (app_state.last_topic, getattr(app_state, 'last_doc_type_pref', None))
+    last_cache_key = (app_state.last_topic, app_state.last_doc_type_pref)
+    
+    LOGGER.info("Cache keys - current: %s, last: %s", cache_key, last_cache_key)
     
     # STEP 5: Detect topic shift or hard cap
     topic_shift_detected = False
@@ -432,17 +434,41 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
 
     # CONTEXT-AWARE LOGIC: Decide whether to reuse chunks or retrieve fresh
     # Cache key comparison: same topic + same doc type = reuse
-    if (use_conversation_context and 
+    should_reuse_cache = (
+        use_conversation_context and 
         app_state.sticky_chunks and 
+        len(app_state.sticky_chunks) > 0 and
         app_state.context_turn_count > 0 and 
         not topic_shift_detected and
-        cache_key == last_cache_key):
+        cache_key == last_cache_key and
+        cache_key[0] is not None  # Must have a topic
+    )
+    
+    if should_reuse_cache:
         # Reuse existing chunks (same semantic task)
         nodes = app_state.sticky_chunks
         retrieval_mode = f"cached (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
         LOGGER.info("Cache hit: reusing %d chunks for topic=%s", len(nodes), current_topic)
+        
+        # Calculate confidence for cached nodes
+        confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+        
+        # Set best_result immediately (skip retrieval loop)
+        best_result = {
+            "attempt": 1,
+            "query": query_text,
+            "nodes": nodes,
+            "confidence_pct": confidence_pct,
+            "confidence_level": confidence_level,
+            "confidence_note": confidence_note,
+        }
+        final_query_used = query_text
+        attempt = 1
+        
     else:
         # Fresh retrieval needed
+        LOGGER.info("Fresh retrieval: topic=%s, context_enabled=%s, has_chunks=%s", 
+                   current_topic, use_conversation_context, bool(app_state.sticky_chunks))
         # Fresh retrieval
         while attempt <= max_attempts:
             if retriever_type == "vector":
