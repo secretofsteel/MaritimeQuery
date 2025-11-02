@@ -373,7 +373,7 @@ def query_with_confidence(
     
     # STEP 4: Build cache key from semantic topic + doc type
     cache_key = (current_topic, doc_type_preference)
-    last_cache_key = (app_state.last_topic, app_state.last_doc_type_pref)
+    last_cache_key = (app_state.last_topic, getattr(app_state, 'last_doc_type_pref', None))
     
     LOGGER.info("Cache keys - current: %s, last: %s", cache_key, last_cache_key)
     
@@ -556,7 +556,9 @@ Rephrase this question to better match maritime documentation language. Do not o
             app_state.sticky_chunks = nodes
             app_state.context_turn_count = 1
             app_state.last_topic = current_topic
-            app_state.last_doc_type_pref = doc_type_preference
+            # Safely set last_doc_type_pref (handles old AppState objects)
+            if hasattr(app_state, 'last_doc_type_pref'):
+                app_state.last_doc_type_pref = doc_type_preference
             retrieval_mode = "fresh_retrieval (turn 1)"
         else:
             retrieval_mode = retriever_type
