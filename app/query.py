@@ -428,10 +428,12 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
         )
         query_text = fortify_query.candidates[0].content.parts[0].text
 
+    # Initialize variables that will be used later
     attempt = 1
     refinement_history: List[Dict[str, Any]] = []
     best_result: Optional[Dict[str, Any]] = None
-
+    final_query_used = query_text
+    
     # CONTEXT-AWARE LOGIC: Decide whether to reuse chunks or retrieve fresh
     # Cache key comparison: same topic + same doc type = reuse
     should_reuse_cache = (
@@ -560,6 +562,10 @@ Rephrase this question to better match maritime documentation language. Do not o
             retrieval_mode = retriever_type
 
     if not best_result:
+        # This should never happen, but if it does, log what went wrong
+        LOGGER.error("No best_result set! Debug info: should_reuse_cache=%s, use_context=%s, has_chunks=%s, turn_count=%d, cache_key=%s, last_cache_key=%s",
+                    should_reuse_cache, use_conversation_context, bool(app_state.sticky_chunks), 
+                    app_state.context_turn_count, cache_key, last_cache_key)
         raise RuntimeError("No retrieval results available.")
 
     nodes = best_result.get("nodes", nodes)
