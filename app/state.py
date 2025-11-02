@@ -41,6 +41,7 @@ class AppState:
     conversation_active: bool = False  # Is context mode enabled?
     last_topic: Optional[str] = None  # Semantic topic from last query (for inheritance)
     conversation_summary: str = ""  # Running summary instead of full history
+    last_doc_type_pref: Optional[str] = None  # Last detected doc type preference
 
     def ensure_index_loaded(self) -> bool:
         """
