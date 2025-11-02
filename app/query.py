@@ -158,7 +158,7 @@ def _apply_section_score_adjustments(nodes: List[NodeWithScore]) -> List[NodeWit
 
 def _extract_topic_keywords(query: str) -> Optional[str]:
     """
-    Extract the main semantic topic from a query using Gemini.
+    Extract the main semantic topic from a query using Gemini Flash Lite (cheap model).
     
     Returns:
         Topic string (e.g., "PPE equipment", "bunkering procedures")
@@ -179,7 +179,11 @@ Query: "{query}"
 Topic (1-4 words or [NO TOPIC]):"""
     
     try:
-        response = LlamaSettings.llm.complete(prompt)
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",  # Use cheap model for simple classification
+            contents=prompt,
+        )
         topic = response.text.strip().strip('"').strip("'")
         
         if topic == "[NO TOPIC]" or not topic:
@@ -652,6 +656,9 @@ Please provide a clear, concise answer with proper citations."""
             app_state.context_turn_count += 1
         app_state.last_topic = current_topic
         app_state.conversation_summary = conversation_summary
+        # Safely set last_doc_type_pref (handles old AppState objects)
+        if hasattr(app_state, 'last_doc_type_pref'):
+            app_state.last_doc_type_pref = doc_type_preference
 
     result = {
         "query": original_query,
