@@ -156,6 +156,112 @@ def _apply_section_score_adjustments(nodes: List[NodeWithScore]) -> List[NodeWit
     return sorted(nodes, key=lambda n: n.score, reverse=True)
 
 
+def _extract_topic_keywords(query: str) -> Optional[str]:
+    """
+    Extract the main semantic topic from a query using Gemini.
+    
+    Returns:
+        Topic string (e.g., "PPE equipment", "bunkering procedures")
+        None if no clear topic detected
+    """
+    prompt = f"""Extract the main topic from this query in 1-4 words. Focus on the subject matter, not the action.
+
+Examples:
+"list 3 ppe" → "PPE equipment"
+"which are most important?" → "[NO TOPIC]"
+"what about bunkering checklist?" → "bunkering operations"
+"tell me about MARPOL Annex V" → "MARPOL Annex V"
+"what form for enclosed space entry?" → "enclosed space entry"
+"how do I report an accident?" → "accident reporting"
+
+Query: "{query}"
+
+Topic (1-4 words or [NO TOPIC]):"""
+    
+    try:
+        response = LlamaSettings.llm.complete(prompt)
+        topic = response.text.strip().strip('"').strip("'")
+        
+        if topic == "[NO TOPIC]" or not topic:
+            return None
+        
+        LOGGER.debug("Extracted topic: %s from query: %s", topic, query[:50])
+        return topic
+        
+    except Exception as exc:
+        LOGGER.warning("Topic extraction failed: %s", exc)
+        return None
+
+
+def _detect_doc_type_preference(query: str) -> Optional[str]:
+    """
+    Detect if user is asking for a specific document type.
+    
+    Returns:
+        "Form" | "Checklist" | "Procedure" | "Policy" | "Manual" | "Regulation" | None
+    """
+    query_lower = query.lower()
+    
+    if any(word in query_lower for word in ["form", "forms"]):
+        return "Form"
+    elif any(word in query_lower for word in ["checklist", "checklists", "check list"]):
+        return "Checklist"
+    elif any(word in query_lower for word in ["procedure", "procedures", "how to", "steps"]):
+        return "Procedure"
+    elif any(word in query_lower for word in ["policy", "policies"]):
+        return "Policy"
+    elif any(word in query_lower for word in ["manual", "manuals", "guide"]):
+        return "Manual"
+    elif any(word in query_lower for word in ["regulation", "regulations", "requirement"]):
+        return "Regulation"
+    
+    return None
+
+
+def _build_conversation_summary(query_history: List[Dict]) -> str:
+    """
+    Build a running summary of the last few turns instead of full history.
+    Saves tokens and keeps focus on current task.
+    """
+    if not query_history:
+        return ""
+    
+    # Take last 3 exchanges
+    recent = query_history[-3:]
+    
+    if len(recent) == 1:
+        # Just one exchange, no need to summarize
+        entry = recent[0]
+        return f"Previous: User asked about {entry.get('query', 'something')}."
+    
+    # Build concise summary
+    summary_parts = ["Recent conversation:"]
+    for idx, entry in enumerate(recent, 1):
+        query = entry.get("query", "")[:60]
+        topic = entry.get("topic_extracted", "something")
+        summary_parts.append(f"{idx}. Asked about {topic}: \"{query}...\"")
+    
+    return " ".join(summary_parts)
+
+
+def _apply_doc_type_boost(nodes: List[NodeWithScore], preferred_doc_type: Optional[str]) -> List[NodeWithScore]:
+    """
+    Boost nodes that match the user's preferred document type.
+    Uses metadata.doc_type, not filename patterns.
+    """
+    if not preferred_doc_type:
+        return nodes
+    
+    for node in nodes:
+        doc_type = node.node.metadata.get("doc_type", "")
+        if doc_type == preferred_doc_type:
+            node.score *= 1.3  # 30% boost for matching type
+            LOGGER.debug("Boosted %s (type: %s)", node.node.metadata.get("source", "unknown"), doc_type)
+    
+    # Re-sort after boosting
+    return sorted(nodes, key=lambda n: n.score, reverse=True)
+
+
 def _detect_topic_shift(query: str, query_history: List[Dict]) -> bool:
     """
     Use LLM to detect if the current query represents a topic shift.
@@ -254,25 +360,39 @@ def query_with_confidence(
 
     original_query = query_text
     
-    # SOFT RESET: Detect topic shift and auto-reset context
+    # STEP 1: Extract semantic topic from current query
+    current_topic = _extract_topic_keywords(query_text)
+    
+    # STEP 2: Topic inheritance - if no clear topic, inherit from last query
+    if not current_topic and use_conversation_context and app_state.last_topic:
+        current_topic = app_state.last_topic
+        LOGGER.info("No topic detected, inheriting: %s", current_topic)
+    
+    # STEP 3: Detect document type preference (form, checklist, etc.)
+    doc_type_preference = _detect_doc_type_preference(query_text)
+    
+    # STEP 4: Build cache key from semantic topic + doc type
+    cache_key = (current_topic, doc_type_preference)
+    last_cache_key = (app_state.last_topic, getattr(app_state, 'last_doc_type_pref', None))
+    
+    # STEP 5: Detect topic shift or hard cap
     topic_shift_detected = False
+    context_reset_note = None
+    
     if use_conversation_context and app_state.context_turn_count > 0:
-        if _detect_topic_shift(query_text, app_state.query_history):
-            LOGGER.info("Topic shift detected, performing soft reset")
+        # Check for topic shift (semantic comparison)
+        if current_topic and app_state.last_topic and current_topic != app_state.last_topic:
+            LOGGER.info("Topic shift detected: %s → %s", app_state.last_topic, current_topic)
             app_state.sticky_chunks.clear()
             app_state.context_turn_count = 0
             topic_shift_detected = True
-            context_reset_note = "🔄 Detected topic change - searching fresh sources"
-        # Check if we need to reset context (hard cap)
+            context_reset_note = f"🔄 Detected topic change ({app_state.last_topic} → {current_topic})"
+        # Check hard cap
         elif app_state.context_turn_count >= MAX_CONTEXT_TURNS:
             LOGGER.info("Context turn limit reached (%d), forcing fresh retrieval", MAX_CONTEXT_TURNS)
             app_state.sticky_chunks.clear()
             app_state.context_turn_count = 0
             context_reset_note = f"🔄 Starting fresh search (reached {MAX_CONTEXT_TURNS} turn limit)"
-        else:
-            context_reset_note = None
-    else:
-        context_reset_note = None
     
     if fortify:
         prompt = textwrap.dedent(
@@ -310,13 +430,19 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
     refinement_history: List[Dict[str, Any]] = []
     best_result: Optional[Dict[str, Any]] = None
 
-    # CONTEXT-AWARE LOGIC: Reuse chunks or retrieve fresh?
-    if use_conversation_context and app_state.sticky_chunks and app_state.context_turn_count > 0 and not topic_shift_detected:
-        # Reuse existing chunks from conversation (no topic shift)
+    # CONTEXT-AWARE LOGIC: Decide whether to reuse chunks or retrieve fresh
+    # Cache key comparison: same topic + same doc type = reuse
+    if (use_conversation_context and 
+        app_state.sticky_chunks and 
+        app_state.context_turn_count > 0 and 
+        not topic_shift_detected and
+        cache_key == last_cache_key):
+        # Reuse existing chunks (same semantic task)
         nodes = app_state.sticky_chunks
-        retrieval_mode = f"conversation_context (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
-        LOGGER.info("Reusing %d sticky chunks for followup query", len(nodes))
+        retrieval_mode = f"cached (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
+        LOGGER.info("Cache hit: reusing %d chunks for topic=%s", len(nodes), current_topic)
     else:
+        # Fresh retrieval needed
         # Fresh retrieval
         while attempt <= max_attempts:
             if retriever_type == "vector":
@@ -355,6 +481,11 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
 
             nodes = maximal_marginal_relevance(nodes, top_k=30, lambda_param=0.6)
             confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+            
+            # Apply doc type boosting based on metadata
+            if doc_type_preference:
+                nodes = _apply_doc_type_boost(nodes, doc_type_preference)
+                LOGGER.info("Applied doc type boost: %s", doc_type_preference)
 
             current_result = {
                 "attempt": attempt,
@@ -392,10 +523,12 @@ Rephrase this question to better match maritime documentation language. Do not o
                 continue
             break
         
-        # Store chunks for potential reuse in followups
+        # Store chunks and topic for potential reuse in followups
         if use_conversation_context:
             app_state.sticky_chunks = nodes
             app_state.context_turn_count = 1
+            app_state.last_topic = current_topic
+            app_state.last_doc_type_pref = doc_type_preference
             retrieval_mode = "fresh_retrieval (turn 1)"
         else:
             retrieval_mode = retriever_type
@@ -433,10 +566,10 @@ Rephrase this question to better match maritime documentation language. Do not o
 
     context = "\n".join(context_parts)
     
-    # Add conversation history if context mode is enabled
-    conversation_history = ""
+    # Build conversation summary (replaces full history for token efficiency)
+    conversation_summary = ""
     if use_conversation_context and app_state.query_history:
-        conversation_history = _build_conversation_history_context(app_state)
+        conversation_summary = _build_conversation_summary(app_state.query_history)
     
     if confidence_pct >= 80:
         confidence_instruction = "You have HIGH confidence sources. Answer authoritatively based on the clear documentation."
@@ -449,7 +582,7 @@ Rephrase this question to better match maritime documentation language. Do not o
 
 CONFIDENCE CONTEXT: {confidence_instruction}
 
-{conversation_history}
+{conversation_summary}
 
 CRITICAL RULES:
 - You ALWAYS answer in English, even if asked in another language.
@@ -479,12 +612,17 @@ Please provide a clear, concise answer with proper citations."""
     response = LlamaSettings.llm.complete(prompt)
     answer_text = response.text
     
-    # Increment context turn counter if in conversation mode
-    if use_conversation_context and app_state.context_turn_count > 0:
-        app_state.context_turn_count += 1
+    # Update conversation state
+    if use_conversation_context:
+        if app_state.context_turn_count > 0:
+            app_state.context_turn_count += 1
+        app_state.last_topic = current_topic
+        app_state.conversation_summary = conversation_summary
 
     result = {
         "query": original_query,
+        "topic_extracted": current_topic,  # Store for next turn
+        "doc_type_preference": doc_type_preference,
         "final_query": final_query_used if final_query_used != original_query else None,
         "refinement_history": refinement_history if len(refinement_history) > 1 else None,
         "attempts": attempt,

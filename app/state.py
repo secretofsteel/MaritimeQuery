@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+
 from collections import defaultdict
 
 from llama_index.core import Document, VectorStoreIndex
@@ -38,6 +39,8 @@ class AppState:
     sticky_chunks: List[Any] = field(default_factory=list)  # Reused chunks for followups
     context_turn_count: int = 0  # Track turns in current conversation thread
     conversation_active: bool = False  # Is context mode enabled?
+    last_topic: Optional[str] = None  # Semantic topic from last query (for inheritance)
+    conversation_summary: str = ""  # Running summary instead of full history
 
     def ensure_index_loaded(self) -> bool:
         """
@@ -155,6 +158,8 @@ class AppState:
         self.sticky_chunks.clear()
         self.context_turn_count = 0
         self.conversation_active = False
+        self.last_topic = None
+        self.conversation_summary = ""
         LOGGER.debug("Session reset: cleared query history and context state")
 
     def _ensure_history_path(self) -> Path:
