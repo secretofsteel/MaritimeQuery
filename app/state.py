@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from collections import defaultdict
 
@@ -42,6 +42,7 @@ class AppState:
     last_topic: Optional[str] = None  # Semantic topic from last query (for inheritance)
     conversation_summary: str = ""  # Running summary instead of full history
     last_doc_type_pref: Optional[str] = None  # Last detected doc type preference
+    last_scope: Optional[str] = None  # NEW: Last detected scope (company/regulatory/operational/safety/general)
 
     def ensure_index_loaded(self) -> bool:
         """
@@ -174,6 +175,7 @@ class AppState:
         self.conversation_active = False
         self.last_topic = None
         self.conversation_summary = ""
+        self.last_scope = None  # NEW: Clear scope on reset
         LOGGER.debug("Session reset: cleared query history and context state")
 
     def _ensure_history_path(self) -> Path:
