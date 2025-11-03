@@ -734,14 +734,22 @@ Rephrase this question to better match maritime documentation language. Do not o
             LOGGER.info("DEBUG: Storing chunks for future reuse...")
             LOGGER.info("  - Storing %d nodes in sticky_chunks", len(nodes))
             app_state.sticky_chunks = nodes
-            app_state.context_turn_count = 1
+            
+            # DON'T reset context_turn_count here - let the increment at the end handle it
+            # Only set to 1 if this is the very first query (count was 0)
+            if app_state.context_turn_count == 0:
+                app_state.context_turn_count = 1
+                LOGGER.info("DEBUG: First query - set context_turn_count to 1")
+            else:
+                LOGGER.info("DEBUG: Followup - leaving context_turn_count at %d (will increment at end)", app_state.context_turn_count)
+            
             app_state.last_topic = current_topic
             if hasattr(app_state, 'last_doc_type_pref'):
                 app_state.last_doc_type_pref = doc_type_preference
             if hasattr(app_state, 'last_scope'):
                 app_state.last_scope = current_scope
             LOGGER.info("DEBUG: After storage - sticky_chunks length: %d", len(app_state.sticky_chunks))
-            retrieval_mode = "fresh_retrieval (turn 1)"
+            retrieval_mode = f"fresh_retrieval (turn {app_state.context_turn_count})"
         else:
             retrieval_mode = retriever_type
 
