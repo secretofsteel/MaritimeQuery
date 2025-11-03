@@ -471,8 +471,9 @@ def _classify_query_intent(query: str) -> str:
     query_lower = query.strip().lower()
     
     # Fast path: exact matches for common patterns
-    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on",
-                "thanks", "thank you", "thx","tks", "ok", "okay", "got it", "bye", "goodbye", "what's up", "how are you", "how's it going", "what's new"}
+    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday", "hi there", 
+                "thanks", "thank you", "thx","tks", "ok", "okay", "got it", "bye", "goodbye", "what's up", "how are you", "how's it going", "what's new", "see you", "later", 
+                "talk to you later", "catch you later", "take care", "have a good day", "have a nice day", "cheers", "peace out", "farewell", "adios", "ciao", "see ya"}
     
     if query_lower in greetings or len(query.split()) <= 2:
         return "greeting"
