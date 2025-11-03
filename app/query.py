@@ -1,4 +1,4 @@
-"""Query orchestration, confidence scoring, and reranking - WITH CONTEXT-AWARE CHAT."""
+"""Query orchestration, confidence scoring, and reranking - WITH CONTEXT-AWARE CHAT (DEBUG VERSION)."""
 
 from __future__ import annotations
 
@@ -291,7 +291,10 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
         Re-scored and re-sorted nodes
     """
     if not cached_nodes:
+        LOGGER.warning("DEBUG: _rescore_cached_chunks called with empty cached_nodes")
         return cached_nodes
+    
+    LOGGER.info("DEBUG: _rescore_cached_chunks starting with %d nodes", len(cached_nodes))
     
     try:
         # Get query embedding using the same model as indexing
@@ -321,7 +324,7 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
         
         # Re-sort by new scores
         rescored = sorted(cached_nodes, key=lambda n: n.score, reverse=True)
-        LOGGER.info("Re-scored %d cached chunks against new query", len(rescored))
+        LOGGER.info("✅ Re-scored %d cached chunks against new query", len(rescored))
         return rescored
         
     except Exception as exc:
@@ -464,6 +467,22 @@ def query_with_confidence(
     rerank: bool = False,
     use_conversation_context: bool = False,
 ) -> Dict[str, Any]:
+    # ============ DEBUG ENTRY POINT ============
+    LOGGER.info("=" * 80)
+    LOGGER.info("🔍 DEBUG: QUERY START")
+    LOGGER.info("Query: %s", query_text[:100])
+    LOGGER.info("Context enabled: %s", use_conversation_context)
+    LOGGER.info("State at entry:")
+    LOGGER.info("  - context_turn_count: %d", app_state.context_turn_count)
+    LOGGER.info("  - sticky_chunks: %s (length: %d)", 
+               bool(app_state.sticky_chunks),
+               len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+    LOGGER.info("  - last_topic: %s", app_state.last_topic)
+    LOGGER.info("  - last_doc_type_pref: %s", getattr(app_state, 'last_doc_type_pref', None))
+    LOGGER.info("  - last_scope: %s", getattr(app_state, 'last_scope', None))
+    LOGGER.info("  - query_history length: %d", len(app_state.query_history))
+    LOGGER.info("=" * 80)
+    
     config = AppConfig.get()
     app_state.ensure_retrievers()
     vector_retriever = app_state.vector_retriever
@@ -475,6 +494,7 @@ def query_with_confidence(
     
     # STEP 1: Extract semantic topic (broader umbrella concept)
     current_topic = _extract_topic_keywords(query_text)
+    LOGGER.info("DEBUG: Extracted topic: %s", current_topic)
     
     # STEP 2: Topic inheritance - if no clear topic, inherit from last query
     if not current_topic and use_conversation_context and app_state.last_topic:
@@ -483,9 +503,11 @@ def query_with_confidence(
     
     # STEP 3: Detect document type preference
     doc_type_preference = _detect_doc_type_preference(query_text)
+    LOGGER.info("DEBUG: Doc type preference: %s", doc_type_preference)
     
     # STEP 4: Detect scope (NEW - third cache dimension)
     current_scope = _detect_scope(query_text)
+    LOGGER.info("DEBUG: Detected scope: %s", current_scope)
     
     # STEP 5: Build cache key (now includes scope)
     cache_key = (current_topic, doc_type_preference, current_scope)
@@ -502,7 +524,13 @@ def query_with_confidence(
     context_reset_note = None
     should_reuse_cache = False
     
+    LOGGER.info("DEBUG: Checking if shift detection needed...")
+    LOGGER.info("  - use_conversation_context: %s", use_conversation_context)
+    LOGGER.info("  - context_turn_count > 0: %s", app_state.context_turn_count > 0)
+    LOGGER.info("  - query_history exists: %s", bool(app_state.query_history))
+    
     if use_conversation_context and app_state.context_turn_count > 0 and app_state.query_history:
+        LOGGER.info("DEBUG: Running shift detection...")
         # Get last Q&A for shift detection
         last_entry = app_state.query_history[-1]
         last_query = last_entry.get("query", "")
@@ -510,23 +538,32 @@ def query_with_confidence(
         
         # Ask Gemini: is this a direct continuation?
         topic_shift_detected = _detect_topic_shift_with_gemini(query_text, last_query, last_answer)
+        LOGGER.info("DEBUG: Shift detected: %s", topic_shift_detected)
         
         if topic_shift_detected:
             # True topic shift - clear everything
-            LOGGER.info("Topic shift detected, clearing context")
+            LOGGER.info("🔄 Topic shift detected, clearing context")
+            LOGGER.info("DEBUG: Clearing sticky_chunks (was: %d)", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
             app_state.sticky_chunks.clear()
             app_state.context_turn_count = 0
             context_reset_note = "🔄 Detected topic change (starting fresh search)"
             should_reuse_cache = False
+            LOGGER.info("DEBUG: After clear - sticky_chunks length: %d", len(app_state.sticky_chunks))
         else:
             # Shift detector says FOLLOWUP - trust it!
+            LOGGER.info("DEBUG: FOLLOWUP detected - checking cache availability...")
+            LOGGER.info("  - sticky_chunks exists: %s", bool(app_state.sticky_chunks))
+            LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+            
             # Even if cache keys don't match perfectly, reuse if we have chunks
             if app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
                 should_reuse_cache = True
-                LOGGER.info("Shift detector says FOLLOWUP - reusing cache despite key differences")
+                LOGGER.info("✅ Shift detector says FOLLOWUP - reusing cache despite key differences")
             else:
                 should_reuse_cache = False
-                LOGGER.info("Shift detector says FOLLOWUP but no cached chunks available")
+                LOGGER.warning("⚠️ Shift detector says FOLLOWUP but no cached chunks available!")
+    else:
+        LOGGER.info("DEBUG: Skipping shift detection (first query or context disabled)")
     
     # Check hard cap on turns
     if use_conversation_context and app_state.context_turn_count >= MAX_CONTEXT_TURNS:
@@ -574,16 +611,23 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
     best_result: Optional[Dict[str, Any]] = None
     final_query_used = query_text
     
+    # ============ DECISION POINT ============
+    LOGGER.info("DEBUG: Cache decision - should_reuse_cache: %s", should_reuse_cache)
+    
     # DECISION: Reuse cache or retrieve fresh?
     if should_reuse_cache:
+        LOGGER.info("🎯 CACHE HIT PATH - Re-scoring cached chunks")
+        LOGGER.info("DEBUG: sticky_chunks length before rescore: %d", len(app_state.sticky_chunks))
+        
         # Re-score cached chunks against new query
-        LOGGER.info("Cache hit: re-scoring %d chunks (turn %d)", len(app_state.sticky_chunks), app_state.context_turn_count + 1)
         nodes = _rescore_cached_chunks(app_state.sticky_chunks, query_text, config)
+        LOGGER.info("DEBUG: Nodes after rescore: %d", len(nodes))
         
         retrieval_mode = f"cached+rescored (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
         
         # Calculate confidence for re-scored nodes
         confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+        LOGGER.info("DEBUG: Confidence calculated: %d%%", confidence_pct)
         
         # Set best_result immediately
         best_result = {
@@ -596,8 +640,10 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
         }
         final_query_used = query_text
         attempt = 1
+        LOGGER.info("DEBUG: best_result set in cache path")
         
     else:
+        LOGGER.info("🔍 FRESH RETRIEVAL PATH")
         # Fresh retrieval
         LOGGER.info("Fresh retrieval: topic=%s, scope=%s, context_enabled=%s", 
                    current_topic, current_scope, use_conversation_context)
@@ -681,8 +727,12 @@ Rephrase this question to better match maritime documentation language. Do not o
                 continue
             break
         
+        LOGGER.info("DEBUG: Fresh retrieval complete, nodes: %d", len(nodes))
+        
         # Store chunks for potential reuse
         if use_conversation_context:
+            LOGGER.info("DEBUG: Storing chunks for future reuse...")
+            LOGGER.info("  - Storing %d nodes in sticky_chunks", len(nodes))
             app_state.sticky_chunks = nodes
             app_state.context_turn_count = 1
             app_state.last_topic = current_topic
@@ -690,12 +740,19 @@ Rephrase this question to better match maritime documentation language. Do not o
                 app_state.last_doc_type_pref = doc_type_preference
             if hasattr(app_state, 'last_scope'):
                 app_state.last_scope = current_scope
+            LOGGER.info("DEBUG: After storage - sticky_chunks length: %d", len(app_state.sticky_chunks))
             retrieval_mode = "fresh_retrieval (turn 1)"
         else:
             retrieval_mode = retriever_type
 
+    LOGGER.info("DEBUG: Checking best_result before generation...")
     if not best_result:
-        LOGGER.error("No best_result set!")
+        LOGGER.error("❌ No best_result set! This should never happen.")
+        LOGGER.error("DEBUG state dump:")
+        LOGGER.error("  - should_reuse_cache was: %s", should_reuse_cache)
+        LOGGER.error("  - use_conversation_context: %s", use_conversation_context)
+        LOGGER.error("  - sticky_chunks: %s", bool(app_state.sticky_chunks))
+        LOGGER.error("  - context_turn_count: %d", app_state.context_turn_count)
         raise RuntimeError("No retrieval results available.")
 
     nodes = best_result.get("nodes", nodes)
@@ -703,6 +760,8 @@ Rephrase this question to better match maritime documentation language. Do not o
     confidence_level = best_result.get("confidence_level", "N/A")
     confidence_note = best_result.get("confidence_note", "")
     final_query_used = best_result.get("query", query_text)
+
+    LOGGER.info("DEBUG: Building context from %d nodes", len(nodes))
 
     context_parts = []
     sources_info = []
@@ -775,9 +834,11 @@ Please provide a clear, concise answer with proper citations."""
     answer_text = response.text
     
     # Update conversation state
+    LOGGER.info("DEBUG: Updating conversation state...")
     if use_conversation_context:
         if app_state.context_turn_count > 0:
             app_state.context_turn_count += 1
+            LOGGER.info("DEBUG: Incremented context_turn_count to %d", app_state.context_turn_count)
         app_state.last_topic = current_topic
         if hasattr(app_state, 'last_doc_type_pref'):
             app_state.last_doc_type_pref = doc_type_preference
@@ -788,7 +849,7 @@ Please provide a clear, concise answer with proper citations."""
         "query": original_query,
         "topic_extracted": current_topic,
         "doc_type_preference": doc_type_preference,
-        "scope": current_scope,  # NEW
+        "scope": current_scope,
         "final_query": final_query_used if final_query_used != original_query else None,
         "refinement_history": refinement_history if len(refinement_history) > 1 else None,
         "attempts": attempt,
@@ -804,6 +865,14 @@ Please provide a clear, concise answer with proper citations."""
         "context_turn": app_state.context_turn_count if use_conversation_context else 0,
         "context_reset_note": context_reset_note,
     }
+    
+    LOGGER.info("=" * 80)
+    LOGGER.info("✅ DEBUG: QUERY COMPLETE")
+    LOGGER.info("State at exit:")
+    LOGGER.info("  - context_turn_count: %d", app_state.context_turn_count)
+    LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+    LOGGER.info("  - retriever_type: %s", retrieval_mode)
+    LOGGER.info("=" * 80)
     
     return result
 
