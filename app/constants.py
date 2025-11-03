@@ -1,9 +1,13 @@
 """Constants copied from the original Streamlit implementation."""
 
 from __future__ import annotations
+import os
 
 CHUNK_SIZE = 1024
 CHUNK_OVERLAP = 200
+
+# Debug mode toggle (can be controlled via environment variable or admin UI)
+DEBUG_RAG = os.getenv("DEBUG_RAG", "false").lower() == "true"
 
 GEMINI_SCHEMA = {
     "type": "object",
@@ -108,6 +112,7 @@ CONTEXT_HISTORY_WINDOW = 3  # Number of recent Q&A pairs to include in prompt
 __all__ = [
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
+    "DEBUG_RAG",
     "GEMINI_SCHEMA",
     "FORM_CATEGORIES",
     "EXTRACT_SYSTEM_PROMPT",

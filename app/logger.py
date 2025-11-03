@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import Optional
 
 
-def setup_logger(name: str = "maritime_rag", level: int = logging.DEBUG) -> logging.Logger:
+def setup_logger(name: str = "maritime_rag", level: Optional[int] = None) -> logging.Logger:
     """Return a configured logger instance."""
+    # Check for DEBUG_RAG environment variable
+    if level is None:
+        debug_rag = os.getenv("DEBUG_RAG", "false").lower() == "true"
+        level = logging.DEBUG if debug_rag else logging.INFO
+    
     logger = logging.getLogger(name)
     
     # Force remove any existing handlers
@@ -16,7 +22,7 @@ def setup_logger(name: str = "maritime_rag", level: int = logging.DEBUG) -> logg
     
     # Create handler that writes to stdout (Streamlit captures this)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)  # Handler level
+    handler.setLevel(level)
     
     # Detailed formatter
     formatter = logging.Formatter(
@@ -27,7 +33,7 @@ def setup_logger(name: str = "maritime_rag", level: int = logging.DEBUG) -> logg
     logger.addHandler(handler)
     
     # Set logger level
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(level)
     logger.propagate = False  # Don't propagate to root logger
     
     return logger
