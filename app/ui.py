@@ -695,8 +695,9 @@ def render_app(
     # Create a centered container for the title and caption
     title_html = """
     <div style="text-align: center;">
-        <h1 style="margin-bottom: 0.5em;">⚓ MA.D.ASS: The Maritime Documentation Assistant</h1>
-        <h3 style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h3>
+        <h1 style="margin-bottom: 0.2em;">⚓ MA.D.ASS</h1>
+        <h2>The Maritime Documentation Assistant</h2>
+        <h4 style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h4>
     </div>
     """
 
