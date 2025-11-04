@@ -34,7 +34,7 @@ def _reset_chat_state(app_state: AppState) -> None:
     """Clear chat history and feedback toggles."""
     app_state.reset_session()
     for key in list(st.session_state.keys()):
-        if key.startswith("correction_toggle_") or key.startswith("correction_text_") or key.startswith("confirm_"):
+        if key.startswith("correction_toggle_") or key.startswith("correction_text_"):
             st.session_state.pop(key)
 
 
@@ -207,7 +207,7 @@ def compose_result_markdown(result: Dict) -> str:
                     form_desc += f" - {form_category}"
                 location_segments = [form_desc]
 
-            location_text = " • ".join(filter(None, location_segments)) or "Main document"
+            location_text = " â€¢ ".join(filter(None, location_segments)) or "Main document"
             location_text = location_text.replace("\n", " ").strip()
             truncated = False
             if len(location_text) > 120:
@@ -266,7 +266,7 @@ def save_result_as_html(result: Dict, output_file: str = "rag_result.html", titl
 def load_or_warn(app_state: AppState) -> None:
     """DEPRECATED: Use app_state.ensure_index_loaded() instead."""
     if not app_state.ensure_index_loaded():
-        st.warning("⚠️ No cached index found. Please build the index first.")
+        st.warning("âš ï¸ No cached index found. Please build the index first.")
 
 
 def rebuild_index(app_state: AppState) -> None:
@@ -279,11 +279,11 @@ def rebuild_index(app_state: AppState) -> None:
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
             app_state.ensure_manager().nodes = nodes
-            st.success(f"✅ Rebuilt index with {len(nodes)} chunks.")
+            st.success(f"âœ… Rebuilt index with {len(nodes)} chunks.")
             LOGGER.info("Index rebuilt successfully: %d nodes", len(nodes))
         except Exception as exc:
             LOGGER.exception("Failed to rebuild index")
-            st.error(f"❌ Failed to rebuild index: {exc}")
+            st.error(f"âŒ Failed to rebuild index: {exc}")
 
 
 def sync_library(app_state: AppState) -> None:
@@ -293,7 +293,7 @@ def sync_library(app_state: AppState) -> None:
         try:
             changes = manager.sync_library(app_state.index)
             st.success(
-                f"✅ Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
+                f"âœ… Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
             )
             app_state.nodes = manager.nodes
             app_state.vector_retriever = None
@@ -302,7 +302,7 @@ def sync_library(app_state: AppState) -> None:
             LOGGER.info("Library synced: +%d, ~%d, -%d", len(changes.added), len(changes.modified), len(changes.deleted))
         except Exception as exc:
             LOGGER.exception("Failed to sync library")
-            st.error(f"❌ Failed to sync library: {exc}")
+            st.error(f"âŒ Failed to sync library: {exc}")
 
 
 def render_feedback_stats_panel(app_state: AppState) -> None:
@@ -372,13 +372,13 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         
         # Confidence badge (single emoji, removed duplicate)
         confidence_color = {
-            "HIGH 🟢": "🟢",
-            "MEDIUM 🟡": "🟡", 
-            "LOW 🔴": "🔴"
+            "HIGH ðŸŸ¢": "ðŸŸ¢",
+            "MEDIUM ðŸŸ¡": "ðŸŸ¡", 
+            "LOW ðŸ”´": "ðŸ”´"
         }
-        badge_emoji = confidence_color.get(conf_level, "⚪")
+        badge_emoji = confidence_color.get(conf_level, "âšª")
         # Remove emoji from conf_level to avoid duplication
-        conf_level_text = conf_level.replace("🟢", "").replace("🟡", "").replace("🔴", "").strip()
+        conf_level_text = conf_level.replace("ðŸŸ¢", "").replace("ðŸŸ¡", "").replace("ðŸ”´", "").strip()
         
         # Build caption with context info
         caption_parts = [f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text})", f"**Sources:** {num_sources}"]
@@ -386,23 +386,23 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         # Add context mode indicator if applicable
         if result.get("context_mode"):
             context_turn = result.get("context_turn", 0)
-            caption_parts.append(f"💬 **Turn:** {context_turn}")
+            caption_parts.append(f"ðŸ’¬ **Turn:** {context_turn}")
             
         # Add reset notification if applicable
         if result.get("context_reset_note"):
             st.info(result["context_reset_note"])
         
-        st.caption(" • ".join(caption_parts))
+        st.caption(" â€¢ ".join(caption_parts))
         
         # Expandable sources
         if sources:
-            with st.expander("📚 View sources", expanded=False):
+            with st.expander("ðŸ“š View sources", expanded=False):
                 for idx, src in enumerate(sources[:5], 1):
                     source_file = src.get("source", "Unknown")
                     title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
                     section = src.get("section", "Main document")
                     st.markdown(f"**{idx}. {title}**")
-                    st.caption(f"└─ {section}")
+                    st.caption(f"â””â”€ {section}")
         
         if confidence_note:
             st.info(confidence_note)
@@ -456,7 +456,7 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         file_name = f"query_result_{message_index}.html"
         with cols[0]:
             st.download_button(
-                "📥",
+                "ðŸ“¥",
                 data=export_html,
                 file_name=file_name,
                 mime="text/html",
@@ -466,20 +466,20 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
         
         # Helpful button
         with cols[1]:
-            if st.button("👍", key=f"helpful_{message_index}", help="Helpful"):
+            if st.button("ðŸ‘", key=f"helpful_{message_index}", help="Helpful"):
                 app_state.feedback_system.log_feedback(result, "helpful")
-                st.toast("✅ Feedback recorded", icon="👍")
+                st.toast("âœ… Feedback recorded", icon="ðŸ‘")
         
         # Not helpful button
         with cols[2]:
-            if st.button("👎", key=f"not_helpful_{message_index}", help="Not helpful"):
+            if st.button("ðŸ‘Ž", key=f"not_helpful_{message_index}", help="Not helpful"):
                 app_state.feedback_system.log_feedback(result, "not_helpful")
-                st.toast("📝 Feedback recorded", icon="👎")
+                st.toast("ðŸ“ Feedback recorded", icon="ðŸ‘Ž")
         
         # Report issue button
         correction_toggle_key = f"correction_toggle_{message_index}"
         with cols[3]:
-            if st.button("⚠️", key=f"incorrect_{message_index}", help="Report issue"):
+            if st.button("âš ï¸", key=f"incorrect_{message_index}", help="Report issue"):
                 st.session_state[correction_toggle_key] = not st.session_state.get(correction_toggle_key, False)
         
         # Correction input (shown when toggled)
@@ -493,7 +493,7 @@ def render_chat_message_with_feedback(app_state: AppState, result: Dict, message
             if st.button("Submit correction", key=f"submit_correction_{message_index}"):
                 if correction.strip():
                     app_state.feedback_system.log_feedback(result, "incorrect", correction.strip())
-                    st.toast("✅ Correction submitted", icon="⚠️")
+                    st.toast("âœ… Correction submitted", icon="âš ï¸")
                     st.session_state[correction_toggle_key] = False
                     st.session_state.pop(f"correction_text_{message_index}", None)
                     _rerun_app()
@@ -508,7 +508,7 @@ def render_app(
 ) -> None:
     st.set_page_config(
         page_title="Maritime RAG Assistant",
-        page_icon="⚓",
+        page_icon="âš“",
         layout="centered",  # Changed from "wide" to enable max-width control
         initial_sidebar_state="expanded"
     )
@@ -579,37 +579,29 @@ def render_app(
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("⚓ Maritime RAG Assistant")
+    st.title("âš“ Maritime RAG Assistant")
     st.caption("Intelligent document search powered by Gemini + LlamaIndex")
+
+    # DEFENSIVE: Ensure session attributes exist (backwards compatibility)
+    if not hasattr(app_state, 'session_manager'):
+        app_state.session_manager = None
+    if not hasattr(app_state, 'current_session_id'):
+        app_state.current_session_id = None
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
-        st.error("⚠️ **No index found.** Please build the index first using the sidebar controls.")
+        st.error("âš ï¸ **No index found.** Please build the index first using the sidebar controls.")
         if not read_only_mode:
-            if st.button("🔨 Build Index Now"):
+            if st.button("ðŸ”¨ Build Index Now"):
                 rebuild_index(app_state)
                 _rerun_app()
         st.stop()
     
     # Ensure retrievers are ready
     if not app_state.is_ready_for_queries():
-        st.error("⚠️ **System not ready.** Retrievers failed to initialize.")
+        st.error("âš ï¸ **System not ready.** Retrievers failed to initialize.")
         st.stop()
     
-    # Ensure we have a session
-    if not app_state.current_session_id:
-        # Check if there are existing sessions
-        manager = app_state.ensure_session_manager()
-        sessions = manager.list_sessions(limit=1)
-        
-        if sessions:
-            # Load most recent session
-            app_state.switch_session(sessions[0].session_id)
-        else:
-            # Create first session
-            app_state.create_new_session()
-
-
     # Load chat history
     app_state.ensure_history_loaded()
     
@@ -625,12 +617,12 @@ def render_app(
         # Admin/User mode toggle button at the top
         if read_only_mode:
             # In viewer mode - show Admin button
-            if st.button("🔓 Admin", use_container_width=True, key="mode_toggle", type="primary"):
+            if st.button("ðŸ”“ Admin", use_container_width=True, key="mode_toggle", type="primary"):
                 st.query_params["read_only"] = "false"
                 _rerun_app()
         else:
             # In admin mode - show User button
-            if st.button("👤 User", use_container_width=True, key="mode_toggle", type="secondary"):
+            if st.button("ðŸ‘¤ User", use_container_width=True, key="mode_toggle", type="secondary"):
                 st.query_params["read_only"] = "true"
                 _rerun_app()
 
@@ -700,13 +692,13 @@ def render_app(
         </style>
         """, unsafe_allow_html=True)
         
-        st.header("⚙️ Settings")
+        st.header("âš™ï¸ Settings")
         
-        if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
-            app_state.create_new_session()
+        if st.button("ðŸ”„ Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
+            _reset_chat_state(app_state)
             _rerun_app()
         
-        with st.expander("🔍 Retrieval Options", expanded=True):
+        with st.expander("ðŸ” Retrieval Options", expanded=True):
             retrieval_type = st.selectbox(
                 "Method",
                 ["hybrid", "vector", "bm25"],
@@ -736,30 +728,61 @@ def render_app(
             
             # NEW: Context-aware conversation toggle
             use_context = st.checkbox(
-                "💬 Context-aware chat",
+                "ðŸ’¬ Context-aware chat",
                 key="use_context",
                 help=f"Remember previous exchanges (resets after {MAX_CONTEXT_TURNS} turns)"
             )
             
             # Show context status if enabled
             if use_context and app_state.context_turn_count > 0:
-                st.caption(f"📍 Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
+                st.caption(f"ðŸ“ Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
                 if app_state.context_turn_count >= MAX_CONTEXT_TURNS - 1:
-                    st.caption("⚠️ Next query will start fresh")
+                    st.caption("âš ï¸ Next query will start fresh")
         
         # Library management (only if not read-only)
         if not read_only_mode:
-            with st.expander("📚 Library Management", expanded=False):
-                if st.button("📥 Load cache", use_container_width=True):
+            with st.expander("ðŸ“š Library Management", expanded=False):
+                if st.button("ðŸ“¥ Load cache", use_container_width=True):
                     load_or_warn(app_state)
-                if st.button("🔨 Rebuild index", use_container_width=True):
+                if st.button("ðŸ”¨ Rebuild index", use_container_width=True):
                     rebuild_index(app_state)
-                if st.button("🔄 Sync library", use_container_width=True):
+                if st.button("ðŸ”„ Sync library", use_container_width=True):
                     sync_library(app_state)
         
-
-        # Sessions list
+        
+        # Sessions list (Claude-style)
         with st.expander("💬 Sessions", expanded=False):
+            # Custom CSS for Claude-like session buttons
+            st.markdown("""
+            <style>
+            /* Remove button styling from session items */
+            div[data-testid="column"] button[kind="secondary"] {
+                border: none !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                padding: 0.5rem 0.75rem !important;
+                text-align: left !important;
+            }
+            
+            /* Hover effect only */
+            div[data-testid="column"] button[kind="secondary"]:hover {
+                background: rgba(255, 255, 255, 0.1) !important;
+                border-radius: 8px !important;
+            }
+            
+            /* Active session indicator */
+            div[data-testid="column"] button[kind="secondary"]:active {
+                background: rgba(255, 255, 255, 0.15) !important;
+            }
+            
+            /* Keep delete button styled but minimal */
+            button[key^="delete_"] {
+                padding: 0.25rem 0.5rem !important;
+                min-width: 2rem !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
             manager = app_state.ensure_session_manager()
             sessions = manager.list_sessions(limit=20)
             
@@ -779,13 +802,13 @@ def render_app(
                     col1, col2 = st.columns([4, 1])
                     
                     with col1:
-                        if st.button(button_label, key=button_key, use_container_width=True):
+                        if st.button(button_label, key=button_key, use_container_width=True, type="secondary"):
                             if not is_current:
                                 app_state.switch_session(session.session_id)
                                 _rerun_app()
                     
                     with col2:
-                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session"):
+                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session", type="secondary"):
                             manager.delete_session(session.session_id)
                             if is_current:
                                 # If deleting current session, create new one
@@ -807,9 +830,10 @@ def render_app(
                         st.session_state["confirm_clear_all"] = True
                         st.warning("⚠️ Click again to confirm deletion of ALL sessions")
         
+        
         # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
-        with st.expander("📄 Documents on file", expanded=False):
+        with st.expander("ðŸ“„ Documents on file", expanded=False):
             if grouped:
                 order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
                 heading_map = {
@@ -838,45 +862,20 @@ def render_app(
         
         # Feedback stats (ONLY for admin, not viewer)
         if not read_only_mode:
-            with st.expander("📊 Feedback stats", expanded=False):
+            with st.expander("ðŸ“Š Feedback stats", expanded=False):
                 render_feedback_stats_panel(app_state)
 
     # Main chat interface
     st.markdown("---")
     
-    # Ensure we have a current session
-    if not app_state.current_session_id:
-        app_state.create_new_session()
-
-    # Render messages from current session
-    messages = app_state.get_current_session_messages()
-
-    user_msg_idx = 0  # For unique keys
-    asst_msg_idx = 0
-
-    for msg in messages:
-        if msg["role"] == "user":
-            with st.chat_message("user"):
-                st.markdown(msg["content"])
-            user_msg_idx += 1
+    # Render chat history using native st.chat_message
+    for idx, result in enumerate(app_state.query_history):
+        # User message
+        with st.chat_message("user"):
+            st.markdown(result.get("query", "Untitled query"))
         
-        elif msg["role"] == "assistant":
-            # Reconstruct result dict for feedback rendering
-            result = {
-                "query": messages[asst_msg_idx * 2]["content"] if asst_msg_idx * 2 < len(messages) else "Query",
-                "answer": msg["content"],
-                "confidence_pct": msg.get("confidence_pct", 0),
-                "confidence_level": msg.get("confidence_level", "N/A"),
-                "confidence_note": msg.get("confidence_note", ""),
-                "sources": msg.get("sources", []),
-                "num_sources": msg.get("num_sources", 0),
-                "retriever_type": msg.get("retriever_type", "unknown"),
-                "context_mode": msg.get("context_mode", False),
-                "context_turn": msg.get("context_turn", 0),
-                "context_reset_note": msg.get("context_reset_note"),
-            }
-            render_chat_message_with_feedback(app_state, result, asst_msg_idx)
-            asst_msg_idx += 1
+        # Assistant message with feedback
+        render_chat_message_with_feedback(app_state, result, idx)
     
     # Chat input
     user_prompt = st.chat_input("Ask about the maritime library...")
@@ -884,7 +883,7 @@ def render_app(
     if user_prompt:
         trimmed = user_prompt.strip()
         if not trimmed:
-            st.warning("⚠️ Please enter a question.")
+            st.warning("âš ï¸ Please enter a question.")
         else:
             # Show user message immediately
             with st.chat_message("user"):
@@ -892,7 +891,7 @@ def render_app(
             
             # Process query with spinner
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching documents..."):
+                with st.spinner("ðŸ” Searching documents..."):
                     try:
                         result = query_with_confidence(
                             app_state,
@@ -901,42 +900,17 @@ def render_app(
                             auto_refine=auto_refine_option,
                             fortify=fortify_option,
                             rerank=rerank_option,
-                            use_conversation_context=use_context,
+                            use_conversation_context=use_context,  # NEW: Pass context flag
                         )
-
-                        # Add messages to session
-                        app_state.add_message_to_current_session("user", trimmed)
-
-                        # Extract metadata for assistant message
-                        assistant_metadata = {
-                            "confidence_pct": result.get("confidence_pct"),
-                            "confidence_level": result.get("confidence_level"),
-                            "confidence_note": result.get("confidence_note"),
-                            "sources": result.get("sources"),
-                            "num_sources": result.get("num_sources"),
-                            "retriever_type": result.get("retriever_type"),
-                            "context_mode": result.get("context_mode"),
-                            "context_turn": result.get("context_turn"),
-                            "context_reset_note": result.get("context_reset_note"),
-                        }
-
-                        app_state.add_message_to_current_session(
-                            "assistant",
-                            result.get("answer", ""),
-                            assistant_metadata
-                        )
-
-                        # DEPRECATED: Keep for backwards compatibility during transition
                         app_state.append_history(result)
-
                         LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
-                                result.get("confidence_pct", 0), result.get("num_sources", 0))
+                                   result.get("confidence_pct", 0), result.get("num_sources", 0))
                         _rerun_app()
                         
                     except Exception as exc:
                         LOGGER.exception("Query failed: %s", exc)
-                        st.error(f"❌ **Search failed:** {exc}")
-                        st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
+                        st.error(f"âŒ **Search failed:** {exc}")
+                        st.info("ðŸ’¡ **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
 
 
 def render_viewer_app(app_state: AppState) -> None:
