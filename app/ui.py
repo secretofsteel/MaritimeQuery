@@ -697,7 +697,7 @@ def render_app(
     <div style="text-align: center;">
         <h1 style="margin-bottom: 0.2em;">⚓ MA.D.ASS</h1>
         <h2>The Maritime Documentation Assistant</h2>
-        <h4 style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h4>
+        <h5 style="margin-top: 0.1em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h5>
     </div>
     """
 
