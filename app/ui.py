@@ -89,53 +89,6 @@ _HTML_SHELL = """
 """
 
 
-_SESSION_BUTTON_CSS = """
-<style>
-section[data-testid="stSidebar"] button[aria-label="Select session"] {
-    background: transparent !important;
-    border: 1px solid transparent !important;
-    box-shadow: none !important;
-    color: inherit !important;
-    width: 100% !important;
-    text-align: left !important;
-    padding: 0.5rem 0.75rem !important;
-    border-radius: 10px !important;
-    cursor: pointer !important;
-    transition: background-color 0.2s ease, color 0.2s ease;
-}
-
-section[data-testid="stSidebar"] button[aria-label="Select session"]:hover {
-    background: rgba(255, 255, 255, 0.08) !important;
-}
-
-section[data-testid="stSidebar"] button[aria-label="Select session"]:focus-visible {
-    outline: 1px solid rgba(255, 255, 255, 0.4) !important;
-    outline-offset: 2px !important;
-}
-
-section[data-testid="stSidebar"] button[aria-label="Delete session"] {
-    background: transparent !important;
-    border: 1px solid transparent !important;
-    box-shadow: none !important;
-    color: inherit !important;
-    padding: 0.35rem !important;
-    border-radius: 8px !important;
-    cursor: pointer !important;
-    transition: background-color 0.2s ease;
-}
-
-section[data-testid="stSidebar"] button[aria-label="Delete session"]:hover {
-    background: rgba(255, 255, 255, 0.08) !important;
-}
-
-section[data-testid="stSidebar"] button[aria-label="Delete session"]:focus-visible {
-    outline: 1px solid rgba(255, 255, 255, 0.4) !important;
-    outline-offset: 2px !important;
-}
-</style>
-"""
-
-
 def compose_result_markdown(result: Dict) -> str:
     """Compose a styled HTML fragment for a chat response."""
     original_query = (result.get("query") or "No original query").strip() or "Untitled query"
@@ -746,11 +699,9 @@ def render_app(
         }
         </style>
         """, unsafe_allow_html=True)
-
-        st.markdown(_SESSION_BUTTON_CSS, unsafe_allow_html=True)
-
+        
         st.header("⚙️ Settings")
-
+        
         if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
             app_state.create_new_session()
             _rerun_app()
@@ -826,14 +777,9 @@ def render_app(
                     button_label = f"{prefix}{title_preview} ({session.message_count})"
                     
                     col1, col2 = st.columns([4, 1])
-
+                    
                     with col1:
-                        if st.button(
-                            button_label,
-                            key=button_key,
-                            use_container_width=True,
-                            help="Select session",
-                        ):
+                        if st.button(button_label, key=button_key, use_container_width=True):
                             if not is_current:
                                 app_state.switch_session(session.session_id)
                                 _rerun_app()
