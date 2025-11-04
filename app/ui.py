@@ -676,7 +676,7 @@ def render_app(
     st.session_state.setdefault("rerank_enabled", cohere_client is not None)
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
-    st.session_state.setdefault("use_context", False)  # NEW: Context-aware chat toggle
+    st.session_state.setdefault("use_context", True)  # Default ON for context-aware chat
 
     # Sidebar configuration
     with st.sidebar:
@@ -710,6 +710,17 @@ def render_app(
         section[data-testid="stSidebar"] button[kind="secondary"]:hover {
             background: rgba(10, 132, 255, 0.2) !important;
             border-color: rgba(10, 132, 255, 0.5) !important;
+        }
+        
+        /* Center icons in small button squares (export/delete) */
+        section[data-testid="stSidebar"] div[data-testid="column"] button p {
+            text-align: center !important;
+            justify-content: center !important;
+        }
+        
+        section[data-testid="stSidebar"] .stDownloadButton button p {
+            text-align: center !important;
+            justify-content: center !important;
         }
         
         /* Scrollable panel styling from original code */
@@ -849,40 +860,40 @@ def render_app(
                                 _rerun_app()
                     
                     with col2:
-                        # Export button
-                        if st.button("📥", key=f"export_{session.session_id}", help="Export session"):
-                            # Load messages for this session
-                            session_messages = manager.load_messages(session.session_id)
-                            
-                            # Convert to display format
-                            messages_for_export = [
-                                {
-                                    "role": msg.role,
-                                    "content": msg.content,
-                                    "confidence_pct": msg.metadata.get("confidence_pct", 0),
-                                    "confidence_level": msg.metadata.get("confidence_level", "N/A"),
-                                    "confidence_note": msg.metadata.get("confidence_note", ""),
-                                    "sources": msg.metadata.get("sources", []),
-                                    "num_sources": msg.metadata.get("num_sources", 0),
-                                    "retriever_type": msg.metadata.get("retriever_type", "unknown"),
-                                }
-                                for msg in session_messages
-                            ]
-                            
-                            # Generate HTML
-                            export_html = build_session_export_html(messages_for_export, session.title)
-                            
-                            # Trigger download
-                            st.download_button(
-                                label="Download",
-                                data=export_html,
-                                file_name=f"{session.title[:30].replace(' ', '_')}_session.html",
-                                mime="text/html",
-                                key=f"download_{session.session_id}",
-                            )
+                        # Export button - direct download without nested button
+                        session_messages = manager.load_messages(session.session_id)
+                        
+                        # Convert to display format
+                        messages_for_export = [
+                            {
+                                "role": msg.role,
+                                "content": msg.content,
+                                "confidence_pct": msg.metadata.get("confidence_pct", 0),
+                                "confidence_level": msg.metadata.get("confidence_level", "N/A"),
+                                "confidence_note": msg.metadata.get("confidence_note", ""),
+                                "sources": msg.metadata.get("sources", []),
+                                "num_sources": msg.metadata.get("num_sources", 0),
+                                "retriever_type": msg.metadata.get("retriever_type", "unknown"),
+                            }
+                            for msg in session_messages
+                        ]
+                        
+                        # Generate HTML
+                        export_html = build_session_export_html(messages_for_export, session.title)
+                        
+                        # Direct download button
+                        st.download_button(
+                            label="📥",
+                            data=export_html,
+                            file_name=f"{session.title[:30].replace(' ', '_')}_session.html",
+                            mime="text/html",
+                            key=f"export_{session.session_id}",
+                            help="Export session",
+                            use_container_width=True,
+                        )
                     
                     with col3:
-                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session"):
+                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session", use_container_width=True):
                             manager.delete_session(session.session_id)
                             if is_current:
                                 # If deleting current session, create new one
