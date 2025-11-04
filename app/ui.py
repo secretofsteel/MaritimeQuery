@@ -712,15 +712,29 @@ def render_app(
             border-color: rgba(10, 132, 255, 0.5) !important;
         }
         
-        /* Center icons in small button squares (export/delete) */
-        section[data-testid="stSidebar"] div[data-testid="column"] button p {
-            text-align: center !important;
+        /* Center icons in small button squares (export/delete) - force flex centering */
+        section[data-testid="stSidebar"] div[data-testid="column"] button {
+            display: flex !important;
             justify-content: center !important;
+            align-items: center !important;
         }
         
-        section[data-testid="stSidebar"] .stDownloadButton button p {
-            text-align: center !important;
+        section[data-testid="stSidebar"] div[data-testid="column"] button > div {
+            display: flex !important;
             justify-content: center !important;
+            align-items: center !important;
+        }
+        
+        section[data-testid="stSidebar"] .stDownloadButton button {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
+        }
+        
+        section[data-testid="stSidebar"] .stDownloadButton button > div {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
         }
         
         /* Scrollable panel styling from original code */
@@ -1033,6 +1047,18 @@ def render_app(
                             result.get("answer", ""),
                             assistant_metadata
                         )
+                        
+                        # Auto-generate session title after first real Q&A (skip greetings/chitchat)
+                        session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
+                        if session and session.message_count == 2 and session.title == "New Chat":
+                            # Check if this was a real query (not greeting/chitchat)
+                            retriever_type = result.get("retriever_type", "")
+                            if retriever_type != "none":  # Real search happened
+                                app_state.ensure_session_manager().auto_generate_title(
+                                    app_state.current_session_id,
+                                    trimmed,
+                                    result.get("answer", "")[:200]
+                                )
 
                         # DEPRECATED: Keep for backwards compatibility during transition
                         app_state.append_history(result)
