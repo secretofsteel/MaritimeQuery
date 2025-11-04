@@ -712,21 +712,26 @@ def render_app(
             border-color: rgba(10, 132, 255, 0.5) !important;
         }
         
-        /* Fix session button height and prevent text wrapping */
+        /* Fix session button height and prevent text wrapping - AGGRESSIVE */
         section[data-testid="stSidebar"] div[data-testid="column"]:first-child button {
             height: 2.5rem !important;
             min-height: 2.5rem !important;
             max-height: 2.5rem !important;
+        }
+        
+        /* Prevent wrapping on ALL levels */
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button,
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button *,
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button p,
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button div {
             white-space: nowrap !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
         }
         
         section[data-testid="stSidebar"] div[data-testid="column"]:first-child button p {
-            white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
             margin: 0 !important;
+            display: block !important;
         }
         
         /* Center icons in small button squares (export/delete) - force flex centering */
