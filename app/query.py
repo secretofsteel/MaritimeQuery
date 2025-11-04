@@ -504,7 +504,7 @@ def _classify_query_intent(query: str) -> str:
         return "search"
     
     # Default: if it's a question, search
-    if (("?" in query and query_lower not in greetings) or (len(query.split()) > 5)):
+    if (("?" in query and query_lower not in greetings) or (len(query.split()) > 6)):
         return "search"
     
     # Otherwise, probably chitchat
