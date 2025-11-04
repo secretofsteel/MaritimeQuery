@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from .config import AppConfig
 from .feedback import FeedbackSystem
 from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
+from .sessions import SessionManager
 
 
 @dataclass
@@ -43,6 +45,9 @@ class AppState:
     conversation_summary: str = ""  # Running summary instead of full history
     last_doc_type_pref: Optional[str] = None  # Last detected doc type preference
     last_scope: Optional[str] = None  # NEW: Last detected scope (company/regulatory/operational/safety/general)
+    session_manager: Optional[SessionManager] = None
+    current_session_id: Optional[str] = None
+    _session_messages_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def ensure_index_loaded(self) -> bool:
         """
@@ -143,6 +148,88 @@ class AppState:
             )
             self.manager.nodes = self.nodes
         return self.manager
+
+    def ensure_session_manager(self) -> SessionManager:
+        """Initialise and cache the chat session manager."""
+        if self.session_manager is None:
+            self.session_manager = SessionManager()
+        return self.session_manager
+
+    def create_new_session(self, title: str = "New Chat") -> str:
+        """Create and switch to a brand new chat session."""
+        manager = self.ensure_session_manager()
+        session_id = manager.create_session(title=title)
+        self.current_session_id = session_id
+        self.reset_session()
+        self._session_messages_cache[session_id] = []
+        return session_id
+
+    def switch_session(self, session_id: str) -> None:
+        """Switch the active chat session, loading messages if necessary."""
+        manager = self.ensure_session_manager()
+        if not manager.get_session(session_id):
+            LOGGER.warning("Requested session does not exist: %s", session_id)
+            return
+
+        if session_id != self.current_session_id:
+            self.current_session_id = session_id
+            self.reset_session()
+
+        # Drop any cached messages so they reload fresh from disk
+        self._session_messages_cache.pop(session_id, None)
+        self.get_current_session_messages()
+
+    def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
+        """Flatten a Message object into the format expected by the UI."""
+        base: Dict[str, Any] = {
+            "role": getattr(message, "role", "assistant"),
+            "content": getattr(message, "content", ""),
+            "timestamp": getattr(message, "timestamp", datetime.now()).isoformat(),
+        }
+        metadata = getattr(message, "metadata", None)
+        if isinstance(metadata, dict):
+            base.update(metadata)
+        return base
+
+    def get_current_session_messages(self) -> List[Dict[str, Any]]:
+        """Return cached messages for the current session, loading from disk if needed."""
+        session_id = self.current_session_id
+        if not session_id:
+            return []
+
+        if session_id not in self._session_messages_cache:
+            manager = self.ensure_session_manager()
+            messages = [
+                self._message_to_display_dict(message)
+                for message in manager.load_messages(session_id)
+            ]
+            self._session_messages_cache[session_id] = messages
+
+        return self._session_messages_cache[session_id]
+
+    def add_message_to_current_session(
+        self,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist and cache a new chat message for the active session."""
+        session_id = self.current_session_id
+        if not session_id:
+            session_id = self.create_new_session()
+
+        manager = self.ensure_session_manager()
+        manager.add_message(session_id, role=role, content=content, metadata=metadata)
+
+        cached_entry: Dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if metadata:
+            cached_entry.update(metadata)
+
+        self._session_messages_cache.setdefault(session_id, []).append(cached_entry)
 
     def document_titles_by_source(self) -> Dict[str, str]:
         titles = {}
