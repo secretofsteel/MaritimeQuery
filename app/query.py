@@ -472,7 +472,7 @@ def _classify_query_intent(query: str) -> str:
     
     # Fast path: exact matches for common patterns
     greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday", 
-                 "hi there", "what's up?", "what's up", "how are you", "how's it going", "what's new"}
+                 "hi there", "what's up?", "what's up", "how are you", "whats up", "how's it going", "what's new"}
     
     if query_lower in greetings or len(query.split()) <= 2:
         return "greeting"
@@ -504,7 +504,7 @@ def _classify_query_intent(query: str) -> str:
         return "search"
     
     # Default: if it's a question, search
-    if "?" in query or len(query.split()) > 5:
+    if ("?" in query and query_lower not in greetings) or len(query.split()) > 5:
         return "search"
     
     # Otherwise, probably chitchat
