@@ -712,6 +712,23 @@ def render_app(
             border-color: rgba(10, 132, 255, 0.5) !important;
         }
         
+        /* Fix session button height and prevent text wrapping */
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button {
+            height: 2.5rem !important;
+            min-height: 2.5rem !important;
+            max-height: 2.5rem !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+        
+        section[data-testid="stSidebar"] div[data-testid="column"]:first-child button p {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            margin: 0 !important;
+        }
+        
         /* Center icons in small button squares (export/delete) - force flex centering */
         section[data-testid="stSidebar"] div[data-testid="column"] button {
             display: flex !important;
@@ -1048,12 +1065,12 @@ def render_app(
                             assistant_metadata
                         )
                         
-                        # Auto-generate session title after first real Q&A (skip greetings/chitchat)
+                        # Auto-generate session title after first real search (skip greetings/chitchat)
                         session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
-                        if session and session.message_count == 2 and session.title == "New Chat":
+                        if session and session.title == "New Chat":
                             # Check if this was a real query (not greeting/chitchat)
                             retriever_type = result.get("retriever_type", "")
-                            if retriever_type != "none":  # Real search happened
+                            if retriever_type != "none":  # Real search happened - generate title now
                                 app_state.ensure_session_manager().auto_generate_title(
                                     app_state.current_session_id,
                                     trimmed,
