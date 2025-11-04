@@ -420,6 +420,8 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
             <ul>{rec_items}</ul>
         </div>
         """
+    else:
+        rec_html = ""
         #st.markdown(rec_html, unsafe_allow_html=True)
 
     # Recent problem queries
@@ -438,6 +440,8 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
             <ul>{"".join(problem_items)}</ul>
         </div>
         """
+    else:
+        problems_html = ""
 
     st.markdown(f"<div class='sidebar-panel docs'>{main_stats+cal_html+ref_html+rec_html+problems_html}</div>", unsafe_allow_html=True)
 
