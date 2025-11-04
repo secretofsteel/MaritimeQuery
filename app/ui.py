@@ -636,10 +636,10 @@ def render_app(
 
         st.markdown("---")
 
-        # Custom CSS for button styling (not feedback buttons)
+        # Custom CSS for button styling
         st.markdown("""
         <style>
-        /* Restore button styling for sidebar buttons only */
+        /* Default styling for all sidebar buttons */
         section[data-testid="stSidebar"] button[kind="primary"],
         section[data-testid="stSidebar"] button[kind="secondary"] {
             border: 1px solid rgba(255, 255, 255, 0.2) !important;
@@ -652,6 +652,32 @@ def render_app(
         section[data-testid="stSidebar"] button[kind="secondary"]:hover {
             background: rgba(10, 132, 255, 0.2) !important;
             border-color: rgba(10, 132, 255, 0.5) !important;
+        }
+        
+        /* Claude-style session buttons - scoped to custom wrapper */
+        .claude-style-sessions button {
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            padding: 0.5rem 0.75rem !important;
+            text-align: left !important;
+            transition: background-color 0.2s ease !important;
+        }
+        
+        .claude-style-sessions button:hover {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: none !important;
+        }
+        
+        /* Keep the "Clear all sessions" button styled normally */
+        .claude-style-sessions button[kind="primary"] {
+            border: 1px solid rgba(255, 75, 75, 0.3) !important;
+            background: rgba(255, 75, 75, 0.1) !important;
+        }
+        
+        .claude-style-sessions button[kind="primary"]:hover {
+            background: rgba(255, 75, 75, 0.2) !important;
+            border-color: rgba(255, 75, 75, 0.5) !important;
         }
         
         /* Scrollable panel styling from original code */
@@ -760,6 +786,9 @@ def render_app(
 
         # Sessions list
         with st.expander("💬 Sessions", expanded=False):
+            # Wrapper for custom CSS scoping
+            st.markdown('<div class="claude-style-sessions">', unsafe_allow_html=True)
+            
             manager = app_state.ensure_session_manager()
             sessions = manager.list_sessions(limit=20)
             
@@ -806,6 +835,8 @@ def render_app(
                     else:
                         st.session_state["confirm_clear_all"] = True
                         st.warning("⚠️ Click again to confirm deletion of ALL sessions")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
         
         # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
