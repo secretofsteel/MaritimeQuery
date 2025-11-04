@@ -471,9 +471,8 @@ def _classify_query_intent(query: str) -> str:
     query_lower = query.strip().lower()
     
     # Fast path: exact matches for common patterns
-    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday", "hi there", 
-                "thanks", "thank you", "thx", "tks", "ok", "okay", "got it", "bye", "goodbye", "what's up", "how are you", "how's it going", "what's new", "see you", "later", 
-                "talk to you later", "catch you later", "take care", "have a good day", "have a nice day", "cheers", "peace out", "farewell", "adios", "ciao", "see ya"}
+    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday", 
+                 "hi there", "what's up?", "what's up", "how are you", "how's it going", "what's new"}
     
     if query_lower in greetings or len(query.split()) <= 2:
         return "greeting"
@@ -493,9 +492,12 @@ def _classify_query_intent(query: str) -> str:
     
     # If it has maritime/technical terms, definitely search
     maritime_indicators = [
-        "ship", "vessel", "cargo", "ballast", "marpol", "solas", "imo",
-        "procedure", "form", "checklist", "regulation", "policy", "drill",
-        "safety", "navigation", "engine", "crew", "master", "officer"
+        "ship", "vessel", "cargo", "ballast", "marpol", "solas", "imo", 
+        "procedure", "form", "checklist", "regulation", "policy", "drill", "manual", "chief engineer",
+        "safety", "navigation", "engine", "crew", "master", "officer", "ppe", "supply", 
+        "logbook", "maintenance", "inspection", "emergency", "lifeboat", "fire", "pollution", "incident", "reporting", 
+        "deck", "engineer", "pilot", "mooring", "anchoring", "cargo handling", "stcw", "mlc", "ism code", "psc", "flag",
+        "port state", "ship management", "seafarer", "nautical", "chart", "ice navigation", "hull", "machinery", "equipment"
     ]
     
     if any(term in query_lower for term in maritime_indicators):
@@ -536,11 +538,12 @@ def query_with_confidence(
         
         # Check for specific patterns
         query_lower = query_text.lower()
-        if any(word in query_lower for word in ["thanks", "thank"]):
+        if any(word in query_lower for word in ["thanks", "thank", "thx", "tks"]):
             answer = "You're welcome! Let me know if you need anything else."
-        elif any(word in query_lower for word in ["bye", "goodbye"]):
+        elif any(word in query_lower for word in ["bye", "goodbye", "see ya", "later", "farewell", "take care", "see you", 
+                "talk to you later", "catch you later", "have a good day", "have a nice day", "peace out", "farewell", "adios", "ciao"]):
             answer = "Safe sailing! Feel free to return anytime you need assistance."
-        elif any(word in query_lower for word in ["ok", "okay", "got it"]):
+        elif any(word in query_lower for word in ["ok", "okay", "got it", "understood", "great", "perfect", "sounds good", "alright", "roger that"]):
             answer = "Great! Let me know if you have any other questions."
         else:
             answer = simple_responses.get(intent, simple_responses["greeting"])
