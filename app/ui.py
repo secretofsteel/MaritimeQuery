@@ -369,37 +369,75 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
         st.info("No feedback data yet. Start using the system!")
         return
 
-    st.write("### Feedback analytics")
-    st.write(f"Total feedback: {analysis['total_feedback']}")
-    st.write(f"Satisfaction rate: {analysis['satisfaction_rate']:.1f}%")
-    st.write(f"Incorrect rate: {analysis['incorrect_rate']:.1f}%")
+    with st.expander("📊 Feedback analytics", expanded=False):
+        # Main stats
+        main_stats = f"""
+        <div class='feedback-stats'>
+            <h4>Total feedback: {analysis['total_feedback']}</h4>
+            <h4>Satisfaction rate: {analysis['satisfaction_rate']:.1f}%</h4>
+            <h4>Incorrect rate: {analysis['incorrect_rate']:.1f}%</h4>
+        </div>
+        """
+        st.markdown(main_stats, unsafe_allow_html=True)
 
-    cal = analysis["confidence_calibration"]
-    st.write("#### Confidence calibration")
-    st.write(f"High confidence correct: {cal['high_conf_accurate']}")
-    st.write(f"High confidence wrong: {cal['high_conf_wrong']}")
-    st.write(f"Overconfidence rate: {cal['overconfidence_rate']:.1f}%")
-    st.write(f"Low confidence correct: {cal['low_conf_accurate']}")
-    st.write(f"Low confidence wrong: {cal['low_conf_wrong']}")
-    st.write(f"Underconfidence rate: {cal['underconfidence_rate']:.1f}%")
+        # Confidence calibration
+        cal = analysis["confidence_calibration"]
+        cal_html = f"""
+        <div class='confidence-calibration'>
+            <h4>Confidence calibration</h4>
+            <ul>
+                <li>High confidence correct: {cal['high_conf_accurate']}</li>
+                <li>High confidence wrong: {cal['high_conf_wrong']}</li>
+                <li>Overconfidence rate: {cal['overconfidence_rate']:.1f}%</li>
+                <li>Low confidence correct: {cal['low_conf_accurate']}</li>
+                <li>Low confidence wrong: {cal['low_conf_wrong']}</li>
+                <li>Underconfidence rate: {cal['underconfidence_rate']:.1f}%</li>
+            </ul>
+        </div>
+        """
+        st.markdown(cal_html, unsafe_allow_html=True)
 
-    ref = analysis["query_refinement"]
-    st.write("#### Query refinement")
-    st.write(f"Queries refined: {ref['total_refined']}")
-    st.write(f"Refinement success: {ref['refinement_success_rate']:.1f}%")
+        # Query refinement
+        ref = analysis["query_refinement"]
+        ref_html = f"""
+        <div class='query-refinement'>
+            <h4>Query refinement</h4>
+            <ul>
+                <li>Queries refined: {ref['total_refined']}</li>
+                <li>Refinement success: {ref['refinement_success_rate']:.1f}%</li>
+            </ul>
+        </div>
+        """
+        st.markdown(ref_html, unsafe_allow_html=True)
 
-    if analysis["recommendations"]:
-        st.write("#### Recommendations")
-        for rec in analysis["recommendations"]:
-            st.write(f"- {rec}")
+        # Recommendations
+        if analysis["recommendations"]:
+            rec_items = "".join(f"<li>{rec}</li>" for rec in analysis["recommendations"])
+            rec_html = f"""
+            <div class='recommendations'>
+                <h4>Recommendations</h4>
+                <ul>{rec_items}</ul>
+            </div>
+            """
+            st.markdown(rec_html, unsafe_allow_html=True)
 
-    problems = app_state.feedback_system.get_problem_queries(limit=3)
-    if problems:
-        st.write("#### Recent problem queries")
-        for idx, item in enumerate(problems, 1):
-            st.write(f"{idx}. \"{item['query']}\" - {item['confidence_pct']}% ({item['confidence_level']})")
-            if item.get("correction"):
-                st.write(f"   User feedback: {item['correction'][:100]}")
+        # Recent problem queries
+        problems = app_state.feedback_system.get_problem_queries(limit=3)
+        if problems:
+            problem_items = []
+            for idx, item in enumerate(problems, 1):
+                item_html = f"<li>{idx}. \"{item['query']}\" - {item['confidence_pct']}% ({item['confidence_level']})"
+                if item.get("correction"):
+                    item_html += f"<br><span style='margin-left: 20px;'>User feedback: {item['correction'][:100]}</span>"
+                item_html += "</li>"
+                problem_items.append(item_html)
+            problems_html = f"""
+            <div class='problem-queries'>
+                <h4>Recent problem queries</h4>
+                <ul>{"".join(problem_items)}</ul>
+            </div>
+            """
+            st.markdown(problems_html, unsafe_allow_html=True)
 
 
 def render_chat_message_with_feedback(app_state: AppState, result: Dict, message_index: int) -> None:
@@ -565,13 +603,13 @@ def render_app(
     read_only_mode: bool = False,
 ) -> None:
     st.set_page_config(
-        page_title="Maritime RAG Assistant",
+        page_title="MA.D.ASS: The Maritime Documentation Assistant",
         page_icon="⚓",
         layout="centered",  # Changed from "wide" to enable max-width control
         initial_sidebar_state="expanded"
     )
     
-    # Add custom CSS for centered chat layout (60% width, like Claude)
+    # Add custom CSS for centered chat layout (60% width)
     st.markdown("""
     <style>
     /* Hide Streamlit settings bar and menu */
@@ -638,7 +676,7 @@ def render_app(
     """, unsafe_allow_html=True)
     
     st.title("⚓ Maritime RAG Assistant")
-    st.caption("Intelligent document search powered by Gemini + LlamaIndex")
+    st.caption("Intelligent document search powered by the dreams of electric sheep")
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
@@ -739,6 +777,7 @@ def render_app(
             display: flex !important;
             justify-content: center !important;
             align-items: center !important;
+            min-width: 2.5rem !important;
         }
         
         section[data-testid="stSidebar"] div[data-testid="column"] button > div {
@@ -870,7 +909,7 @@ def render_app(
         
 
         # Sessions list
-        with st.expander("💬 Sessions", expanded=False):
+        with st.expander("💬 Sessions", expanded=True):
             manager = app_state.ensure_session_manager()
             sessions = manager.list_sessions(limit=20)
             
