@@ -703,7 +703,13 @@ def render_app(
         st.header("⚙️ Settings")
         
         if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
-            app_state.create_new_session()
+            # Only create new session if current one has messages
+            current_messages = app_state.get_current_session_messages()
+            if current_messages:
+                app_state.create_new_session()
+            else:
+                # Current session is empty, just reset it
+                app_state.reset_session()
             _rerun_app()
         
         with st.expander("🔍 Retrieval Options", expanded=True):
