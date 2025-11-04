@@ -757,7 +757,7 @@ def render_app(
                 if st.button("🔄 Sync library", use_container_width=True):
                     sync_library(app_state)
         
-        # Chat history
+
         # Sessions list
         with st.expander("💬 Sessions", expanded=False):
             manager = app_state.ensure_session_manager()
@@ -770,7 +770,7 @@ def render_app(
                     
                     # Show active indicator
                     is_current = session.session_id == app_state.current_session_id
-                    prefix = "â–¶ " if is_current else "  "
+                    prefix = "▶ " if is_current else "  "
                     
                     # Format title and message count
                     title_preview = session.title[:35] + "..." if len(session.title) > 35 else session.title
@@ -785,7 +785,7 @@ def render_app(
                                 _rerun_app()
                     
                     with col2:
-                        if st.button("ðŸ—'ï¸", key=f"delete_{session.session_id}", help="Delete session"):
+                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session"):
                             manager.delete_session(session.session_id)
                             if is_current:
                                 # If deleting current session, create new one
@@ -797,7 +797,7 @@ def render_app(
             # Clear all sessions button
             if sessions:
                 st.markdown("---")
-                if st.button("ðŸ—'ï¸ Clear all sessions", use_container_width=True, type="primary"):
+                if st.button("🗑️ Clear all sessions", use_container_width=True, type="primary"):
                     if st.session_state.get("confirm_clear_all"):
                         manager.clear_all_sessions()
                         app_state.create_new_session()
@@ -805,7 +805,7 @@ def render_app(
                         _rerun_app()
                     else:
                         st.session_state["confirm_clear_all"] = True
-                        st.warning("âš ï¸ Click again to confirm deletion of ALL sessions")
+                        st.warning("⚠️ Click again to confirm deletion of ALL sessions")
         
         # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
