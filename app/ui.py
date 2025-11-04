@@ -692,8 +692,18 @@ def render_app(
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("⚓ MA.D.ASS: The Maritime Documentation Assistant")
-    st.caption("Intelligent document search powered by the dreams of electric sheep")
+    # Create a centered container for the title and caption
+    title_html = """
+    <div style="text-align: center;">
+        <h1 style="margin-bottom: 0.5em;">⚓ MA.D.ASS: The Maritime Documentation Assistant</h1>
+        <p style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</p>
+    </div>
+    """
+
+    st.markdown(title_html, unsafe_allow_html=True)
+
+    #st.title("⚓ MA.D.ASS: The Maritime Documentation Assistant")
+    #st.caption("Intelligent document search powered by the dreams of electric sheep")
 
     # Ensure index is loaded
     if not app_state.ensure_index_loaded():
