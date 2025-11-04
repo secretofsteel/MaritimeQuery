@@ -246,6 +246,64 @@ def build_result_export_html(result: Dict, title: str = "RAG Query Result") -> s
     )
 
 
+def build_session_export_html(messages: List[Dict], session_title: str = "Chat Session") -> str:
+    """Generate an HTML export for an entire chat session."""
+    conversation_parts: List[str] = []
+    
+    for idx, msg in enumerate(messages):
+        if msg["role"] == "user":
+            query_text = msg["content"]
+            conversation_parts.append(f"<div class='user-message'><h3>Question {idx // 2 + 1}</h3><p>{html.escape(query_text)}</p></div>")
+        
+        elif msg["role"] == "assistant":
+            # Reconstruct result dict for rendering
+            result = {
+                "query": messages[idx - 1]["content"] if idx > 0 else "Query",
+                "answer": msg["content"],
+                "confidence_pct": msg.get("confidence_pct", 0),
+                "confidence_level": msg.get("confidence_level", "N/A"),
+                "confidence_note": msg.get("confidence_note", ""),
+                "sources": msg.get("sources", []),
+                "num_sources": msg.get("num_sources", 0),
+                "retriever_type": msg.get("retriever_type", "unknown"),
+            }
+            conversation_parts.append(compose_result_markdown(result))
+            conversation_parts.append("<hr>")
+    
+    # Remove last HR
+    if conversation_parts and conversation_parts[-1] == "<hr>":
+        conversation_parts.pop()
+    
+    html_body = "\n".join(conversation_parts)
+    
+    # Add custom CSS for session export
+    session_css = _GITHUBISH_CSS + """
+.user-message { 
+    background: rgba(10, 132, 255, 0.1); 
+    border-left: 4px solid rgba(10, 132, 255, 0.5); 
+    padding: 1rem; 
+    margin: 1rem 0; 
+    border-radius: 8px; 
+}
+.user-message h3 { 
+    margin-top: 0; 
+    color: #66b4ff; 
+    font-size: 1.1rem; 
+}
+.user-message p { 
+    margin: 0.5rem 0 0; 
+    color: #f2f7ff; 
+}
+"""
+    
+    return _HTML_SHELL.format(
+        title=session_title,
+        css=session_css,
+        body=html_body,
+        timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 def save_result_as_html(result: Dict, output_file: str = "rag_result.html", title: str = "RAG Query Result") -> str:
     full_html = build_result_export_html(result, title=title)
     out_dir = AppConfig.get().paths.cache_dir / "exports"
@@ -782,7 +840,7 @@ def render_app(
                     title_preview = session.title[:35] + "..." if len(session.title) > 35 else session.title
                     button_label = f"{prefix}{title_preview} ({session.message_count})"
                     
-                    col1, col2 = st.columns([4, 1])
+                    col1, col2, col3 = st.columns([3.5, 0.75, 0.75])
                     
                     with col1:
                         if st.button(button_label, key=button_key, use_container_width=True):
@@ -791,6 +849,39 @@ def render_app(
                                 _rerun_app()
                     
                     with col2:
+                        # Export button
+                        if st.button("📥", key=f"export_{session.session_id}", help="Export session"):
+                            # Load messages for this session
+                            session_messages = manager.load_messages(session.session_id)
+                            
+                            # Convert to display format
+                            messages_for_export = [
+                                {
+                                    "role": msg.role,
+                                    "content": msg.content,
+                                    "confidence_pct": msg.metadata.get("confidence_pct", 0),
+                                    "confidence_level": msg.metadata.get("confidence_level", "N/A"),
+                                    "confidence_note": msg.metadata.get("confidence_note", ""),
+                                    "sources": msg.metadata.get("sources", []),
+                                    "num_sources": msg.metadata.get("num_sources", 0),
+                                    "retriever_type": msg.metadata.get("retriever_type", "unknown"),
+                                }
+                                for msg in session_messages
+                            ]
+                            
+                            # Generate HTML
+                            export_html = build_session_export_html(messages_for_export, session.title)
+                            
+                            # Trigger download
+                            st.download_button(
+                                label="Download",
+                                data=export_html,
+                                file_name=f"{session.title[:30].replace(' ', '_')}_session.html",
+                                mime="text/html",
+                                key=f"download_{session.session_id}",
+                            )
+                    
+                    with col3:
                         if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session"):
                             manager.delete_session(session.session_id)
                             if is_current:
