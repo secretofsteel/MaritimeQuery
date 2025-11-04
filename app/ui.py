@@ -636,22 +636,45 @@ def render_app(
 
         st.markdown("---")
 
-        # Custom CSS for button styling (not feedback buttons)
+        # Custom CSS for button styling
         st.markdown("""
         <style>
-        /* Restore button styling for sidebar buttons only */
-        section[data-testid="stSidebar"] button[kind="primary"],
-        section[data-testid="stSidebar"] button[kind="secondary"] {
+        /* Restore button styling for sidebar buttons only (excluding sessions) */
+        section[data-testid="stSidebar"] button[kind="primary"]:not([key^="session_"]):not([key^="delete_"]),
+        section[data-testid="stSidebar"] button[kind="secondary"]:not([key^="session_"]):not([key^="delete_"]) {
             border: 1px solid rgba(255, 255, 255, 0.2) !important;
             background: rgba(10, 132, 255, 0.1) !important;
             box-shadow: none !important;
             padding: 0.5rem 1rem !important;
         }
         
-        section[data-testid="stSidebar"] button[kind="primary"]:hover,
-        section[data-testid="stSidebar"] button[kind="secondary"]:hover {
+        section[data-testid="stSidebar"] button[kind="primary"]:not([key^="session_"]):not([key^="delete_"]):hover,
+        section[data-testid="stSidebar"] button[kind="secondary"]:not([key^="session_"]):not([key^="delete_"]):hover {
             background: rgba(10, 132, 255, 0.2) !important;
             border-color: rgba(10, 132, 255, 0.5) !important;
+        }
+        
+        /* Claude-style session buttons - flat by default, hover effect only */
+        section[data-testid="stSidebar"] button[key^="session_"],
+        section[data-testid="stSidebar"] button[key^="delete_"] {
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            padding: 0.5rem 0.75rem !important;
+            text-align: left !important;
+            transition: background-color 0.2s ease !important;
+        }
+        
+        section[data-testid="stSidebar"] button[key^="session_"]:hover,
+        section[data-testid="stSidebar"] button[key^="delete_"]:hover {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: none !important;
+        }
+        
+        /* Active session indicator styling */
+        section[data-testid="stSidebar"] button[key^="session_"] p {
+            margin: 0 !important;
+            font-size: 0.9rem !important;
         }
         
         /* Scrollable panel styling from original code */
