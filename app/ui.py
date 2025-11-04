@@ -369,75 +369,77 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
         st.info("No feedback data yet. Start using the system!")
         return
 
-    with st.expander("📊 Feedback analytics", expanded=False):
-        # Main stats
-        main_stats = f"""
-        <div class='feedback-stats'>
-            <h4>Total feedback: {analysis['total_feedback']}</h4>
-            <h4>Satisfaction rate: {analysis['satisfaction_rate']:.1f}%</h4>
-            <h4>Incorrect rate: {analysis['incorrect_rate']:.1f}%</h4>
+    main_stats = f"""
+    <div class='feedback-stats'>
+        <h4>Feedback Analytics</h4>
+        <ul>
+            <li>Total feedback: {analysis['total_feedback']}</li>
+            <li>Satisfaction rate: {analysis['satisfaction_rate']:.1f}%</li>
+            <li>Incorrect rate: {analysis['incorrect_rate']:.1f}%</li>
+        </ul>
+    </div>
+    """
+    #st.markdown(main_stats, unsafe_allow_html=True)
+
+    # Confidence calibration
+    cal = analysis["confidence_calibration"]
+    cal_html = f"""
+    <div class='confidence-calibration'>
+        <h4>Confidence calibration</h4>
+        <ul>
+            <li>High confidence correct: {cal['high_conf_accurate']}</li>
+            <li>High confidence wrong: {cal['high_conf_wrong']}</li>
+            <li>Overconfidence rate: {cal['overconfidence_rate']:.1f}%</li>
+            <li>Low confidence correct: {cal['low_conf_accurate']}</li>
+            <li>Low confidence wrong: {cal['low_conf_wrong']}</li>
+            <li>Underconfidence rate: {cal['underconfidence_rate']:.1f}%</li>
+        </ul>
+    </div>
+    """
+    #st.markdown(cal_html, unsafe_allow_html=True)
+
+    # Query refinement
+    ref = analysis["query_refinement"]
+    ref_html = f"""
+    <div class='query-refinement'>
+        <h4>Query refinement</h4>
+        <ul>
+            <li>Queries refined: {ref['total_refined']}</li>
+            <li>Refinement success: {ref['refinement_success_rate']:.1f}%</li>
+        </ul>
+    </div>
+    """
+    #st.markdown(ref_html, unsafe_allow_html=True)
+
+    # Recommendations
+    if analysis["recommendations"]:
+        rec_items = "".join(f"<li>{rec}</li>" for rec in analysis["recommendations"])
+        rec_html = f"""
+        <div class='recommendations'>
+            <h4>Recommendations</h4>
+            <ul>{rec_items}</ul>
         </div>
         """
-        st.markdown(main_stats, unsafe_allow_html=True)
+        #st.markdown(rec_html, unsafe_allow_html=True)
 
-        # Confidence calibration
-        cal = analysis["confidence_calibration"]
-        cal_html = f"""
-        <div class='confidence-calibration'>
-            <h4>Confidence calibration</h4>
-            <ul>
-                <li>High confidence correct: {cal['high_conf_accurate']}</li>
-                <li>High confidence wrong: {cal['high_conf_wrong']}</li>
-                <li>Overconfidence rate: {cal['overconfidence_rate']:.1f}%</li>
-                <li>Low confidence correct: {cal['low_conf_accurate']}</li>
-                <li>Low confidence wrong: {cal['low_conf_wrong']}</li>
-                <li>Underconfidence rate: {cal['underconfidence_rate']:.1f}%</li>
-            </ul>
+    # Recent problem queries
+    problems = app_state.feedback_system.get_problem_queries(limit=3)
+    if problems:
+        problem_items = []
+        for idx, item in enumerate(problems, 1):
+            item_html = f"<li>{idx}. \"{item['query']}\" - {item['confidence_pct']}% ({item['confidence_level']})"
+            if item.get("correction"):
+                item_html += f"<br><span style='margin-left: 20px;'>User feedback: {item['correction'][:100]}</span>"
+            item_html += "</li>"
+            problem_items.append(item_html)
+        problems_html = f"""
+        <div class='problem-queries'>
+            <h4>Recent problem queries</h4>
+            <ul>{"".join(problem_items)}</ul>
         </div>
         """
-        st.markdown(cal_html, unsafe_allow_html=True)
 
-        # Query refinement
-        ref = analysis["query_refinement"]
-        ref_html = f"""
-        <div class='query-refinement'>
-            <h4>Query refinement</h4>
-            <ul>
-                <li>Queries refined: {ref['total_refined']}</li>
-                <li>Refinement success: {ref['refinement_success_rate']:.1f}%</li>
-            </ul>
-        </div>
-        """
-        st.markdown(ref_html, unsafe_allow_html=True)
-
-        # Recommendations
-        if analysis["recommendations"]:
-            rec_items = "".join(f"<li>{rec}</li>" for rec in analysis["recommendations"])
-            rec_html = f"""
-            <div class='recommendations'>
-                <h4>Recommendations</h4>
-                <ul>{rec_items}</ul>
-            </div>
-            """
-            st.markdown(rec_html, unsafe_allow_html=True)
-
-        # Recent problem queries
-        problems = app_state.feedback_system.get_problem_queries(limit=3)
-        if problems:
-            problem_items = []
-            for idx, item in enumerate(problems, 1):
-                item_html = f"<li>{idx}. \"{item['query']}\" - {item['confidence_pct']}% ({item['confidence_level']})"
-                if item.get("correction"):
-                    item_html += f"<br><span style='margin-left: 20px;'>User feedback: {item['correction'][:100]}</span>"
-                item_html += "</li>"
-                problem_items.append(item_html)
-            problems_html = f"""
-            <div class='problem-queries'>
-                <h4>Recent problem queries</h4>
-                <ul>{"".join(problem_items)}</ul>
-            </div>
-            """
-            st.markdown(problems_html, unsafe_allow_html=True)
+    st.markdown(f"<div class='sidebar-panel docs'>{main_stats+cal_html+ref_html+rec_html+problems_html}</div>", unsafe_allow_html=True)
 
 
 def render_chat_message_with_feedback(app_state: AppState, result: Dict, message_index: int) -> None:
@@ -675,7 +677,7 @@ def render_app(
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("⚓ Maritime RAG Assistant")
+    st.title("⚓ MA.D.ASS: The Maritime Documentation Assistant")
     st.caption("Intelligent document search powered by the dreams of electric sheep")
 
     # Ensure index is loaded
