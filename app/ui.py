@@ -696,7 +696,7 @@ def render_app(
     title_html = """
     <div style="text-align: center;">
         <h1 style="margin-bottom: 0.5em;">⚓ MA.D.ASS: The Maritime Documentation Assistant</h1>
-        <p style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</p>
+        <h3 style="margin-top: 0.2em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h3>
     </div>
     """
 
