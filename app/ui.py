@@ -34,7 +34,7 @@ def _reset_chat_state(app_state: AppState) -> None:
     """Clear chat history and feedback toggles."""
     app_state.reset_session()
     for key in list(st.session_state.keys()):
-        if key.startswith("correction_toggle_") or key.startswith("correction_text_"):
+        if key.startswith("correction_toggle_") or key.startswith("correction_text_") or key.startswith("confirm_"):
             st.session_state.pop(key)
 
 
@@ -596,6 +596,20 @@ def render_app(
         st.error("⚠️ **System not ready.** Retrievers failed to initialize.")
         st.stop()
     
+    # Ensure we have a session
+    if not app_state.current_session_id:
+        # Check if there are existing sessions
+        manager = app_state.ensure_session_manager()
+        sessions = manager.list_sessions(limit=1)
+        
+        if sessions:
+            # Load most recent session
+            app_state.switch_session(sessions[0].session_id)
+        else:
+            # Create first session
+            app_state.create_new_session()
+
+
     # Load chat history
     app_state.ensure_history_loaded()
     
@@ -689,7 +703,7 @@ def render_app(
         st.header("⚙️ Settings")
         
         if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
-            _reset_chat_state(app_state)
+            app_state.create_new_session()
             _rerun_app()
         
         with st.expander("🔍 Retrieval Options", expanded=True):
@@ -744,17 +758,54 @@ def render_app(
                     sync_library(app_state)
         
         # Chat history
-        with st.expander("💬 Chat History", expanded=False):
-            if app_state.query_history:
-                for idx, hist in enumerate(reversed(app_state.query_history), 1):
-                    query_preview = hist.get("query", "Untitled")[:50]
-                    st.caption(f"{idx}. {query_preview}...")
-            else:
-                st.caption("No queries yet")
+        # Sessions list
+        with st.expander("💬 Sessions", expanded=False):
+            manager = app_state.ensure_session_manager()
+            sessions = manager.list_sessions(limit=20)
             
-            if st.button("🗑️ Clear history", use_container_width=True, type="primary"):
-                app_state.clear_history()
-                _rerun_app()
+            if sessions:
+                for session in sessions:
+                    # Create unique key for each session button
+                    button_key = f"session_{session.session_id}"
+                    
+                    # Show active indicator
+                    is_current = session.session_id == app_state.current_session_id
+                    prefix = "â–¶ " if is_current else "  "
+                    
+                    # Format title and message count
+                    title_preview = session.title[:35] + "..." if len(session.title) > 35 else session.title
+                    button_label = f"{prefix}{title_preview} ({session.message_count})"
+                    
+                    col1, col2 = st.columns([4, 1])
+                    
+                    with col1:
+                        if st.button(button_label, key=button_key, use_container_width=True):
+                            if not is_current:
+                                app_state.switch_session(session.session_id)
+                                _rerun_app()
+                    
+                    with col2:
+                        if st.button("ðŸ—'ï¸", key=f"delete_{session.session_id}", help="Delete session"):
+                            manager.delete_session(session.session_id)
+                            if is_current:
+                                # If deleting current session, create new one
+                                app_state.create_new_session()
+                            _rerun_app()
+            else:
+                st.caption("No sessions yet")
+            
+            # Clear all sessions button
+            if sessions:
+                st.markdown("---")
+                if st.button("ðŸ—'ï¸ Clear all sessions", use_container_width=True, type="primary"):
+                    if st.session_state.get("confirm_clear_all"):
+                        manager.clear_all_sessions()
+                        app_state.create_new_session()
+                        st.session_state["confirm_clear_all"] = False
+                        _rerun_app()
+                    else:
+                        st.session_state["confirm_clear_all"] = True
+                        st.warning("âš ï¸ Click again to confirm deletion of ALL sessions")
         
         # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
@@ -793,14 +844,39 @@ def render_app(
     # Main chat interface
     st.markdown("---")
     
-    # Render chat history using native st.chat_message
-    for idx, result in enumerate(app_state.query_history):
-        # User message
-        with st.chat_message("user"):
-            st.markdown(result.get("query", "Untitled query"))
+    # Ensure we have a current session
+    if not app_state.current_session_id:
+        app_state.create_new_session()
+
+    # Render messages from current session
+    messages = app_state.get_current_session_messages()
+
+    user_msg_idx = 0  # For unique keys
+    asst_msg_idx = 0
+
+    for msg in messages:
+        if msg["role"] == "user":
+            with st.chat_message("user"):
+                st.markdown(msg["content"])
+            user_msg_idx += 1
         
-        # Assistant message with feedback
-        render_chat_message_with_feedback(app_state, result, idx)
+        elif msg["role"] == "assistant":
+            # Reconstruct result dict for feedback rendering
+            result = {
+                "query": messages[asst_msg_idx * 2]["content"] if asst_msg_idx * 2 < len(messages) else "Query",
+                "answer": msg["content"],
+                "confidence_pct": msg.get("confidence_pct", 0),
+                "confidence_level": msg.get("confidence_level", "N/A"),
+                "confidence_note": msg.get("confidence_note", ""),
+                "sources": msg.get("sources", []),
+                "num_sources": msg.get("num_sources", 0),
+                "retriever_type": msg.get("retriever_type", "unknown"),
+                "context_mode": msg.get("context_mode", False),
+                "context_turn": msg.get("context_turn", 0),
+                "context_reset_note": msg.get("context_reset_note"),
+            }
+            render_chat_message_with_feedback(app_state, result, asst_msg_idx)
+            asst_msg_idx += 1
     
     # Chat input
     user_prompt = st.chat_input("Ask about the maritime library...")
@@ -825,11 +901,36 @@ def render_app(
                             auto_refine=auto_refine_option,
                             fortify=fortify_option,
                             rerank=rerank_option,
-                            use_conversation_context=use_context,  # NEW: Pass context flag
+                            use_conversation_context=use_context,
                         )
+
+                        # Add messages to session
+                        app_state.add_message_to_current_session("user", trimmed)
+
+                        # Extract metadata for assistant message
+                        assistant_metadata = {
+                            "confidence_pct": result.get("confidence_pct"),
+                            "confidence_level": result.get("confidence_level"),
+                            "confidence_note": result.get("confidence_note"),
+                            "sources": result.get("sources"),
+                            "num_sources": result.get("num_sources"),
+                            "retriever_type": result.get("retriever_type"),
+                            "context_mode": result.get("context_mode"),
+                            "context_turn": result.get("context_turn"),
+                            "context_reset_note": result.get("context_reset_note"),
+                        }
+
+                        app_state.add_message_to_current_session(
+                            "assistant",
+                            result.get("answer", ""),
+                            assistant_metadata
+                        )
+
+                        # DEPRECATED: Keep for backwards compatibility during transition
                         app_state.append_history(result)
+
                         LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
-                                   result.get("confidence_pct", 0), result.get("num_sources", 0))
+                                result.get("confidence_pct", 0), result.get("num_sources", 0))
                         _rerun_app()
                         
                     except Exception as exc:
