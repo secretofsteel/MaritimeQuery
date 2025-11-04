@@ -443,7 +443,16 @@ def render_feedback_stats_panel(app_state: AppState) -> None:
     else:
         problems_html = ""
 
-    st.markdown(f"<div class='sidebar-panel docs'>{main_stats+cal_html+ref_html+rec_html+problems_html}</div>", unsafe_allow_html=True)
+    html_parts = [
+        "<div class='sidebar-panel docs'>",
+        main_stats if 'main_stats' in locals() else "",
+        cal_html if 'cal_html' in locals() else "",
+        ref_html if 'ref_html' in locals() else "",
+        rec_html if 'rec_html' in locals() else "",
+        problems_html if 'problems_html' in locals() else "",
+        "</div>"
+    ]
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
 def render_chat_message_with_feedback(app_state: AppState, result: Dict, message_index: int) -> None:
