@@ -11,8 +11,13 @@ from app.ui import render_app, render_viewer_app
 
 def main() -> None:
     AppConfig.get()
-    if "app_state" not in st.session_state:
+    
+    # Version check: recreate AppState if structure changed
+    APP_STATE_VERSION = "2.0"  # Increment when AppState structure changes
+    
+    if "app_state" not in st.session_state or st.session_state.get("app_state_version") != APP_STATE_VERSION:
         st.session_state["app_state"] = AppState()
+        st.session_state["app_state_version"] = APP_STATE_VERSION
 
     # Check query parameter for read-only mode (defaults to True for viewer app)
     read_only = st.query_params.get("read_only", "true").lower() == "true"
