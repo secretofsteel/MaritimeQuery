@@ -20,6 +20,7 @@ from .feedback import FeedbackSystem
 from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
+from .session_uploads import SessionUploadManager, SessionUploadChunk
 
 
 @dataclass
@@ -48,6 +49,9 @@ class AppState:
     session_manager: Optional[SessionManager] = None
     current_session_id: Optional[str] = None
     _session_messages_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    session_upload_manager: Optional[SessionUploadManager] = None
+    _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
 
     def ensure_index_loaded(self) -> bool:
         """
@@ -155,6 +159,12 @@ class AppState:
             self.session_manager = SessionManager()
         return self.session_manager
 
+    def ensure_session_upload_manager(self) -> SessionUploadManager:
+        """Initialise and cache the session upload manager."""
+        if self.session_upload_manager is None:
+            self.session_upload_manager = SessionUploadManager()
+        return self.session_upload_manager
+
     def create_new_session(self, title: str = "New Chat") -> str:
         """Create and switch to a brand new chat session."""
         manager = self.ensure_session_manager()
@@ -162,6 +172,7 @@ class AppState:
         self.current_session_id = session_id
         self.reset_session()
         self._session_messages_cache[session_id] = []
+        self.refresh_session_upload_cache(session_id)
         return session_id
 
     def switch_session(self, session_id: str) -> None:
@@ -178,6 +189,7 @@ class AppState:
         # Drop any cached messages so they reload fresh from disk
         self._session_messages_cache.pop(session_id, None)
         self.get_current_session_messages()
+        self.refresh_session_upload_cache(session_id)
 
     def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
         """Flatten a Message object into the format expected by the UI."""
@@ -231,6 +243,35 @@ class AppState:
 
         self._session_messages_cache.setdefault(session_id, []).append(cached_entry)
 
+    def get_session_upload_metadata(self) -> List[Dict[str, Any]]:
+        session_id = self.current_session_id
+        if not session_id:
+            return []
+
+        if session_id not in self._session_upload_metadata_cache:
+            manager = self.ensure_session_upload_manager()
+            self._session_upload_metadata_cache[session_id] = manager.load_metadata(session_id)
+
+        return self._session_upload_metadata_cache.get(session_id, [])
+
+    def get_session_upload_chunks(self) -> List[SessionUploadChunk]:
+        session_id = self.current_session_id
+        if not session_id:
+            return []
+
+        if session_id not in self._session_upload_chunks_cache:
+            manager = self.ensure_session_upload_manager()
+            self._session_upload_chunks_cache[session_id] = manager.load_chunks(session_id)
+
+        return self._session_upload_chunks_cache.get(session_id, [])
+
+    def refresh_session_upload_cache(self, session_id: Optional[str] = None) -> None:
+        target = session_id or self.current_session_id
+        if not target:
+            return
+        self._session_upload_metadata_cache.pop(target, None)
+        self._session_upload_chunks_cache.pop(target, None)
+
     def document_titles_by_source(self) -> Dict[str, str]:
         titles = {}
         for node in self.nodes:
@@ -264,6 +305,26 @@ class AppState:
         self.conversation_summary = ""
         self.last_scope = None  # NEW: Clear scope on reset
         LOGGER.debug("Session reset: cleared query history and context state")
+
+    def delete_session_with_uploads(self, session_id: str) -> bool:
+        manager = self.ensure_session_manager()
+        deleted = manager.delete_session(session_id)
+        if deleted:
+            upload_manager = self.ensure_session_upload_manager()
+            upload_manager.delete_session_uploads(session_id)
+            self.refresh_session_upload_cache(session_id)
+            self._session_messages_cache.pop(session_id, None)
+        return deleted
+
+    def clear_all_sessions(self) -> int:
+        manager = self.ensure_session_manager()
+        count = manager.clear_all_sessions()
+        upload_manager = self.ensure_session_upload_manager()
+        upload_manager.clear_all()
+        self._session_messages_cache.clear()
+        self._session_upload_metadata_cache.clear()
+        self._session_upload_chunks_cache.clear()
+        return count
 
     def _ensure_history_path(self) -> Path:
         if self.history_log_path is None:
