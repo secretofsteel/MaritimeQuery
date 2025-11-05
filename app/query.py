@@ -591,7 +591,46 @@ def query_with_confidence(
         raise RuntimeError("Retrievers not initialized. Load or build the index first.")
 
     original_query = query_text
-    
+
+    def include_session_uploads(
+        base_nodes: List[NodeWithScore], query_for_uploads: str
+    ) -> List[NodeWithScore]:
+        session_id = app_state.current_session_id
+        if not session_id:
+            return base_nodes
+
+        try:
+            upload_manager = app_state.ensure_session_upload_manager()
+            session_nodes = upload_manager.search_session_uploads(
+                session_id, query_for_uploads, top_k=10
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            LOGGER.warning("Session upload retrieval failed: %s", exc)
+            return base_nodes
+
+        if not session_nodes:
+            return base_nodes
+
+        combined = session_nodes + base_nodes
+        seen: set = set()
+        deduped: List[NodeWithScore] = []
+        for node in combined:
+            metadata = getattr(node.node, "metadata", {}) or {}
+            key = (
+                metadata.get("upload_chunk_id")
+                or metadata.get("node_id")
+                or metadata.get("doc_id")
+                or id(node.node)
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(node)
+        added = max(0, len(deduped) - len(base_nodes))
+        if added:
+            LOGGER.info("Added %d session upload chunks to retrieval", added)
+        return deduped
+
     # STEP 1: Extract semantic topic (broader umbrella concept)
     current_topic = _extract_topic_keywords(query_text)
     if DEBUG_RAG:
@@ -738,9 +777,11 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
         nodes = _rescore_cached_chunks(app_state.sticky_chunks, query_text, config)
         if DEBUG_RAG:
             LOGGER.info("DEBUG: Nodes after rescore: %d", len(nodes))
-        
+
+        nodes = include_session_uploads(nodes, query_text)
+
         retrieval_mode = f"cached+rescored (turn {app_state.context_turn_count + 1}/{MAX_CONTEXT_TURNS})"
-        
+
         # Calculate confidence for re-scored nodes
         confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
         if DEBUG_RAG:
@@ -784,6 +825,8 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
 
             if expand_references and nodes:
                 nodes = _expand_references(nodes, vector_retriever)
+
+            nodes = include_session_uploads(nodes, query_text)
 
             if rerank and USE_RERANKER and cohere_client:
                 try:
@@ -919,6 +962,9 @@ Rephrase this question to better match maritime documentation language. Do not o
                 "tab_name": metadata.get("tab_name", ""),
                 "form_number": metadata.get("form_number", ""),
                 "form_category_name": metadata.get("form_category_name", ""),
+                "session_upload": metadata.get("session_upload", False),
+                "upload_display_name": metadata.get("upload_display_name", ""),
+                "upload_original_name": metadata.get("upload_original_name", ""),
             }
         )
 

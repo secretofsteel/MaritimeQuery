@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import datetime
 import os
+import uuid
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
 import html
 from markdown import markdown as md
 
@@ -17,6 +18,7 @@ from .query import query_with_confidence, cohere_client
 from .state import AppState
 from .logger import LOGGER
 from .constants import MAX_CONTEXT_TURNS  # Import for context display
+from .session_uploads import MAX_UPLOADS_PER_SESSION
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
@@ -36,6 +38,16 @@ def _reset_chat_state(app_state: AppState) -> None:
     for key in list(st.session_state.keys()):
         if key.startswith("correction_toggle_") or key.startswith("correction_text_") or key.startswith("confirm_"):
             st.session_state.pop(key)
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """Return a human-friendly file size string."""
+    size = float(size_bytes)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024.0
+    return f"{size:.1f}TB"
 
 
 _GITHUBISH_CSS = """
@@ -68,6 +80,19 @@ body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Not
 .result-markdown .empty-sources { margin: 0; color: #d5e9ff; opacity: 0.75; }
 hr { border: 0; border-top: 1px solid rgba(102,180,255,.25); margin: 2rem 0; }
 .smallmeta { color: rgba(190, 221, 255, .55); font-size: 12px; margin-top: 2rem; text-align: right; }
+.upload-chip-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.upload-chip { background: rgba(11, 44, 74, 0.8); border: 1px solid rgba(110, 195, 255, 0.3); padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; color: #cce8ff; }
+.upload-chip.more { background: rgba(110, 195, 255, 0.2); color: #7acbff; }
+.upload-card { background: rgba(8, 26, 44, 0.75); border: 1px solid rgba(110, 195, 255, 0.25); padding: 0.55rem 0.7rem; border-radius: 12px; margin-bottom: 0.4rem; }
+.upload-card strong { color: #e4f3ff; }
+.upload-card small { display: block; color: rgba(190, 221, 255, 0.6); }
+.upload-uploader div[data-testid="stFileUploader"] { width: 52px; }
+.upload-uploader div[data-testid="stFileUploaderDropzone"] { border: 1px solid rgba(110,195,255,0.35); background: rgba(8,26,44,0.7); border-radius: 12px; padding: 0; min-height: 52px; height: 52px; width: 52px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.upload-uploader div[data-testid="stFileUploaderDropzone"] section { padding: 0; }
+.upload-uploader div[data-testid="stFileUploaderDropzone"] section div { display: none; }
+.upload-uploader div[data-testid="stFileUploaderDropzone"]::before { content: "\1F4CE"; font-size: 24px; }
+.upload-uploader div[data-testid="stFileUploader"] > label { display: none; }
+.upload-limit-note { font-size: 0.75rem; color: rgba(190, 221, 255, 0.55); margin-top: 0.3rem; }
 """
 
 _HTML_SHELL = """
@@ -182,11 +207,19 @@ def compose_result_markdown(result: Dict) -> str:
         }
         parts.append("<ol class='sources-list'>")
         for idx, src in enumerate(sources[:5], 1):
-            source_file = src.get("source", "Unknown")
+            is_upload = src.get("session_upload")
+            source_file = src.get("upload_display_name") if is_upload else src.get("source", "Unknown")
+            if not source_file:
+                source_file = "Unknown"
             title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
             doc_type = (src.get("doc_type") or "").upper()
             type_label = type_labels.get(doc_type, doc_type)
-            display_title = f"{title} ({type_label})" if type_label else title
+            if is_upload:
+                display_title = src.get("upload_display_name") or title
+            else:
+                display_title = f"{title} ({type_label})" if type_label else title
+            if is_upload:
+                display_title = f"{display_title} 📎"
 
             location_segments: List[str] = []
             hierarchy = src.get("hierarchy")
@@ -997,7 +1030,7 @@ def render_app(
                     
                     with col3:
                         if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session", use_container_width=True):
-                            manager.delete_session(session.session_id)
+                            app_state.delete_session_with_uploads(session.session_id)
                             if is_current:
                                 # If deleting current session, create new one
                                 app_state.create_new_session()
@@ -1010,7 +1043,7 @@ def render_app(
                 st.markdown("---")
                 if st.button("🗑️ Clear all sessions", use_container_width=True, type="primary"):
                     if st.session_state.get("confirm_clear_all"):
-                        manager.clear_all_sessions()
+                        app_state.clear_all_sessions()
                         app_state.create_new_session()
                         st.session_state["confirm_clear_all"] = False
                         _rerun_app()
@@ -1062,20 +1095,34 @@ def render_app(
     # Render messages from current session
     messages = app_state.get_current_session_messages()
 
-    user_msg_idx = 0  # For unique keys
-    asst_msg_idx = 0
+    last_user_query = None
+    assistant_index = 0
 
     for msg in messages:
-        if msg["role"] == "user":
+        role = msg.get("role")
+        if role == "user":
+            if msg.get("is_upload_notice"):
+                uploaded_files = msg.get("uploaded_files", [])
+                with st.chat_message("user"):
+                    st.markdown("**📎 Uploaded files**")
+                    for record in uploaded_files:
+                        name = html.escape(record.get("display_name", "Unknown file"))
+                        size = record.get("size", 0)
+                        chunks = record.get("num_chunks", 0)
+                        st.markdown(
+                            f"<div class='upload-card'><strong>{name}</strong><small>{_format_file_size(size)} · {chunks} chunks</small></div>",
+                            unsafe_allow_html=True,
+                        )
+                continue
+
+            last_user_query = msg.get("content", "")
             with st.chat_message("user"):
-                st.markdown(msg["content"])
-            user_msg_idx += 1
-        
-        elif msg["role"] == "assistant":
-            # Reconstruct result dict for feedback rendering
+                st.markdown(last_user_query)
+
+        elif role == "assistant":
             result = {
-                "query": messages[asst_msg_idx * 2]["content"] if asst_msg_idx * 2 < len(messages) else "Query",
-                "answer": msg["content"],
+                "query": last_user_query or "Query",
+                "answer": msg.get("content", ""),
                 "confidence_pct": msg.get("confidence_pct", 0),
                 "confidence_level": msg.get("confidence_level", "N/A"),
                 "confidence_note": msg.get("confidence_note", ""),
@@ -1086,9 +1133,109 @@ def render_app(
                 "context_turn": msg.get("context_turn", 0),
                 "context_reset_note": msg.get("context_reset_note"),
             }
-            render_chat_message_with_feedback(app_state, result, asst_msg_idx)
-            asst_msg_idx += 1
-    
+            render_chat_message_with_feedback(app_state, result, assistant_index)
+            assistant_index += 1
+
+    session_uploads = app_state.get_session_upload_metadata()
+
+    if "session_upload_nonce" not in st.session_state:
+        st.session_state["session_upload_nonce"] = str(uuid.uuid4())
+
+    uploader_key = f"session_upload_{app_state.current_session_id}_{st.session_state['session_upload_nonce']}"
+
+    upload_col, chip_col = st.columns([0.15, 0.85])
+
+    with upload_col:
+        st.markdown("<div class='upload-uploader'>", unsafe_allow_html=True)
+        uploaded_files = st.file_uploader(
+            "Attach documents",
+            type=["pdf", "docx", "doc", "xlsx", "xls"],
+            accept_multiple_files=True,
+            key=uploader_key,
+            label_visibility="collapsed",
+            help=f"Attach up to {MAX_UPLOADS_PER_SESSION} files per session.",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with chip_col:
+        if session_uploads:
+            chips = []
+            for record in session_uploads[:8]:
+                chips.append(f"<span class='upload-chip'>{html.escape(record.get('display_name', 'File'))}</span>")
+            remainder = len(session_uploads) - len(chips)
+            if remainder > 0:
+                chips.append(f"<span class='upload-chip more'>+{remainder} more</span>")
+            st.markdown(f"<div class='upload-chip-row'>{''.join(chips)}</div>", unsafe_allow_html=True)
+        else:
+            st.caption("Attach PDFs, Word, or Excel files for this session.")
+
+        if len(session_uploads) >= MAX_UPLOADS_PER_SESSION:
+            st.markdown(
+                f"<div class='upload-limit-note'>Upload limit of {MAX_UPLOADS_PER_SESSION} files reached.</div>",
+                unsafe_allow_html=True,
+            )
+
+    feedback_messages = st.session_state.pop("session_upload_feedback", None)
+    if feedback_messages:
+        for level, message in feedback_messages:
+            if level == "success":
+                st.success(message)
+            elif level == "warning":
+                st.warning(message)
+            else:
+                st.error(message)
+
+    if uploaded_files:
+        session_id = app_state.current_session_id
+        if session_id:
+            manager = app_state.ensure_session_upload_manager()
+            new_records: List[Dict[str, Any]] = []
+            feedback: List[Tuple[str, str]] = []
+            for uploaded in uploaded_files:
+                file_bytes = uploaded.read()
+                if not file_bytes:
+                    feedback.append(("warning", f"{uploaded.name} contained no data."))
+                    continue
+                result = manager.add_upload(
+                    session_id,
+                    uploaded.name,
+                    file_bytes,
+                    uploaded.type or "application/octet-stream",
+                )
+                status = result.get("status")
+                if status == "added":
+                    record = result.get("record", {})
+                    new_records.append(record)
+                    feedback.append((
+                        "success",
+                        f"Attached {record.get('display_name', uploaded.name)}",
+                    ))
+                elif status == "duplicate":
+                    feedback.append(("warning", f"{uploaded.name} was already attached."))
+                elif status == "limit":
+                    feedback.append(("error", result.get("reason", "Upload limit reached.")))
+                    break
+                else:
+                    feedback.append(("error", result.get("reason", f"Failed to process {uploaded.name}")))
+
+            if new_records:
+                app_state.refresh_session_upload_cache()
+                summary_lines = [
+                    f"📎 **{record.get('display_name', 'File')}**"
+                    for record in new_records
+                ]
+                app_state.add_message_to_current_session(
+                    "user",
+                    "\n".join(summary_lines),
+                    {"is_upload_notice": True, "uploaded_files": new_records},
+                )
+
+            if feedback:
+                st.session_state["session_upload_feedback"] = feedback
+
+            st.session_state["session_upload_nonce"] = str(uuid.uuid4())
+            _rerun_app()
+
     # Chat input
     user_prompt = st.chat_input("Ask about the maritime library...")
     
