@@ -1,5 +1,9 @@
+#Core app
 pip==24
 streamlit
+markdown
+
+#LLM and embedding libraries
 google-genai
 llama-index-core
 llama-index-llms-gemini
@@ -7,11 +11,19 @@ llama-index-embeddings-gemini
 llama-index-vector-stores-chroma
 llama-index-retrievers-bm25
 chromadb
-PyPDF2
-python-docx
-openpyxl
-pandas
 rank-bm25
 cohere
-markdown
-textract
+
+#Document processing libraries
+python-docx
+openpyxl
+xlrd
+pandas
+
+#PDF processing libraries
+pymupdf
+PyPDF2
+pdfplumber
+pypdfium2
+pikepdf
+ocrmypdf

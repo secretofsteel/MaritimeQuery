@@ -22,7 +22,7 @@ from .indexing import chunk_documents
 from .logger import LOGGER
 
 
-MAX_UPLOADS_PER_SESSION = 50
+MAX_UPLOADS_PER_SESSION = 10
 
 
 @dataclass
