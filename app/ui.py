@@ -86,13 +86,18 @@ hr { border: 0; border-top: 1px solid rgba(102,180,255,.25); margin: 2rem 0; }
 .upload-card { background: rgba(8, 26, 44, 0.75); border: 1px solid rgba(110, 195, 255, 0.25); padding: 0.55rem 0.7rem; border-radius: 12px; margin-bottom: 0.4rem; }
 .upload-card strong { color: #e4f3ff; }
 .upload-card small { display: block; color: rgba(190, 221, 255, 0.6); }
-.upload-uploader div[data-testid="stFileUploader"] { width: 52px; }
-.upload-uploader div[data-testid="stFileUploaderDropzone"] { border: 1px solid rgba(110,195,255,0.35); background: rgba(8,26,44,0.7); border-radius: 12px; padding: 0; min-height: 52px; height: 52px; width: 52px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-.upload-uploader div[data-testid="stFileUploaderDropzone"] section { padding: 0; }
-.upload-uploader div[data-testid="stFileUploaderDropzone"] section div { display: none; }
-.upload-uploader div[data-testid="stFileUploaderDropzone"]::before { content: "\1F4CE"; font-size: 24px; }
-.upload-uploader div[data-testid="stFileUploader"] > label { display: none; }
-.upload-limit-note { font-size: 0.75rem; color: rgba(190, 221, 255, 0.55); margin-top: 0.3rem; }
+.chat-input-wrapper { position: relative; padding-bottom: 0.75rem; }
+.chat-input-wrapper div[data-testid="stChatInput"] { padding-left: 3.2rem; }
+.chat-input-wrapper div[data-testid="stFileUploader"] { position: absolute; left: 1.1rem; bottom: calc(env(safe-area-inset-bottom) + 1.1rem); width: 44px; height: 44px; z-index: 10; }
+.chat-input-wrapper div[data-testid="stFileUploader"] > label { display: none; }
+.chat-input-wrapper div[data-testid="stFileUploaderDropzone"] { border: none; background: rgba(15, 70, 120, 0.85); border-radius: 999px; padding: 0; min-height: 44px; height: 44px; width: 44px; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 16px rgba(10, 30, 55, 0.55); transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; }
+.chat-input-wrapper div[data-testid="stFileUploaderDropzone"] section { display: none; }
+.chat-input-wrapper div[data-testid="stFileUploaderDropzone"]::before { content: "\1F4CE"; font-size: 18px; filter: drop-shadow(0 1px 2px rgba(2, 12, 22, 0.7)); }
+.chat-input-wrapper div[data-testid="stFileUploaderDropzone"]:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(10, 30, 55, 0.65); background: rgba(20, 90, 150, 0.92); }
+.chat-input-wrapper div[data-testid="stFileUploaderDropzone"]:active { transform: translateY(0); box-shadow: 0 2px 10px rgba(6, 20, 36, 0.6); }
+.chat-upload-chips { margin-left: 3.6rem; margin-bottom: 0.35rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.chat-upload-chips.empty { color: rgba(190, 221, 255, 0.55); font-size: 0.75rem; }
+.upload-limit-note { font-size: 0.75rem; color: rgba(190, 221, 255, 0.55); margin-left: 3.6rem; margin-bottom: 0.4rem; }
 """
 
 _HTML_SHELL = """
@@ -1143,37 +1148,41 @@ def render_app(
 
     uploader_key = f"session_upload_{app_state.current_session_id}_{st.session_state['session_upload_nonce']}"
 
-    upload_col, chip_col = st.columns([0.15, 0.85])
+    st.markdown("<div class='chat-input-wrapper'>", unsafe_allow_html=True)
 
-    with upload_col:
-        st.markdown("<div class='upload-uploader'>", unsafe_allow_html=True)
-        uploaded_files = st.file_uploader(
-            "Attach documents",
-            type=["pdf", "docx", "doc", "xlsx", "xls"],
-            accept_multiple_files=True,
-            key=uploader_key,
-            label_visibility="collapsed",
-            help=f"Attach up to {MAX_UPLOADS_PER_SESSION} files per session.",
+    uploaded_files = st.file_uploader(
+        "Attach documents",
+        type=["pdf", "docx", "doc", "xlsx", "xls"],
+        accept_multiple_files=True,
+        key=uploader_key,
+        label_visibility="collapsed",
+        help=f"Attach up to {MAX_UPLOADS_PER_SESSION} files per session.",
+    )
+
+    if session_uploads:
+        chips = []
+        for record in session_uploads[:8]:
+            chips.append(f"<span class='upload-chip'>{html.escape(record.get('display_name', 'File'))}</span>")
+        remainder = len(session_uploads) - len(chips)
+        if remainder > 0:
+            chips.append(f"<span class='upload-chip more'>+{remainder} more</span>")
+        st.markdown(f"<div class='chat-upload-chips'>{''.join(chips)}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(
+            "<div class='chat-upload-chips empty'>Attach PDFs, Word, or Excel files for this session.</div>",
+            unsafe_allow_html=True,
         )
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    with chip_col:
-        if session_uploads:
-            chips = []
-            for record in session_uploads[:8]:
-                chips.append(f"<span class='upload-chip'>{html.escape(record.get('display_name', 'File'))}</span>")
-            remainder = len(session_uploads) - len(chips)
-            if remainder > 0:
-                chips.append(f"<span class='upload-chip more'>+{remainder} more</span>")
-            st.markdown(f"<div class='upload-chip-row'>{''.join(chips)}</div>", unsafe_allow_html=True)
-        else:
-            st.caption("Attach PDFs, Word, or Excel files for this session.")
+    if len(session_uploads) >= MAX_UPLOADS_PER_SESSION:
+        st.markdown(
+            f"<div class='upload-limit-note'>Upload limit of {MAX_UPLOADS_PER_SESSION} files reached.</div>",
+            unsafe_allow_html=True,
+        )
 
-        if len(session_uploads) >= MAX_UPLOADS_PER_SESSION:
-            st.markdown(
-                f"<div class='upload-limit-note'>Upload limit of {MAX_UPLOADS_PER_SESSION} files reached.</div>",
-                unsafe_allow_html=True,
-            )
+    # Chat input
+    user_prompt = st.chat_input("Ask about the maritime library...")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     feedback_messages = st.session_state.pop("session_upload_feedback", None)
     if feedback_messages:
@@ -1236,9 +1245,6 @@ def render_app(
             st.session_state["session_upload_nonce"] = str(uuid.uuid4())
             _rerun_app()
 
-    # Chat input
-    user_prompt = st.chat_input("Ask about the maritime library...")
-    
     if user_prompt:
         trimmed = user_prompt.strip()
         if not trimmed:
