@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from collections import defaultdict
 
@@ -20,7 +20,9 @@ from .feedback import FeedbackSystem
 from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
-from .session_uploads import SessionUploadManager, SessionUploadChunk
+
+if TYPE_CHECKING:
+    from .session_uploads import SessionUploadManager, SessionUploadChunk
 
 
 @dataclass
