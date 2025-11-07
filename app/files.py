@@ -1,13 +1,4 @@
 """File helpers: hashing, JSONL cache, document reading and cleaning."""
-
-"""
-Drop-in upgrades for MaritimeQuery/app/files.py
-- Adds PyMuPDF-first PDF extraction with structure preservation
-- Auto-detects scanned pages and (best-effort) OCR fallback via OCRmyPDF
-- Safer DOCX/Excel handling and Markdown-friendly outputs
-- Truncation marker and hyphenation cleanup
-- Recursive file iterator for supported types
-"""
 from __future__ import annotations
 
 import io
@@ -45,6 +36,17 @@ except Exception:
     pd = None
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv", ".txt"}
+
+
+"""
+Drop-in upgrades for MaritimeQuery/app/files.py
+- Adds PyMuPDF-first PDF extraction with structure preservation
+- Auto-detects scanned pages and (best-effort) OCR fallback via OCRmyPDF
+- Safer DOCX/Excel handling and Markdown-friendly outputs
+- Truncation marker and hyphenation cleanup
+- Recursive file iterator for supported types
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helper utilities for file hashing and JSONL cache
