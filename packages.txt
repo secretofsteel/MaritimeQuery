@@ -7,5 +7,5 @@ ghostscript
 pngquant
 unpaper
 
-# .doc -> .docx/.pdf conversion
+# .doc to .docx/.pdf conversion
 libreoffice
