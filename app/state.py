@@ -21,7 +21,7 @@ from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
 from .session_uploads import SessionUploadManager, SessionUploadChunk
-assert SessionUploadManager is not None
+
 
 
 
@@ -38,6 +38,10 @@ class AppState:
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
+    # Session upload management
+    session_upload_manager: Optional[SessionUploadManager] = None
+    _session_upload_metadata_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
+
     # REMOVED: _index_load_attempted (now in st.session_state)
     
     # Context-aware conversation state

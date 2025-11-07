@@ -16,6 +16,9 @@ __all__ = [
     "indexing",
     "query",
     "feedback",
+    "sessions",
+    "session_uploads",
     "state",
     "ui",
+    "logger",
 ]  # pragma: no cover
