@@ -21,8 +21,8 @@ from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
 
-if TYPE_CHECKING:
-    from .session_uploads import SessionUploadManager, SessionUploadChunk
+
+from .session_uploads import SessionUploadManager, SessionUploadChunk
 
 
 @dataclass
