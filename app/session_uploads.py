@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import os
 import pickle
@@ -8,13 +9,16 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, Iterable, List, Optional
+
 import numpy as np
 from llama_index.core import Document, Settings as LlamaSettings
 from llama_index.core.schema import NodeWithScore
+
 from .config import AppConfig
-from .extraction import gemini_extract_record, to_documents_from_gemini
-from .files import clean_text_for_llm, read_doc_for_llm
-from .indexing import chunk_documents
+# REMOVE these imports from top:
+# from .extraction import gemini_extract_record, to_documents_from_gemini
+# from .files import clean_text_for_llm, read_doc_for_llm
+# from .indexing import chunk_documents
 from .logger import LOGGER
 
 MAX_UPLOADS_PER_SESSION = 50
@@ -155,6 +159,11 @@ class SessionUploadManager:
         file_bytes: bytes,
         mime_type: str,
     ) -> Dict[str, Any]:
+        
+        # Import here to avoid circular dependency
+        from .extraction import gemini_extract_record, to_documents_from_gemini
+        from .indexing import chunk_documents
+
         """Parse, chunk, embed, and persist a new upload for this session."""
         records = self._load_metadata_dict(session_id)
         
@@ -282,6 +291,8 @@ class SessionUploadManager:
 
     def _simple_parse_file(self, temp_path: Path, display_name: str) -> List[Document]:
         """Fallback simple parsing when Gemini fails."""
+        # Import here to avoid circular dependency
+        from .files import clean_text_for_llm, read_doc_for_llm
         LOGGER.info("Using simple text extraction for %s", display_name)
         raw_text = read_doc_for_llm(temp_path)
         cleaned = clean_text_for_llm(raw_text)
