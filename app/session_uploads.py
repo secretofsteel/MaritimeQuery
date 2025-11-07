@@ -1,7 +1,4 @@
-"""Session-scoped upload handling, chunking, and retrieval."""
-
 from __future__ import annotations
-
 import json
 import os
 import pickle
@@ -11,16 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, Iterable, List, Optional
-
 import numpy as np
 from llama_index.core import Document, Settings as LlamaSettings
 from llama_index.core.schema import NodeWithScore
-
 from .config import AppConfig
+from .extraction import gemini_extract_record, to_documents_from_gemini
 from .files import clean_text_for_llm, read_doc_for_llm
 from .indexing import chunk_documents
 from .logger import LOGGER
-
 
 MAX_UPLOADS_PER_SESSION = 50
 
@@ -28,7 +23,6 @@ MAX_UPLOADS_PER_SESSION = 50
 @dataclass
 class SessionUploadChunk:
     """Single chunk derived from a user-uploaded document."""
-
     file_id: str
     chunk_id: str
     text: str
@@ -38,12 +32,11 @@ class SessionUploadChunk:
 
 class SessionUploadManager:
     """Handle parsing, storage, and retrieval of session-specific uploads."""
-
+    
     def __init__(self, uploads_dir: Optional[Path] = None) -> None:
         if uploads_dir is None:
             config = AppConfig.get()
             uploads_dir = config.paths.cache_dir / "session_uploads"
-
         self.base_dir = uploads_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._metadata_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -62,7 +55,7 @@ class SessionUploadManager:
     def _load_metadata_dict(self, session_id: str) -> Dict[str, Dict[str, Any]]:
         if session_id in self._metadata_cache:
             return {record["file_id"]: record for record in self._metadata_cache[session_id]}
-
+        
         metadata_path = self._metadata_path(session_id)
         records: Dict[str, Dict[str, Any]] = {}
         if metadata_path.exists():
@@ -77,7 +70,7 @@ class SessionUploadManager:
                 file_id = record.get("file_id")
                 if file_id:
                     records[file_id] = record
-
+        
         # Cache ordered list for reuse
         ordered = sorted(records.values(), key=lambda r: r.get("uploaded_at", ""))
         self._metadata_cache[session_id] = ordered
@@ -99,19 +92,19 @@ class SessionUploadManager:
     def _load_chunks(self, session_id: str) -> List[SessionUploadChunk]:
         if session_id in self._chunks_cache:
             return self._chunks_cache[session_id]
-
+        
         chunks_path = self._chunks_path(session_id)
         if not chunks_path.exists():
             self._chunks_cache[session_id] = []
             return []
-
+        
         try:
             with chunks_path.open("rb") as handle:
                 raw_chunks: List[Dict[str, Any]] = pickle.load(handle)
         except Exception as exc:  # pragma: no cover - defensive path
             LOGGER.warning("Failed to load session chunks for %s: %s", session_id, exc)
             raw_chunks = []
-
+        
         chunks = [
             SessionUploadChunk(
                 file_id=chunk.get("file_id", ""),
@@ -163,18 +156,18 @@ class SessionUploadManager:
         mime_type: str,
     ) -> Dict[str, Any]:
         """Parse, chunk, embed, and persist a new upload for this session."""
-
         records = self._load_metadata_dict(session_id)
+        
         if len(records) >= MAX_UPLOADS_PER_SESSION:
             return {"status": "limit", "reason": "Upload limit reached for this session."}
-
+        
         digest = md5(file_bytes).hexdigest()
         fingerprint = {
             "original_name": filename,
             "size": len(file_bytes),
             "hash": digest,
         }
-
+        
         for record in records.values():
             if (
                 record.get("original_name") == fingerprint["original_name"]
@@ -182,47 +175,59 @@ class SessionUploadManager:
                 and record.get("hash") == fingerprint["hash"]
             ):
                 return {"status": "duplicate", "record": record}
-
+        
         display_name = self._derive_display_name(
             filename, (record.get("display_name") for record in records.values())
         )
-
+        
         temp_suffix = Path(filename).suffix or ".txt"
         with NamedTemporaryFile(delete=False, suffix=temp_suffix) as tmp:
             tmp.write(file_bytes)
             temp_path = Path(tmp.name)
-
+        
         try:
-            raw_text = read_doc_for_llm(temp_path)
+            # CRITICAL FIX: Use Gemini extraction for structured processing
+            LOGGER.info("Processing %s with Gemini extraction (flash-lite)...", display_name)
+            try:
+                gemini_meta = gemini_extract_record(temp_path)
+                if "parse_error" in gemini_meta:
+                    LOGGER.warning("Gemini extraction failed for %s: %s, falling back to simple parsing", 
+                                 display_name, gemini_meta.get("parse_error"))
+                    # Fallback to simple extraction
+                    documents = self._simple_parse_file(temp_path, display_name)
+                else:
+                    # Success - use Gemini-extracted documents
+                    documents = to_documents_from_gemini(temp_path, gemini_meta)
+                    LOGGER.info("✅ Gemini extraction succeeded: %d sections found", len(documents))
+            except Exception as exc:
+                LOGGER.warning("Gemini extraction error for %s: %s, falling back to simple parsing", 
+                             display_name, exc)
+                documents = self._simple_parse_file(temp_path, display_name)
+            
+            if not documents:
+                return {"status": "error", "reason": "No readable content found in uploaded file."}
+            
+            # Mark all documents as session uploads
+            for doc in documents:
+                doc.metadata["session_upload"] = True
+                doc.metadata["upload_display_name"] = display_name
+                doc.metadata["upload_original_name"] = filename
+            
+            # Chunk the documents
+            chunks = chunk_documents(documents)
+            if not chunks:
+                return {"status": "error", "reason": "Unable to create chunks from uploaded file."}
+        
         finally:
             try:
                 temp_path.unlink()
             except OSError:
                 LOGGER.debug("Temporary upload file already removed: %s", temp_path)
-
-        cleaned = clean_text_for_llm(raw_text)
-        if not cleaned:
-            return {"status": "error", "reason": "Uploaded file contained no readable text."}
-
-        document = Document(
-            text=cleaned,
-            metadata={
-                "source": display_name,
-                "title": display_name,
-                "doc_type": "UPLOAD",
-                "session_upload": True,
-                "upload_original_name": filename,
-            },
-        )
-
-        chunks = chunk_documents([document])
-        if not chunks:
-            return {"status": "error", "reason": "Unable to create chunks from uploaded file."}
-
+        
         embed_model = LlamaSettings.embed_model
         if embed_model is None:  # pragma: no cover - configuration guard
             return {"status": "error", "reason": "Embedding model is not configured."}
-
+        
         uploaded_at = datetime.utcnow().isoformat()
         chunk_objects: List[SessionUploadChunk] = []
         for index, chunk in enumerate(chunks):
@@ -234,7 +239,6 @@ class SessionUploadManager:
                 "upload_original_name": filename,
                 "session_upload": True,
                 "uploaded_at": uploaded_at,
-                "doc_type": "UPLOAD",
                 "section": chunk.metadata.get("section") or "Uploaded document content",
                 "upload_chunk_id": chunk_id,
                 "chunk_id": chunk_id,
@@ -249,7 +253,7 @@ class SessionUploadManager:
                     metadata=metadata,
                 )
             )
-
+        
         new_record = {
             "file_id": digest,
             "display_name": display_name,
@@ -260,39 +264,56 @@ class SessionUploadManager:
             "hash": digest,
             "num_chunks": len(chunk_objects),
             "session_upload": True,
+            # Add doc_type from Gemini extraction if available
+            "doc_type": documents[0].metadata.get("doc_type", "UPLOAD") if documents else "UPLOAD",
         }
-
+        
         records[digest] = new_record
         ordered_records = sorted(records.values(), key=lambda r: r.get("uploaded_at", ""))
         self._write_metadata(session_id, ordered_records)
         self._metadata_cache[session_id] = ordered_records
-
+        
         all_chunks = self._load_chunks(session_id)
         all_chunks.extend(chunk_objects)
         self._write_chunks(session_id, all_chunks)
         self._chunks_cache[session_id] = all_chunks
-
+        
         return {"status": "added", "record": new_record}
 
+    def _simple_parse_file(self, temp_path: Path, display_name: str) -> List[Document]:
+        """Fallback simple parsing when Gemini fails."""
+        LOGGER.info("Using simple text extraction for %s", display_name)
+        raw_text = read_doc_for_llm(temp_path)
+        cleaned = clean_text_for_llm(raw_text)
+        if not cleaned:
+            return []
+        
+        metadata = {
+            "source": display_name,
+            "title": display_name.rsplit('.', 1)[0].replace('_', ' ').title(),
+            "doc_type": "UPLOAD",
+            "section": "Full Document Content",
+        }
+        return [Document(text=cleaned, metadata=metadata)]
+
     def search_session_uploads(
-        self, session_id: str, query: str, top_k: int = 10, boost: float = 0.15
+        self, session_id: str, query: str, top_k: int = 10, boost: float = 0.5
     ) -> List[NodeWithScore]:
         """Return session upload chunks most relevant to the query."""
-
         chunks = self._load_chunks(session_id)
         if not chunks:
             return []
-
+        
         embed_model = LlamaSettings.embed_model
         if embed_model is None:  # pragma: no cover - configuration guard
             LOGGER.warning("Embedding model unavailable; skipping session upload retrieval")
             return []
-
+        
         query_embedding = np.array(embed_model.get_query_embedding(query))
         query_norm = np.linalg.norm(query_embedding)
         if query_norm == 0:
             return []
-
+        
         scored: List[NodeWithScore] = []
         for chunk in chunks:
             chunk_vector = np.array(chunk.embedding)
@@ -300,21 +321,22 @@ class SessionUploadManager:
             if denom == 0:
                 continue
             similarity = float(np.dot(query_embedding, chunk_vector) / denom)
-            boosted = similarity * (1 + boost) + boost
+            # CRITICAL FIX: Apply 50% boost (multiply by 1.5)
+            boosted_score = similarity * 1.5
             document = Document(text=chunk.text, metadata=chunk.metadata)
-            scored.append(NodeWithScore(node=document, score=boosted))
-
+            scored.append(NodeWithScore(node=document, score=boosted_score))
+        
         scored.sort(key=lambda node: node.score, reverse=True)
+        LOGGER.info("Session upload search: found %d chunks, returning top %d (boost=%.1f%%)", 
+                   len(scored), min(top_k, len(scored)), boost * 100)
         return scored[:top_k]
 
     def delete_session_uploads(self, session_id: str) -> None:
         self._metadata_cache.pop(session_id, None)
         self._chunks_cache.pop(session_id, None)
-
         metadata_path = self._metadata_path(session_id)
         if metadata_path.exists():
             metadata_path.unlink()
-
         chunks_path = self._chunks_path(session_id)
         if chunks_path.exists():
             chunks_path.unlink()
@@ -323,9 +345,9 @@ class SessionUploadManager:
         self._metadata_cache.clear()
         self._chunks_cache.clear()
         for path in self.base_dir.glob("*_uploads.jsonl"):
-            path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            path.unlink(missing_ok=True)
         for path in self.base_dir.glob("*_uploads.pkl"):
-            path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            path.unlink(missing_ok=True)
 
 
 __all__ = [
@@ -333,4 +355,3 @@ __all__ = [
     "SessionUploadChunk",
     "SessionUploadManager",
 ]
-

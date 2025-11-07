@@ -1,0 +1,11 @@
+# OCR + PDF utilities
+tesseract-ocr
+tesseract-ocr-eng
+tesseract-ocr-ell
+qpdf
+ghostscript
+pngquant
+unpaper
+
+# .doc -> .docx/.pdf conversion
+libreoffice
