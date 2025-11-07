@@ -1,4 +1,4 @@
-# OCR + PDF utilities
+
 tesseract-ocr
 tesseract-ocr-eng
 tesseract-ocr-ell
@@ -7,5 +7,5 @@ ghostscript
 pngquant
 unpaper
 
-# .doc to .docx/.pdf conversion
+
 libreoffice
