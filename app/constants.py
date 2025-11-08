@@ -107,7 +107,7 @@ CONFIDENCE_MEDIUM_THRESHOLD = 55
 
 # Context-aware conversation settings
 MAX_CONTEXT_TURNS = 6  # Hard reset after this many exchanges
-CONTEXT_HISTORY_WINDOW = 3  # Number of recent Q&A pairs to include in prompt
+CONTEXT_HISTORY_WINDOW = 5  # Number of recent Q&A pairs to include in prompt
 
 __all__ = [
     "CHUNK_SIZE",

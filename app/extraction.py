@@ -52,7 +52,7 @@ def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
                 model="gemini-flash-lite-latest",
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.1,
+                    temperature=0.0,
                     response_mime_type="application/json",
                     response_schema=GEMINI_SCHEMA,
                 ),
