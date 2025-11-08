@@ -21,9 +21,9 @@ xlrd
 pandas
 
 #PDF processing libraries
-pymupdf
+#pymupdf
 PyPDF2
-pdfplumber
-pypdfium2
-pikepdf
-ocrmypdf
+#pdfplumber
+#pypdfium2
+#pikepdf
+#ocrmypdf
