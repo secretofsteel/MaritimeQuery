@@ -1,138 +1,16 @@
 """File helpers: hashing, JSONL cache, document reading and cleaning."""
+
 from __future__ import annotations
 
-import io
-import os
-import re
 import json
-import csv
-import tempfile
-import subprocess
-import shutil
-from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
-from .logger import LOGGER
+import re
 from hashlib import md5
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
-# Your existing imports likely include these
-try:
-    import fitz  # PyMuPDF
-except Exception:
-    fitz = None  # handled at runtime
+import pandas as pd
 
-try:
-    from PyPDF2 import PdfReader
-except Exception:
-    PdfReader = None
-
-try:
-    import docx  # python-docx
-except Exception:
-    docx = None
-
-try:
-    import pandas as pd
-except Exception:
-    pd = None
-
-SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv", ".txt"}
-
-
-"""
-Drop-in upgrades for MaritimeQuery/app/files.py
-- Adds PyMuPDF-first PDF extraction with structure preservation
-- Auto-detects scanned pages and (best-effort) OCR fallback via OCRmyPDF
-- Safer DOCX/Excel handling and Markdown-friendly outputs
-- Truncation marker and hyphenation cleanup
-- Recursive file iterator for supported types
-"""
-
-
-# ---------------------------------------------------------------------------
-# Helper utilities for file hashing and JSONL cache
-# ---------------------------------------------------------------------------
-
-def _convert_doc_with_soffice(src: Path, target_ext: str, timeout: int = 120) -> Optional[Path]:
-    """
-    Convert legacy .doc using headless LibreOffice.
-    target_ext: 'docx' or 'pdf'
-    Returns path to converted file or None on failure.
-    """
-    assert target_ext in {"docx", "pdf"}
-    try:
-        outdir = src.parent
-        # LibreOffice picks output type from --convert-to
-        # docx filter: "docx:MS Word 2007 XML"
-        fmt = "docx:MS Word 2007 XML" if target_ext == "docx" else "pdf:writer_pdf_Export"
-        cmd = [
-            "soffice", "--headless", "--nologo", "--nodefault", "--nofirststartwizard",
-            "--convert-to", fmt, "--outdir", str(outdir), str(src)
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
-        cand = src.with_suffix(f".{target_ext}")
-        return cand if cand.exists() else None
-    except Exception:
-        return None
-
-# light check that the binary exists
-def _soffice_available() -> bool:
-    return shutil.which("soffice") is not None
-
-def _pymupdf_is_scanned_page(page) -> bool:
-    """Heuristic: page with near-zero text and mostly image blocks.
-    Not perfect, good enough to trigger OCR.
-    """
-    try:
-        txt = page.get_text("text") or ""
-        if len(txt.strip()) >= 32:
-            return False
-        j = page.get_text("rawdict") or {}
-        blocks = j.get("blocks", [])
-        if not blocks and not txt.strip():
-            return True
-        img_blocks = sum(1 for b in blocks if b.get("type") == 1)
-        return img_blocks >= max(1, len(blocks) - 1)
-    except Exception:
-        return False
-
-
-def _pymupdf_page_to_markdown(page) -> str:
-    """Lightweight, layout-aware text using block reading order.
-    Upgrade path: inspect spans and map larger fonts to #/## headings,
-    convert bullet glyphs to '-', etc.
-    """
-    try:
-        blocks = page.get_text("blocks")  # [x0,y0,x1,y1,txt,...]
-    except Exception:
-        return page.get_text("text") or ""
-    blocks = [b for b in blocks if len(b) >= 5 and (b[4] or "").strip()]
-    blocks.sort(key=lambda b: (b[1], b[0]))  # top-to-bottom, then left-to-right
-    out: List[str] = []
-    for b in blocks:
-        out.append(str(b[4]).strip())
-    return "\n\n".join(out)
-
-
-def _df_to_markdown(df, max_rows: int = 30, max_cols: int = 12) -> str:
-    if df is None or df.empty:
-        return ""
-    df = df.iloc[:max_rows, :max_cols].copy()
-    # Try to promote first row to header if it looks like headers
-    try:
-        if df.iloc[0].apply(lambda x: isinstance(x, str) and len(str(x)) < 40).mean() >= 0.6:
-            df.columns = df.iloc[0]
-            df = df[1:]
-    except Exception:
-        pass
-    df = df.fillna("")
-    headers = list(map(str, df.columns))
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "|" + "|".join([" --- "] * len(headers)) + "|",
-    ]
-    for _, row in df.iterrows():
-        lines.append("| " + " | ".join(map(lambda x: str(x), row.values)) + " |")
-    return "\n".join(lines)
+from .logger import LOGGER
 
 
 def file_fingerprint(path: Path) -> Dict[str, Any]:
@@ -141,11 +19,10 @@ def file_fingerprint(path: Path) -> Dict[str, Any]:
     return {"name": path.name, "size": stat.st_size, "mtime": stat.st_mtime}
 
 
-def iter_library_files(root: Path) -> Iterator[Path]:
-    """Yield supported files under root (recursively)."""
-    for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
-            yield p
+def iter_library_files(root: Path) -> Iterable[Path]:
+    """Yield supported document paths from the library root."""
+    for ext in ("*.docx", "*.doc", "*.xlsx", "*.xls", "*.pdf", "*.txt"):
+        yield from root.glob(ext)
 
 
 def current_files_index(root: Path) -> Dict[str, Dict[str, Any]]:
@@ -204,197 +81,92 @@ def collapse_repeated_lines(text: str, max_repeats: int = 3) -> str:
     return "\n".join(cleaned)
 
 
-# ---------------------------------------------------------------------------
-# Text cleaning for LLM consumption
-# ---------------------------------------------------------------------------
-
 def clean_text_for_llm(text: str) -> str:
-    if not text:
-        return ""
-    # Normalize line endings
+    """Aggressive text normalisation to reduce parsing noise."""
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    text = re.sub(r"([\\-_=]{4,})", "----", text)
+    text = re.sub(r"(\.{4,})", "...", text)
+    text = re.sub(r"([,.;:!?])\1{2,}", r"\1", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Join hyphenated line breaks produced by PDF extraction
-    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
-    # Collapse multiple blank lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    # Trim trailing spaces per line
-    text = "\n".join(s.rstrip() for s in text.splitlines())
     return text.strip()
 
 
-# ---------------------------------------------------------------------------
-# Main dispatcher (REPLACE your read_doc_for_llm with this)
-# ---------------------------------------------------------------------------
-
 def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
-    """Unified text extraction for PDF/DOCX/Excel/CSV/TXT.
-    - PDF: PyMuPDF first; if scanned, best-effort OCR via OCRmyPDF, fallback to PyPDF2
-    - DOCX: paragraphs + tables, no over-eager de-duplication
-    - Excel/CSV: Markdown-friendly tables
-    """
+    """Extract text from various document formats."""
     ext = path.suffix.lower()
-
-    if ext not in SUPPORTED_EXTS:
-        return ""
-
     text = ""
+    try:
+        if ext == ".txt":
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        elif ext == ".docx":
+            from docx import Document as DocxDocument
 
-    # -------------------- PDF --------------------
-    if ext == ".pdf":
-        try:
-            if fitz is not None:
-                with fitz.open(str(path)) as doc:
-                    page_texts: List[str] = []
-                    scanned_pages = 0
-                    for page in doc:
-                        if _pymupdf_is_scanned_page(page):
-                            scanned_pages += 1
-                        md = _pymupdf_page_to_markdown(page)
-                        if md.strip():
-                            page_texts.append(md)
-                    text = "\n\n".join(page_texts)
+            document = DocxDocument(str(path))
+            parts: List[str] = []
+            for paragraph in document.paragraphs:
+                if paragraph.text.strip():
+                    parts.append(paragraph.text)
 
-                    # If looks scanned or extraction was weak, try OCR fallback
-                    if (not text.strip()) or scanned_pages >= max(1, len(doc) // 2):
-                        try:
-                            with tempfile.TemporaryDirectory() as td:
-                                ocr_out = Path(td) / "ocr.pdf"
-                                cmd = [
-                                    "ocrmypdf",
-                                    "--skip-text",
-                                    "--tesseract-timeout",
-                                    "300",
-                                    "--optimize",
-                                    "1",
-                                    "--output-type",
-                                    "pdf",
-                                    str(path),
-                                    str(ocr_out),
-                                ]
-                                subprocess.run(cmd, check=True, capture_output=True)
-                                with fitz.open(str(ocr_out)) as ocr_doc:
-                                    page_texts = []
-                                    for page in ocr_doc:
-                                        md = _pymupdf_page_to_markdown(page)
-                                        if md.strip():
-                                            page_texts.append(md)
-                                    if page_texts:
-                                        text = "\n\n".join(page_texts)
-                        except Exception:
-                            # OCR fallback unavailable or failed; keep whatever we had
-                            pass
-            else:
-                # PyMuPDF not available: last-resort PyPDF2
-                if PdfReader is None:
-                    return ""
-                reader = PdfReader(str(path))
-                pages: List[str] = []
-                for page in reader.pages:
-                    extracted = page.extract_text() or ""
-                    if extracted.strip():
-                        pages.append(extracted)
-                text = "\n".join(pages)
-        except Exception:
-            # As an ultimate fallback, try PyPDF2 even if PyMuPDF failed mid-run
-            if PdfReader is not None:
+            for table in document.tables:
+                table_text_parts = []
+                for row in table.rows:
+                    row_text_parts = []
+                    for cell in row.cells:
+                        cell_text = cell.text.strip()
+                        if cell_text and cell_text not in row_text_parts:
+                            row_text_parts.append(cell_text)
+                    if row_text_parts:
+                        table_text_parts.append(" | ".join(row_text_parts))
+                table_full_text = "\n".join(table_text_parts)
+                max_table_chars = 10000
+                if len(table_full_text) > max_table_chars:
+                    parts.append(table_full_text[:max_table_chars])
+                else:
+                    parts.append(table_full_text)
+
+            text = collapse_repeated_lines("\n".join(parts))
+
+        elif ext == ".doc":
+            import textract
+
+            text = textract.process(str(path)).decode("utf-8")
+
+        elif ext == ".pdf":
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(str(path))
+            pages = []
+            for page in reader.pages:
+                extracted = page.extract_text() or ""
+                if extracted.strip():
+                    pages.append(extracted)
+            text = "\n".join(pages)
+
+        elif ext in {".xlsx", ".xls"}:
+            excel = pd.ExcelFile(str(path))
+            chunks: List[str] = []
+            for sheet_name in excel.sheet_names[:5]:
                 try:
-                    reader = PdfReader(str(path))
-                    pages = []
-                    for page in reader.pages:
-                        extracted = page.extract_text() or ""
-                        if extracted.strip():
-                            pages.append(extracted)
-                    text = "\n".join(pages)
-                except Exception:
-                    text = ""
-            else:
-                text = ""
+                    df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
+                    df.dropna(axis=1, how="all", inplace=True)
+                    df.dropna(thresh=2, inplace=True)
+                    df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
+                    if not df.empty:
+                        chunks.append(f"[Sheet: {sheet_name}]\n" + df.to_string(index=False, header=False))
+                except Exception as exc:  # pragma: no cover - defensive path
+                    LOGGER.warning("Could not read sheet '%s' from %s: %s", sheet_name, path.name, exc)
+                    continue
+            text = "\n\n".join(chunks)
 
-    # -------------------- DOCX --------------------
-    elif ext == ".docx":
-        if docx is None:
-            return ""
-        d = docx.Document(str(path))
-        parts: List[str] = []
-        # paragraphs
-        for p in d.paragraphs:
-            t = (p.text or "").strip()
-            if t:
-                parts.append(t)
-        # tables (no over-eager de-dup)
-        for tbl in d.tables:
-            for row in tbl.rows:
-                row_text_parts: List[str] = []
-                for cell in row.cells:
-                    cell_text = (cell.text or "").strip()
-                    if cell_text:
-                        row_text_parts.append(cell_text)
-                if row_text_parts:
-                    parts.append(" | ".join(row_text_parts))
-        text = "\n".join(parts)
+        else:
+            text = path.read_text(encoding="utf-8", errors="ignore")
 
-    # -------------------- DOC (legacy Word) --------------------
-    elif ext == ".doc":
-        if not _soffice_available():
-            # No LibreOffice in this environment; nothing to do
-            return ""
-        docx_path = _convert_doc_with_soffice(path, "docx")
-        if docx_path and docx_path.exists():
-            return read_doc_for_llm(docx_path, max_chars=max_chars)
-
-        pdf_path = _convert_doc_with_soffice(path, "pdf")
-        if pdf_path and pdf_path.exists():
-            return read_doc_for_llm(pdf_path, max_chars=max_chars)
-
-        return ""
-
-
-    # -------------------- Excel --------------------
-    elif ext in {".xlsx", ".xls"}:
-        if pd is None:
-            return ""
-        try:
-            xls = pd.ExcelFile(str(path))
-        except Exception:
-            return ""
-        chunks: List[str] = []
-        for sheet_name in xls.sheet_names:
-            try:
-                df = xls.parse(sheet_name)
-            except Exception:
-                continue
-            md = _df_to_markdown(df)
-            if md:
-                chunks.append(f"# Sheet: {sheet_name}\n{md}")
-        text = "\n\n".join(chunks)
-
-    # -------------------- CSV --------------------
-    elif ext == ".csv":
-        try:
-            if pd is not None:
-                df = pd.read_csv(str(path))
-                text = _df_to_markdown(df, max_rows=200, max_cols=24)
-            else:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read()
-        except Exception:
-            text = ""
-
-    # -------------------- TXT --------------------
-    elif ext == ".txt":
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-        except Exception:
-            text = ""
-
-    # Post-process and truncate with marker
-    text = clean_text_for_llm(text)
+    except Exception as exc:  # pragma: no cover - defensive path
+        text = f"[READ_ERROR] {exc}"
     if max_chars and len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n[TRUNCATED]"
+        text = text[:max_chars]
     return text
-
-
 
 
 __all__ = [
@@ -407,5 +179,4 @@ __all__ = [
     "collapse_repeated_lines",
     "clean_text_for_llm",
     "read_doc_for_llm",
-    "SUPPORTED_EXTS",
 ]
