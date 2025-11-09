@@ -216,10 +216,48 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
             text = collapse_repeated_lines("\n".join(parts))
 
         elif ext == ".doc":
-            # Legacy format - will be handled by Gemini vision in extraction.py
-            # Just return empty string here, actual extraction happens at Gemini level
-            LOGGER.debug("Legacy .doc detected: %s - deferring to LLM", path.name)
-            return ""
+            LOGGER.info("Legacy .doc detected: %s - attempting local conversion", path.name)
+            converted_path = path.with_suffix(".converted.pdf")
+
+            try:
+                # Try Spire.Doc first (simple, fast)
+                try:
+                    from spire.doc import Document, FileFormat
+                    doc = Document()
+                    doc.LoadFromFile(str(path))
+                    doc.SaveToFile(str(converted_path), FileFormat.PDF)
+                    doc.Close()
+                    LOGGER.info("Converted %s to PDF via Spire.Doc", path.name)
+                except ImportError:
+                    # Fall back to Aspose if Spire not available
+                    try:
+                        import aspose.words as aw
+                        doc = aw.Document(str(path))
+                        doc.save(str(converted_path))
+                        LOGGER.info("Converted %s to PDF via Aspose.Words", path.name)
+                    except Exception as exc:
+                        LOGGER.warning("Aspose conversion failed for %s: %s", path.name, exc)
+                        converted_path = None
+
+                if converted_path and converted_path.exists():
+                    # Read text from the converted PDF using the same logic as normal PDFs
+                    from fitz import open as fitz_open
+                    with fitz_open(str(converted_path)) as pdf:
+                        page_texts = []
+                        for page in pdf:
+                            t = _pymupdf_page_to_text(page)
+                            if t.strip():
+                                page_texts.append(t)
+                        text = "\n\n".join(page_texts)
+                        LOGGER.info("Extracted text from converted PDF: %s", path.name)
+                else:
+                    text = ""
+                    LOGGER.warning("Conversion failed or file missing for %s", path.name)
+
+            except Exception as exc:
+                LOGGER.warning("Legacy .doc conversion failed for %s: %s", path.name, exc)
+                text = ""
+
 
         elif ext == ".pdf":
             try:

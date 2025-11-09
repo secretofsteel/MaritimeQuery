@@ -23,69 +23,6 @@ def build_extract_prompt(filename: str, file_text: str) -> str:
         f"\nCategory map: {json.dumps(FORM_CATEGORIES, indent=2)}\n\nFilename: {filename}\nDocument preview:\n{file_text}"
     )
 
-
-def gemini_extract_from_legacy_doc(path: Path) -> Dict[str, Any]:
-    """Handle legacy .doc files via Gemini vision."""
-    config = AppConfig.get()
-    
-    LOGGER.info("Processing legacy .doc file: %s", path.name)
-    
-    try:
-        with path.open("rb") as f:
-            file_bytes = f.read()
-        
-        prompt = f"""{EXTRACT_SYSTEM_PROMPT}
-
-**NOTE**: This is a legacy Microsoft Word .doc file (binary format).
-
-Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
-Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
-
-Filename: {path.name}"""
-        
-        response = config.client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=[
-                types.Part.from_bytes(
-                    data=file_bytes, 
-                    mime_type="application/msword"
-                ),
-                prompt
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                response_mime_type="application/json",
-                response_schema=GEMINI_SCHEMA,
-            ),
-        )
-        
-        raw = response.text or "{}"
-        data = _parse_json_response(raw)
-        data["legacy_format"] = True
-        
-    except Exception as exc:
-        LOGGER.exception("Legacy .doc extraction failed for %s", path.name)
-        return {
-            "filename": path.name,
-            "doc_type": "UNKNOWN",
-            "title": path.stem,
-            "sections": [],
-            "references": {},
-            "raw_output": "{}",
-            "parse_error": f"Legacy format extraction failed: {exc}",
-            "legacy_format": True,
-        }
-    
-    data.setdefault("filename", path.name)
-    data.setdefault("doc_type", "UNKNOWN")
-    data.setdefault("title", path.stem)
-    data.setdefault("sections", [])
-    data.setdefault("references", {})
-    data["raw_output"] = raw
-    data["legacy_format"] = True
-    
-    return data
-
 def gemini_extract_from_scanned_pdf(path: Path, max_retries: int = 2) -> Dict[str, Any]:
     """Extract from scanned PDFs using Gemini vision."""
     config = AppConfig.get()
@@ -179,12 +116,6 @@ def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
     if path.suffix.lower() == ".pdf" and is_scanned_pdf(path):
         LOGGER.info("Detected scanned PDF: %s", path.name)
         return gemini_extract_from_scanned_pdf(path, max_retries)
-    
-    # NEW: Check for legacy .doc
-    if path.suffix.lower() == ".doc":
-        LOGGER.info("Detected legacy .doc format: %s", path.name)
-        return gemini_extract_from_legacy_doc(path)
-
     
     config = AppConfig.get()
     preview = clean_text_for_llm(read_doc_for_llm(path))
@@ -294,8 +225,7 @@ def to_documents_from_gemini(path: Path, meta: Dict[str, Any]) -> List[Document]
 __all__ = [
     "build_extract_prompt",
     "gemini_extract_record",
-    "gemini_extract_from_scanned_pdf",
-    "gemini_extract_from_legacy_doc",  
+    "gemini_extract_from_scanned_pdf", 
     "format_references_for_metadata",
     "to_documents_from_gemini",
 ]
