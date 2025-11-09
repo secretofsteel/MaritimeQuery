@@ -12,7 +12,7 @@ from google.genai import types
 
 from .config import AppConfig
 from .constants import EXTRACT_SYSTEM_PROMPT, FORM_CATEGORIES, GEMINI_SCHEMA
-from .files import clean_text_for_llm, read_doc_for_llm
+from .files import clean_text_for_llm, read_doc_for_llm, is_scanned_pdf
 from .logger import LOGGER
 
 
@@ -22,6 +22,142 @@ def build_extract_prompt(filename: str, file_text: str) -> str:
         f"{EXTRACT_SYSTEM_PROMPT}\n\nSchema: {json.dumps(GEMINI_SCHEMA, indent=2)}"
         f"\nCategory map: {json.dumps(FORM_CATEGORIES, indent=2)}\n\nFilename: {filename}\nDocument preview:\n{file_text}"
     )
+
+
+def gemini_extract_from_legacy_doc(path: Path) -> Dict[str, Any]:
+    """Handle legacy .doc files via Gemini vision."""
+    config = AppConfig.get()
+    
+    LOGGER.info("Processing legacy .doc file: %s", path.name)
+    
+    try:
+        with path.open("rb") as f:
+            file_bytes = f.read()
+        
+        prompt = f"""{EXTRACT_SYSTEM_PROMPT}
+
+**NOTE**: This is a legacy Microsoft Word .doc file (binary format).
+
+Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
+Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
+
+Filename: {path.name}"""
+        
+        response = config.client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=file_bytes, 
+                    mime_type="application/msword"
+                ),
+                prompt
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=GEMINI_SCHEMA,
+            ),
+        )
+        
+        raw = response.text or "{}"
+        data = _parse_json_response(raw)
+        data["legacy_format"] = True
+        
+    except Exception as exc:
+        LOGGER.exception("Legacy .doc extraction failed for %s", path.name)
+        return {
+            "filename": path.name,
+            "doc_type": "UNKNOWN",
+            "title": path.stem,
+            "sections": [],
+            "references": {},
+            "raw_output": "{}",
+            "parse_error": f"Legacy format extraction failed: {exc}",
+            "legacy_format": True,
+        }
+    
+    data.setdefault("filename", path.name)
+    data.setdefault("doc_type", "UNKNOWN")
+    data.setdefault("title", path.stem)
+    data.setdefault("sections", [])
+    data.setdefault("references", {})
+    data["raw_output"] = raw
+    data["legacy_format"] = True
+    
+    return data
+
+def gemini_extract_from_scanned_pdf(path: Path, max_retries: int = 2) -> Dict[str, Any]:
+    """Extract from scanned PDFs using Gemini vision."""
+    config = AppConfig.get()
+    
+    if not config.ocr_enabled:
+        LOGGER.warning("OCR disabled, skipping: %s", path.name)
+        return {
+            "filename": path.name,
+            "doc_type": "UNKNOWN",
+            "title": path.stem,
+            "sections": [],
+            "references": {},
+            "raw_output": "{}",
+            "parse_error": "OCR disabled",
+        }
+    
+    LOGGER.info("Processing scanned PDF with OCR: %s", path.name)
+    
+    try:
+        with path.open("rb") as f:
+            file_bytes = f.read()
+        
+        prompt = f"""{EXTRACT_SYSTEM_PROMPT}
+
+**IMPORTANT**: This is a SCANNED PDF. You must:
+1. OCR all text from the images
+2. Extract structure per schema
+
+Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
+Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
+
+Filename: {path.name}"""
+        
+        response = config.client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
+                prompt
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=GEMINI_SCHEMA,
+            ),
+        )
+        
+        raw = response.text or "{}"
+        data = _parse_json_response(raw)
+        data["ocr_used"] = True
+        
+    except Exception as exc:
+        LOGGER.exception("OCR failed for %s", path.name)
+        return {
+            "filename": path.name,
+            "doc_type": "UNKNOWN",
+            "title": path.stem,
+            "sections": [],
+            "references": {},
+            "raw_output": "{}",
+            "parse_error": f"OCR failed: {exc}",
+            "ocr_used": True,
+        }
+    
+    data.setdefault("filename", path.name)
+    data.setdefault("doc_type", "UNKNOWN")
+    data.setdefault("title", path.stem)
+    data.setdefault("sections", [])
+    data.setdefault("references", {})
+    data["raw_output"] = raw
+    data["ocr_used"] = True
+    
+    return data
 
 
 def _parse_json_response(raw: str) -> Dict[str, Any]:
@@ -39,6 +175,17 @@ def _parse_json_response(raw: str) -> Dict[str, Any]:
 
 def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
     """Call Gemini with retries; preserve the exact schema and keys."""
+    # Handle scanned PDFs separately
+    if path.suffix.lower() == ".pdf" and is_scanned_pdf(path):
+        LOGGER.info("Detected scanned PDF: %s", path.name)
+        return gemini_extract_from_scanned_pdf(path, max_retries)
+    
+    # NEW: Check for legacy .doc
+    if path.suffix.lower() == ".doc":
+        LOGGER.info("Detected legacy .doc format: %s", path.name)
+        return gemini_extract_from_legacy_doc(path)
+
+    
     config = AppConfig.get()
     preview = clean_text_for_llm(read_doc_for_llm(path))
     prompt = build_extract_prompt(path.name, preview)
@@ -76,6 +223,7 @@ def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
     data["raw_output"] = raw
     if last_error:
         data["parse_error"] = last_error
+    data.setdefault("ocr_used", False)
     return data
 
 
@@ -146,6 +294,8 @@ def to_documents_from_gemini(path: Path, meta: Dict[str, Any]) -> List[Document]
 __all__ = [
     "build_extract_prompt",
     "gemini_extract_record",
+    "gemini_extract_from_scanned_pdf",
+    "gemini_extract_from_legacy_doc",  
     "format_references_for_metadata",
     "to_documents_from_gemini",
 ]
