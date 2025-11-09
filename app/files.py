@@ -104,6 +104,26 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
 
             document = DocxDocument(str(path))
             parts: List[str] = []
+
+            # Extract header tables (where your form metadata is!)
+            for section in document.sections:
+                header = section.header
+                for table in header.tables:
+                    for row in table.rows:
+                        row_parts = []
+                        for cell in row.cells:
+                            cell_text = cell.text.strip()
+                            if cell_text and cell_text not in row_parts:  # Avoid duplicates
+                                row_parts.append(cell_text)
+                        if row_parts:
+                            parts.append(' | '.join(row_parts))
+                
+                # Extract header paragraphs too (some forms use these)
+                for para in header.paragraphs:
+                    if para.text.strip():
+                        parts.append(para.text)
+
+
             for paragraph in document.paragraphs:
                 if paragraph.text.strip():
                     parts.append(paragraph.text)
