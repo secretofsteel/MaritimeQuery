@@ -44,7 +44,7 @@ Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
 Filename: {path.name}"""
         
         response = config.client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash-lite",
             contents=[
                 types.Part.from_bytes(
                     data=file_bytes, 
@@ -120,7 +120,7 @@ Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
 Filename: {path.name}"""
         
         response = config.client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash-lite",
             contents=[
                 types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
                 prompt
