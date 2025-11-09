@@ -49,7 +49,7 @@ def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
     for attempt in range(1, max_retries + 2):
         try:
             response = config.client.models.generate_content(
-                model="gemini-flash-lite-latest",
+                model="gemini-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
