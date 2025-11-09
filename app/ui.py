@@ -1216,18 +1216,18 @@ def render_app(
                 if file_hash in st.session_state["processed_upload_hashes"]:
                     LOGGER.info("Skipping %s - already processed", uploaded.name)
                     continue
-                
-                # Mark as processed
-                st.session_state["processed_upload_hashes"].add(file_hash)
-                
+            
                 result = manager.add_upload(
                     session_id,
                     uploaded.name,
                     file_bytes,
                     uploaded.type or "application/octet-stream",
-                )
+            )
+            
                 status = result.get("status")
                 if status == "added":
+                    # Mark as processed ONLY on success
+                    st.session_state["processed_upload_hashes"].add(file_hash)
                     record = result.get("record", {})
                     new_records.append(record)
                     feedback.append((
