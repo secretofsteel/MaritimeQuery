@@ -19,6 +19,8 @@ python-docx
 openpyxl
 xlrd
 pandas
+spire.doc
+aspose-words
 
 #PDF processing libraries
 pymupdf
