@@ -12,6 +12,74 @@ import pandas as pd
 
 from .logger import LOGGER
 
+def _df_to_markdown(df, max_rows: int = 100, max_cols: int = 12) -> str:
+    """Convert DataFrame to markdown table for LLM consumption."""
+    if df is None or df.empty:
+        return ""
+    
+    df = df.iloc[:max_rows, :max_cols].copy()
+    
+    # Heuristic: if first row looks like headers, promote it
+    try:
+        first_row = df.iloc[0]
+        looks_like_headers = first_row.apply(
+            lambda x: isinstance(x, str) and len(str(x).strip()) > 0 and len(str(x)) < 40
+        ).mean() >= 0.6
+        
+        if looks_like_headers:
+            df.columns = first_row
+            df = df[1:].reset_index(drop=True)
+    except Exception:
+        pass
+    
+    df = df.fillna("")
+    headers = [str(col).strip() or f"Col{i}" for i, col in enumerate(df.columns)]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join([" --- "] * len(headers)) + "|",
+    ]
+    
+    for _, row in df.iterrows():
+        cells = [str(val).strip().replace("\n", " ") for val in row.values]
+        lines.append("| " + " | ".join(cells) + " |")
+    
+    return "\n".join(lines)
+
+
+def _pymupdf_page_to_text(page) -> str:
+    """Extract text from PyMuPDF page with layout awareness."""
+    try:
+        blocks = page.get_text("blocks")
+    except Exception:
+        return page.get_text("text") or ""
+    
+    text_blocks = [b for b in blocks if len(b) >= 5 and (b[4] or "").strip()]
+    text_blocks.sort(key=lambda b: (b[1], b[0]))  # top-to-bottom, left-to-right
+    
+    return "\n\n".join(str(b[4]).strip() for b in text_blocks)
+
+
+def is_scanned_pdf(path: Path) -> bool:
+    """Detect if PDF is scanned (needs OCR) vs born-digital."""
+    try:
+        import fitz
+    except ImportError:
+        return False
+    
+    try:
+        with fitz.open(str(path)) as doc:
+            pages_to_check = min(3, len(doc))
+            text_chars_total = 0
+            
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                text = page.get_text("text") or ""
+                text_chars_total += len(text.strip())
+            
+            return text_chars_total < 100
+    except Exception as exc:
+        LOGGER.warning("Failed to detect if %s is scanned: %s", path.name, exc)
+        return False
 
 def file_fingerprint(path: Path) -> Dict[str, Any]:
     """Return a simple fingerprint for change detection."""
@@ -134,7 +202,7 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
                     row_text_parts = []
                     for cell in row.cells:
                         cell_text = cell.text.strip()
-                        if cell_text and cell_text not in row_text_parts:
+                        if cell_text:
                             row_text_parts.append(cell_text)
                     if row_text_parts:
                         table_text_parts.append(" | ".join(row_text_parts))
@@ -148,39 +216,73 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
             text = collapse_repeated_lines("\n".join(parts))
 
         elif ext == ".doc":
-            import textract
-
-            text = textract.process(str(path)).decode("utf-8")
+            # Legacy format - will be handled by Gemini vision in extraction.py
+            # Just return empty string here, actual extraction happens at Gemini level
+            LOGGER.debug("Legacy .doc detected: %s - deferring to LLM", path.name)
+            return ""
 
         elif ext == ".pdf":
-            from PyPDF2 import PdfReader
-
-            reader = PdfReader(str(path))
-            pages = []
-            for page in reader.pages:
-                extracted = page.extract_text() or ""
-                if extracted.strip():
-                    pages.append(extracted)
-            text = "\n".join(pages)
+            try:
+                import fitz  # PyMuPDF
+                
+                with fitz.open(str(path)) as doc:
+                    page_texts: List[str] = []
+                    for page in doc:
+                        page_text = _pymupdf_page_to_text(page)
+                        if page_text.strip():
+                            page_texts.append(page_text)
+                    
+                    text = "\n\n".join(page_texts)
+                    
+                    if len(text.strip()) < 100 and len(doc) > 0:
+                        LOGGER.warning("PDF %s yielded minimal text - may be scanned", path.name)
+            
+            except ImportError:
+                LOGGER.debug("PyMuPDF not available, using PyPDF2 for %s", path.name)
+                from PyPDF2 import PdfReader
+                reader = PdfReader(str(path))
+                pages = []
+                for page in reader.pages:
+                    extracted = page.extract_text() or ""
+                    if extracted.strip():
+                        pages.append(extracted)
+                text = "\n".join(pages)
+            
+            except Exception as exc:
+                LOGGER.warning("PyMuPDF failed for %s: %s", path.name, exc)
+                try:
+                    from PyPDF2 import PdfReader
+                    reader = PdfReader(str(path))
+                    pages = []
+                    for page in reader.pages:
+                        extracted = page.extract_text() or ""
+                        if extracted.strip():
+                            pages.append(extracted)
+                    text = "\n".join(pages)
+                except Exception:
+                    text = ""
 
         elif ext in {".xlsx", ".xls"}:
             excel = pd.ExcelFile(str(path))
             chunks: List[str] = []
+            
             for sheet_name in excel.sheet_names[:5]:
                 try:
                     df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
                     df.dropna(axis=1, how="all", inplace=True)
                     df.dropna(thresh=2, inplace=True)
                     df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
+                    
                     if not df.empty:
-                        chunks.append(f"[Sheet: {sheet_name}]\n" + df.to_string(index=False, header=False))
-                except Exception as exc:  # pragma: no cover - defensive path
+                        md = _df_to_markdown(df)
+                        if md:
+                            chunks.append(f"[Sheet: {sheet_name}]\n{md}")
+                
+                except Exception as exc:
                     LOGGER.warning("Could not read sheet '%s' from %s: %s", sheet_name, path.name, exc)
                     continue
+            
             text = "\n\n".join(chunks)
-
-        else:
-            text = path.read_text(encoding="utf-8", errors="ignore")
 
     except Exception as exc:  # pragma: no cover - defensive path
         text = f"[READ_ERROR] {exc}"
@@ -199,4 +301,5 @@ __all__ = [
     "collapse_repeated_lines",
     "clean_text_for_llm",
     "read_doc_for_llm",
+    "is_scanned_pdf",
 ]

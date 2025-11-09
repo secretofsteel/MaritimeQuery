@@ -91,6 +91,13 @@ class AppConfig:
         configure_llama_settings(api_key)
         self.client = genai.Client(api_key=api_key)
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
+        self.ocr_enabled = os.getenv("ENABLE_PDF_OCR", "true").lower() == "true"
+
+        LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
+        if self.ocr_enabled:
+            LOGGER.info("PDF OCR enabled")
+        else:
+            LOGGER.info("PDF OCR disabled")
 
     def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""
