@@ -943,14 +943,33 @@ Rephrase this question to better match maritime documentation language. Do not o
     if DEBUG_RAG:
         LOGGER.info("DEBUG: Building context from %d nodes", len(nodes))
 
-    context_parts = []
+    # Separate context by source type
+    upload_context_parts = []
+    library_context_parts = []
     sources_info = []
-    for index, node in enumerate(nodes[:10], start=1):
+    
+    upload_counter = 1
+    library_counter = 1
+    
+    for node in nodes[:10]:
         metadata = node.node.metadata
         source = metadata.get("source", "Unknown")
         section = metadata.get("section", "N/A")
         score = node.score if hasattr(node, "score") else 0.0
-        context_parts.append(f"[Source {index}: {source} - {section}]\n{node.node.text}\n")
+        
+        is_upload = metadata.get("session_upload", False)
+        
+        if is_upload:
+            upload_context_parts.append(
+                f"[Upload {upload_counter}: {source} - {section}]\n{node.node.text}\n"
+            )
+            upload_counter += 1
+        else:
+            library_context_parts.append(
+                f"[Library {library_counter}: {source} - {section}]\n{node.node.text}\n"
+            )
+            library_counter += 1
+
         sources_info.append(
             {
                 "source": source,
@@ -968,7 +987,22 @@ Rephrase this question to better match maritime documentation language. Do not o
             }
         )
 
-    context = "\n".join(context_parts)
+    # Build tiered context
+    context_sections = []
+    
+    if upload_context_parts:
+        context_sections.append(
+            "=== UPLOADED DOCUMENTS (User attached for this conversation) ===\n"
+            + "\n".join(upload_context_parts)
+        )
+    
+    if library_context_parts:
+        context_sections.append(
+            "=== COMPANY LIBRARY DOCUMENTATION ===\n"
+            + "\n".join(library_context_parts)
+        )
+    
+    context = "\n\n".join(context_sections)
     
     # Build conversation history (single method)
     conversation_history = ""
@@ -987,6 +1021,8 @@ Rephrase this question to better match maritime documentation language. Do not o
 CONFIDENCE CONTEXT: {confidence_instruction}
 
 {conversation_history}
+
+NOTE: When answering, prioritize information from UPLOADED DOCUMENTS when relevant, as the user specifically attached these files for this conversation. Cross-reference COMPANY LIBRARY for additional context and procedures.
 
 CRITICAL RULES:
 - You ALWAYS answer in English, even if asked in another language.
