@@ -1143,47 +1143,228 @@ def render_app(
 
     session_uploads = app_state.get_session_upload_metadata()
 
-    if "session_upload_nonce" not in st.session_state:
-        st.session_state["session_upload_nonce"] = str(uuid.uuid4())
-
-    uploader_key = f"session_upload_{app_state.current_session_id}_{st.session_state['session_upload_nonce']}"
-
-    st.markdown("<div class='chat-input-wrapper'>", unsafe_allow_html=True)
-
-    uploaded_files = st.file_uploader(
-        "Attach documents",
-        type=["pdf", "docx", "doc", "xlsx", "xls"],
-        accept_multiple_files=True,
-        key=uploader_key,
-        label_visibility="collapsed",
-        help=f"Attach up to {MAX_UPLOADS_PER_SESSION} files per session.",
-    )
-
-    # Initialize tracking PER SESSION
-    session_hash_key = f"processed_upload_hashes_{app_state.current_session_id}"
-    if session_hash_key not in st.session_state:
-        st.session_state[session_hash_key] = set()
-
-    if session_uploads:
-        chips = []
-        for record in session_uploads[:8]:
-            chips.append(f"<span class='upload-chip'>{html.escape(record.get('display_name', 'File'))}</span>")
-        remainder = len(session_uploads) - len(chips)
-        if remainder > 0:
-            chips.append(f"<span class='upload-chip more'>+{remainder} more</span>")
-        st.markdown(f"<div class='chat-upload-chips'>{''.join(chips)}</div>", unsafe_allow_html=True)
-    else:
-        st.markdown(
-            "<div class='chat-upload-chips empty'>Attach PDFs, Word, or Excel files for this session.</div>",
-            unsafe_allow_html=True,
-        )
-
-    if len(session_uploads) >= MAX_UPLOADS_PER_SESSION:
-        st.markdown(
-            f"<div class='upload-limit-note'>Upload limit of {MAX_UPLOADS_PER_SESSION} files reached.</div>",
-            unsafe_allow_html=True,
-        )
-
+    # Collapsible upload box state
+    if "upload_box_expanded" not in st.session_state:
+        st.session_state["upload_box_expanded"] = False
+    
+    # Toggle button function
+    def toggle_upload_box():
+        st.session_state["upload_box_expanded"] = not st.session_state["upload_box_expanded"]
+    
+    # Custom CSS for the new layout
+    st.markdown("""
+    <style>
+    /* Upload toggle button - positioned at left of input */
+    .upload-toggle-container {
+        position: relative;
+        margin-bottom: 0.5rem;
+    }
+    
+    .upload-toggle-btn {
+        position: absolute;
+        left: 0.5rem;
+        bottom: 0.5rem;
+        z-index: 100;
+        background: rgba(15, 70, 120, 0.85);
+        border: 1px solid rgba(110, 195, 255, 0.3);
+        border-radius: 8px;
+        padding: 0.5rem 0.75rem;
+        color: #cce8ff;
+        cursor: pointer;
+        font-size: 1.2rem;
+        transition: all 0.2s ease;
+    }
+    
+    .upload-toggle-btn:hover {
+        background: rgba(20, 90, 150, 0.92);
+        transform: translateY(-1px);
+    }
+    
+    /* Collapsible upload box */
+    .upload-box-container {
+        background: rgba(8, 26, 44, 0.75);
+        border: 1px solid rgba(110, 195, 255, 0.25);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        animation: slideDown 0.3s ease;
+    }
+    
+    @keyframes slideDown {
+        from {
+            opacity: 0;
+            transform: translateY(-10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .upload-box-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+        color: #c6e6ff;
+        font-weight: 600;
+    }
+    
+    .uploaded-files-preview {
+        margin-top: 0.5rem;
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    
+    .file-chip {
+        background: rgba(11, 44, 74, 0.8);
+        border: 1px solid rgba(110, 195, 255, 0.3);
+        padding: 0.3rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        color: #cce8ff;
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+    }
+    
+    .file-chip .remove-btn {
+        cursor: pointer;
+        color: #ff6b6b;
+        font-weight: bold;
+        margin-left: 0.2rem;
+    }
+    
+    .file-chip .remove-btn:hover {
+        color: #ff4444;
+    }
+    
+    /* Adjust chat input to make room for button */
+    div[data-testid="stChatInput"] {
+        padding-left: 3.5rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Toggle button (rendered before chat input)
+    col1, col2 = st.columns([0.1, 0.9])
+    with col1:
+        if st.button("📎" if not st.session_state["upload_box_expanded"] else "✕", 
+                     key="upload_toggle", 
+                     on_click=toggle_upload_box,
+                     help="Attach files" if not st.session_state["upload_box_expanded"] else "Close"):
+            pass  # Toggle handled by on_click
+    
+    # Collapsible upload box
+    if st.session_state["upload_box_expanded"]:
+        st.markdown("<div class='upload-box-container'>", unsafe_allow_html=True)
+        st.markdown("<div class='upload-box-header'>📎 Attach documents for this session</div>", 
+                   unsafe_allow_html=True)
+        
+        # Show current uploads if any
+        if session_uploads:
+            st.markdown("<div class='uploaded-files-preview'>", unsafe_allow_html=True)
+            for record in session_uploads:
+                name = record.get("display_name", "Unknown")
+                size = record.get("size", 0)
+                st.markdown(
+                    f"<div class='file-chip'>"
+                    f"📄 {name} ({_format_file_size(size)})"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # Show limit warning if approaching max
+            if len(session_uploads) >= MAX_UPLOADS_PER_SESSION - 5:
+                st.warning(f"⚠️ {len(session_uploads)}/{MAX_UPLOADS_PER_SESSION} uploads used")
+        
+        # File uploader
+        if len(session_uploads) < MAX_UPLOADS_PER_SESSION:
+            if "session_upload_nonce" not in st.session_state:
+                st.session_state["session_upload_nonce"] = str(uuid.uuid4())
+            
+            uploader_key = f"session_upload_{app_state.current_session_id}_{st.session_state['session_upload_nonce']}"
+            
+            uploaded_files = st.file_uploader(
+                "Choose files",
+                type=["pdf", "docx", "doc", "xlsx", "xls", "txt"],
+                accept_multiple_files=True,
+                key=uploader_key,
+                help=f"Upload up to {MAX_UPLOADS_PER_SESSION} files per session (200MB each)"
+            )
+            
+            # Process uploads
+            if uploaded_files:
+                session_id = app_state.current_session_id
+                if session_id:
+                    manager = app_state.ensure_session_upload_manager()
+                    new_records: List[Dict[str, Any]] = []
+                    feedback: List[Tuple[str, str]] = []
+                    
+                    with st.spinner("Processing uploaded files..."):
+                        for uploaded in uploaded_files:
+                            file_bytes = uploaded.read()
+                            if not file_bytes:
+                                feedback.append(("warning", f"{uploaded.name} contained no data."))
+                                continue
+                            
+                            result = manager.add_upload(
+                                session_id,
+                                uploaded.name,
+                                file_bytes,
+                                uploaded.type or "application/octet-stream",
+                            )
+                            
+                            status = result.get("status")
+                            if status == "added":
+                                record = result.get("record", {})
+                                new_records.append(record)
+                                feedback.append((
+                                    "success",
+                                    f"✅ Processed {record.get('display_name', uploaded.name)} "
+                                    f"({record.get('num_chunks', 0)} chunks)"
+                                ))
+                            elif status == "duplicate":
+                                feedback.append(("warning", f"⚠️ {uploaded.name} was already uploaded."))
+                            elif status == "limit":
+                                feedback.append(("error", result.get("reason", "Upload limit reached.")))
+                                break
+                            else:
+                                feedback.append(("error", f"❌ Failed to process {uploaded.name}"))
+                    
+                    # Show feedback
+                    for level, message in feedback:
+                        if level == "success":
+                            st.success(message)
+                        elif level == "warning":
+                            st.warning(message)
+                        else:
+                            st.error(message)
+                    
+                    # Add upload notice to chat if new files added
+                    if new_records:
+                        app_state.refresh_session_upload_cache()
+                        summary_lines = [
+                            f"📎 **{record.get('display_name', 'File')}** "
+                            f"({_format_file_size(record.get('size', 0))}, "
+                            f"{record.get('num_chunks', 0)} chunks)"
+                            for record in new_records
+                        ]
+                        app_state.add_message_to_current_session(
+                            "user",
+                            "\n".join(summary_lines),
+                            {"is_upload_notice": True, "uploaded_files": new_records},
+                        )
+                    
+                    # Reset uploader
+                    st.session_state["session_upload_nonce"] = str(uuid.uuid4())
+                    _rerun_app()
+        else:
+            st.warning(f"⚠️ Maximum {MAX_UPLOADS_PER_SESSION} files reached for this session")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
     # Chat input
     user_prompt = st.chat_input("Ask about the maritime library...")
 
