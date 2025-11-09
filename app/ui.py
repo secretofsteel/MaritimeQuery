@@ -1159,9 +1159,10 @@ def render_app(
         help=f"Attach up to {MAX_UPLOADS_PER_SESSION} files per session.",
     )
 
-    # Initialize tracking for this run
-    if "processed_upload_hashes" not in st.session_state:
-        st.session_state["processed_upload_hashes"] = set()
+    # Initialize tracking PER SESSION
+    session_hash_key = f"processed_upload_hashes_{app_state.current_session_id}"
+    if session_hash_key not in st.session_state:
+        st.session_state[session_hash_key] = set()
 
     if session_uploads:
         chips = []
@@ -1213,7 +1214,7 @@ def render_app(
                 import hashlib
                 file_hash = hashlib.md5(file_bytes).hexdigest()
                 
-                if file_hash in st.session_state["processed_upload_hashes"]:
+                if file_hash in st.session_state[session_hash_key]:
                     LOGGER.info("Skipping %s - already processed", uploaded.name)
                     continue
             
@@ -1227,7 +1228,7 @@ def render_app(
                 status = result.get("status")
                 if status == "added":
                     # Mark as processed ONLY on success
-                    st.session_state["processed_upload_hashes"].add(file_hash)
+                    st.session_state[session_hash_key].add(file_hash)
                     record = result.get("record", {})
                     new_records.append(record)
                     feedback.append((
