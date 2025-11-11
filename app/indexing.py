@@ -120,18 +120,22 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 
 
 def build_index_from_library_parallel(
-    progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    clear_gemini_cache: bool = False
 ) -> Tuple[List[Document], VectorStoreIndex]:
     """Process the full document library with parallel extraction and embedding generation.
     
     This parallel version:
-    1. Identifies uncached files that need Gemini extraction
-    2. Extracts those files in parallel (10 workers)
-    3. Generates embeddings in parallel (10 workers)  
-    4. Writes to ChromaDB sequentially (required - not thread-safe)
+    1. WIPES existing ChromaDB collection, pickle cache, and sync cache (full rebuild)
+    2. Optionally clears Gemini extraction cache (if clear_gemini_cache=True)
+    3. Identifies uncached files that need Gemini extraction
+    4. Extracts those files in parallel (10 workers)
+    5. Generates embeddings in parallel (10 workers)  
+    6. Writes to ChromaDB sequentially (required - not thread-safe)
     
     Args:
         progress_callback: Optional callback(phase, current, total, item_desc)
+        clear_gemini_cache: If True, re-extract all files via Gemini (ignores cache)
     
     Returns:
         Tuple of (nodes, index)
@@ -139,12 +143,43 @@ def build_index_from_library_parallel(
     config = AppConfig.get()
     paths = config.paths
 
-    LOGGER.info("=== Starting Parallel Processing ===")
+    LOGGER.info("=== Starting Parallel Processing (FULL REBUILD) ===")
+    
+    # PHASE -1: WIPE EXISTING DATA
+    LOGGER.info("Phase -1: Clearing existing data...")
+    
+    # 1. Delete ChromaDB collection
+    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
+    try:
+        chroma_client.delete_collection("maritime_docs")
+        LOGGER.info("✓ Deleted existing ChromaDB collection")
+    except Exception:
+        LOGGER.info("✓ No existing ChromaDB collection to delete")
+    
+    # 2. Clear pickle cache
+    if paths.nodes_cache_path.exists():
+        paths.nodes_cache_path.unlink()
+        LOGGER.info("✓ Deleted nodes pickle cache")
+    
+    # 3. Clear sync cache
+    sync_cache_file = paths.cache_info_path.parent / "sync_cache.json"
+    if sync_cache_file.exists():
+        sync_cache_file.unlink()
+        LOGGER.info("✓ Deleted sync cache")
+    
+    # 4. Optionally clear Gemini extraction cache
+    if clear_gemini_cache:
+        if paths.gemini_json_cache.exists():
+            paths.gemini_json_cache.unlink()
+            LOGGER.info("✓ Deleted Gemini extraction cache (will re-extract all files)")
+        cached_records = {}
+    else:
+        cached_records = load_jsonl(paths.gemini_json_cache)
+        LOGGER.info("✓ Keeping Gemini extraction cache (%d files)", len(cached_records))
     
     # Phase 0: Determine which files need extraction
     LOGGER.info("Phase 0: Analyzing document library...")
     files_index = current_files_index(paths.docs_path)
-    cached_records = load_jsonl(paths.gemini_json_cache)
     
     docs_to_extract: List[Path] = []
     all_documents: List[Document] = []
@@ -355,6 +390,7 @@ class IncrementalIndexManager:
             self._save_nodes_pickle()
 
     def _add_or_update_documents(self, filenames: Set[str], index: Optional[VectorStoreIndex]) -> None:
+        """Sequential version - kept for compatibility."""
         for filename in filenames:
             doc_path = self.docs_path / filename
             try:
@@ -387,20 +423,150 @@ class IncrementalIndexManager:
         if filenames:
             self._save_nodes_pickle()
 
-    def sync_library(self, index: Optional[VectorStoreIndex]) -> SyncResult:
+    def _add_or_update_documents_parallel(self, filenames: Set[str], index: Optional[VectorStoreIndex]) -> None:
+        """Parallel version with parallel extraction and embedding generation."""
+        if not filenames:
+            return
+        
+        LOGGER.info("Syncing %d files with parallel processing...", len(filenames))
+        
+        # Separate files that need extraction vs can use cache
+        files_needing_extraction: List[Path] = []
+        cached_documents: List[Document] = []
+        
+        for filename in filenames:
+            doc_path = self.docs_path / filename
+            
+            if filename in self.gemini_cache:
+                cached_record = self.gemini_cache[filename]
+                gemini_meta = cached_record.get("gemini", {})
+                
+                if "parse_error" not in gemini_meta and gemini_meta.get("sections"):
+                    # Use cached extraction
+                    LOGGER.info("%s (using cached extraction)", filename)
+                    try:
+                        docs = to_documents_from_gemini(doc_path, gemini_meta)
+                        cached_documents.extend(docs)
+                    except Exception as exc:
+                        LOGGER.error("Error converting cached %s: %s", filename, exc)
+                else:
+                    # Cache invalid or has parse_error - re-extract
+                    files_needing_extraction.append(doc_path)
+            else:
+                # Not in cache - extract
+                files_needing_extraction.append(doc_path)
+        
+        # Phase 1: Parallel extraction for files that need it
+        all_documents = cached_documents.copy()
+        
+        if files_needing_extraction:
+            LOGGER.info("Extracting %d files in parallel...", len(files_needing_extraction))
+            
+            processor = ParallelDocumentProcessor(max_workers=10)
+            extraction_results = processor.extract_batch(files_needing_extraction)
+            
+            # Update JSONL cache with results
+            files_index = current_files_index(self.docs_path)
+            for result in extraction_results.successful + extraction_results.failed:
+                filename = result.filename
+                if filename in files_index:
+                    fingerprint = files_index[filename]
+                    
+                    if result.record:
+                        upsert_jsonl_record(
+                            self.gemini_cache_path,
+                            {
+                                "filename": filename,
+                                "mtime": fingerprint["mtime"],
+                                "size": fingerprint["size"],
+                                "gemini": result.record,
+                            },
+                        )
+            
+            # Reload cache after updates
+            self.gemini_cache = load_jsonl(self.gemini_cache_path)
+            
+            # Convert successful extractions to documents
+            for result in extraction_results.successful:
+                doc_path = self.docs_path / result.filename
+                try:
+                    docs = to_documents_from_gemini(doc_path, result.record)
+                    all_documents.extend(docs)
+                except Exception as exc:
+                    LOGGER.exception("Failed to convert %s to documents", result.filename)
+        
+        if not all_documents:
+            LOGGER.info("No documents to add")
+            return
+        
+        # Phase 2: Chunk all documents
+        LOGGER.info("Chunking %d documents...", len(all_documents))
+        new_nodes = chunk_documents(all_documents)
+        LOGGER.info("Created %d chunks", len(new_nodes))
+        
+        # Phase 3: Parallel embedding generation
+        LOGGER.info("Generating embeddings in parallel...")
+        chunk_texts = [node.get_content() for node in new_nodes]
+        
+        embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
+        embedding_batch = embedding_gen.generate_batch(chunk_texts)
+        
+        LOGGER.info("Generated %d embeddings in %.2fs", 
+                   len(embedding_batch.embeddings), embedding_batch.duration_sec)
+        
+        # Attach embeddings to nodes
+        for node, embedding in zip(new_nodes, embedding_batch.embeddings):
+            node.embedding = embedding
+        
+        # Phase 4: Add to index sequentially (embeddings pre-computed)
+        if index is not None:
+            LOGGER.info("Adding %d chunks to index...", len(new_nodes))
+            for node in new_nodes:
+                # Use insert_nodes with embeddings already attached
+                index.insert_nodes([node])
+            LOGGER.info("✓ Added all chunks to index")
+        
+        # Update in-memory nodes list
+        self.nodes.extend(new_nodes)
+        
+        # Save nodes pickle
+        self._save_nodes_pickle()
+        
+        LOGGER.info("✓ Sync complete for %d files", len(filenames))
+
+    def sync_library(self, index: Optional[VectorStoreIndex], force_retry_errors: bool = True) -> SyncResult:
+        """Sync library with parallel extraction and embedding generation.
+        
+        Args:
+            index: VectorStoreIndex to update
+            force_retry_errors: If True, retry files with parse_error even if unchanged
+        
+        Returns:
+            SyncResult with added, modified, and deleted file counts
+        """
         current_files = self._get_files_hash(self.docs_path)
         cached_files = self.sync_cache.get("files_hash", {})
 
         new_files = set(current_files) - set(cached_files)
         deleted_files = set(cached_files) - set(current_files)
-        modified_files = {fname for fname in (set(current_files) & set(cached_files)) if current_files[fname] != cached_files[fname]}
+        modified_files = {fname for fname in (set(current_files) & set(cached_files)) 
+                          if current_files[fname] != cached_files[fname]}
+        
+        # Include files with parse_error for retry
+        if force_retry_errors:
+            for filename in current_files:
+                if filename in self.gemini_cache:
+                    gemini_meta = self.gemini_cache[filename].get("gemini", {})
+                    if "parse_error" in gemini_meta:
+                        modified_files.add(filename)
+                        LOGGER.info("Will retry %s (has parse_error in cache)", filename)
 
         if deleted_files:
             self._remove_documents(deleted_files)
         if modified_files:
             self._remove_documents(modified_files)
         if new_files or modified_files:
-            self._add_or_update_documents(new_files | modified_files, index)
+            self._add_or_update_documents_parallel(new_files | modified_files, index)
 
         self.sync_cache["files_hash"] = current_files
         self._save_sync_cache()

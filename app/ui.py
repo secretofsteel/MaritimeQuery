@@ -384,6 +384,17 @@ def rebuild_index(app_state: AppState) -> None:
 def rebuild_index_parallel(app_state: AppState) -> None:
     """Rebuild index using parallel processing with progress tracking."""
     
+    # Option to clear Gemini cache
+    clear_cache = st.checkbox(
+        "🗑️ Clear Gemini extraction cache (re-extract all files)",
+        value=False,
+        help="Enable this if you've changed extraction prompts or want fresh extractions. "
+             "Otherwise, cached extractions will be reused (faster)."
+    )
+    
+    if not st.button("▶️ Start Parallel Rebuild", type="primary"):
+        return
+    
     # Create progress containers
     st.write("### 🚀 Parallel Processing Progress")
     
@@ -416,10 +427,16 @@ def rebuild_index_parallel(app_state: AppState) -> None:
             phase2_status.text(f"Embedding: {current}/{total}")
     
     try:
-        overall_status.info("⏳ Starting parallel index rebuild...")
+        if clear_cache:
+            overall_status.warning("⚠️ Will re-extract all files (Gemini cache cleared)")
+        else:
+            overall_status.info("⏳ Starting parallel rebuild (using cached extractions)...")
         
         # Run parallel processing
-        nodes, index = build_index_from_library_parallel(progress_callback)
+        nodes, index = build_index_from_library_parallel(
+            progress_callback=progress_callback,
+            clear_gemini_cache=clear_cache
+        )
         
         # Update app state
         app_state.nodes = nodes
@@ -430,8 +447,9 @@ def rebuild_index_parallel(app_state: AppState) -> None:
         app_state.ensure_manager().nodes = nodes
         
         # Success
+        cache_msg = " (all files re-extracted)" if clear_cache else ""
         overall_status.success(
-            f"✅ Rebuilt index with {len(nodes)} chunks using parallel processing!"
+            f"✅ Rebuilt index with {len(nodes)} chunks using parallel processing!{cache_msg}"
         )
         LOGGER.info("Parallel index rebuild complete: %d nodes", len(nodes))
         

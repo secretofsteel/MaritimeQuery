@@ -369,176 +369,219 @@ def clean_text_for_llm(text: str) -> str:
 
     return text.strip()
 
-
 def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
     """Extract text from various document formats."""
     ext = path.suffix.lower()
-    text = ""
+    
+    # Dispatch to format-specific handler
+    handlers = {
+        '.txt': _extract_txt,
+        '.docx': _extract_docx,
+        '.doc': _extract_legacy_doc,
+        '.pdf': _extract_pdf,
+        '.xlsx': _extract_excel,
+        '.xls': _extract_excel,
+    }
+    
+    handler = handlers.get(ext)
+    if not handler:
+        LOGGER.warning("Unsupported file type: %s", ext)
+        return ""
+    
     try:
-        if ext == ".txt":
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        elif ext == ".docx":
-            from docx import Document as DocxDocument
-
-            document = DocxDocument(str(path))
-            parts: List[str] = []
-
-            # Extract header tables (where your form metadata is!)
-            for section in document.sections:
-                header = section.header
-                for table in header.tables:
-                    for row in table.rows:
-                        row_parts = []
-                        for cell in row.cells:
-                            cell_text = cell.text.strip()
-                            if cell_text and cell_text not in row_parts:  # Avoid duplicates
-                                row_parts.append(cell_text)
-                        if row_parts:
-                            parts.append(' | '.join(row_parts))
-                
-                # Extract header paragraphs too (some forms use these)
-                for para in header.paragraphs:
-                    if para.text.strip():
-                        parts.append(para.text)
-
-
-            for paragraph in document.paragraphs:
-                if paragraph.text.strip():
-                    parts.append(paragraph.text)
-
-            for table in document.tables:
-                table_text_parts = []
-                for row in table.rows:
-                    row_text_parts = []
-                    for cell in row.cells:
-                        cell_text = cell.text.strip()
-                        if cell_text:
-                            row_text_parts.append(cell_text)
-                    if row_text_parts:
-                        table_text_parts.append(" | ".join(row_text_parts))
-                table_full_text = "\n".join(table_text_parts)
-                max_table_chars = 10000
-                if len(table_full_text) > max_table_chars:
-                    parts.append(table_full_text[:max_table_chars])
-                else:
-                    parts.append(table_full_text)
-
-            text = collapse_repeated_lines("\n".join(parts))
-
-        elif ext == ".doc":
-            LOGGER.info("Legacy .doc detected: %s - attempting local conversion", path.name)
-            converted_path = path.with_suffix(".converted.pdf")
-
-            try:
-                # Try Spire.Doc first (simple, fast)
-                try:
-                    from spire.doc import Document, FileFormat
-                    doc = Document()
-                    doc.LoadFromFile(str(path))
-                    doc.SaveToFile(str(converted_path), FileFormat.PDF)
-                    doc.Close()
-                    LOGGER.info("Converted %s to PDF via Spire.Doc", path.name)
-                except ImportError:
-                    # Fall back to Aspose if Spire not available
-                    try:
-                        import aspose.words as aw
-                        doc = aw.Document(str(path))
-                        doc.save(str(converted_path))
-                        LOGGER.info("Converted %s to PDF via Aspose.Words", path.name)
-                    except Exception as exc:
-                        LOGGER.warning("Aspose conversion failed for %s: %s", path.name, exc)
-                        converted_path = None
-
-                if converted_path and converted_path.exists():
-                    # Read text from the converted PDF using the same logic as normal PDFs
-                    from fitz import open as fitz_open
-                    with fitz_open(str(converted_path)) as pdf:
-                        page_texts = []
-                        for page in pdf:
-                            t = _pymupdf_page_to_text(page)
-                            if t.strip():
-                                page_texts.append(t)
-                        text = "\n\n".join(page_texts)
-                        LOGGER.info("Extracted text from converted PDF: %s", path.name)
-                else:
-                    text = ""
-                    LOGGER.warning("Conversion failed or file missing for %s", path.name)
-
-            except Exception as exc:
-                LOGGER.warning("Legacy .doc conversion failed for %s: %s", path.name, exc)
-                text = ""
-
-
-        elif ext == ".pdf":
-            text = extract_with_pymupdf4llm(path) or ""
-            if not text:
-                try:
-                    import fitz  # PyMuPDF
-                    
-                    with fitz.open(str(path)) as doc:
-                        page_texts: List[str] = []
-                        for page in doc:
-                            page_text = _pymupdf_page_to_text(page)
-                            if page_text.strip():
-                                page_texts.append(page_text)
-                        
-                        text = "\n\n".join(page_texts)
-                        
-                        if len(text.strip()) < 100 and len(doc) > 0:
-                            LOGGER.warning("PDF %s yielded minimal text - may be scanned", path.name)
-                
-                except ImportError:
-                    LOGGER.debug("PyMuPDF not available, using PyPDF2 for %s", path.name)
-                    from PyPDF2 import PdfReader
-                    reader = PdfReader(str(path))
-                    pages = []
-                    for page in reader.pages:
-                        extracted = page.extract_text() or ""
-                        if extracted.strip():
-                            pages.append(extracted)
-                    text = "\n".join(pages)
-                
-                except Exception as exc:
-                    LOGGER.warning("PyMuPDF failed for %s: %s", path.name, exc)
-                    try:
-                        from PyPDF2 import PdfReader
-                        reader = PdfReader(str(path))
-                        pages = []
-                        for page in reader.pages:
-                            extracted = page.extract_text() or ""
-                            if extracted.strip():
-                                pages.append(extracted)
-                        text = "\n".join(pages)
-                    except Exception:
-                        text = ""
-
-        elif ext in {".xlsx", ".xls"}:
-            excel = pd.ExcelFile(str(path))
-            chunks: List[str] = []
-            
-            for sheet_name in excel.sheet_names[:5]:
-                try:
-                    df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
-                    df.dropna(axis=1, how="all", inplace=True)
-                    df.dropna(thresh=2, inplace=True)
-                    df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
-                    
-                    if not df.empty:
-                        md = _df_to_markdown(df)
-                        if md:
-                            chunks.append(f"[Sheet: {sheet_name}]\n{md}")
-                
-                except Exception as exc:
-                    LOGGER.warning("Could not read sheet '%s' from %s: %s", sheet_name, path.name, exc)
-                    continue
-            
-            text = "\n\n".join(chunks)
-
-    except Exception as exc:  # pragma: no cover - defensive path
+        text = handler(path)
+    except Exception as exc:
+        LOGGER.error("Failed to extract %s: %s", path.name, exc)
         text = f"[READ_ERROR] {exc}"
+    
     if max_chars and len(text) > max_chars:
         text = text[:max_chars]
+    
     return text
+
+
+def _extract_txt(path: Path) -> str:
+    """Extract from plain text files."""
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _extract_docx(path: Path) -> str:
+    """Extract from modern Word documents."""
+    from docx import Document as DocxDocument
+    
+    document = DocxDocument(str(path))
+    parts: List[str] = []
+    
+    # Header tables and paragraphs
+    for section in document.sections:
+        header = section.header
+        for table in header.tables:
+            for row in table.rows:
+                row_parts = []
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    if cell_text and cell_text not in row_parts:
+                        row_parts.append(cell_text)
+                if row_parts:
+                    parts.append(' | '.join(row_parts))
+        
+        for para in header.paragraphs:
+            if para.text.strip():
+                parts.append(para.text)
+    
+    # Body paragraphs
+    for paragraph in document.paragraphs:
+        if paragraph.text.strip():
+            parts.append(paragraph.text)
+    
+    # Tables
+    for table in document.tables:
+        table_text_parts = []
+        for row in table.rows:
+            row_text_parts = []
+            for cell in row.cells:
+                cell_text = cell.text.strip()
+                if cell_text:
+                    row_text_parts.append(cell_text)
+            if row_text_parts:
+                table_text_parts.append(" | ".join(row_text_parts))
+        
+        table_full_text = "\n".join(table_text_parts)
+        max_table_chars = 10000
+        if len(table_full_text) > max_table_chars:
+            parts.append(table_full_text[:max_table_chars])
+        else:
+            parts.append(table_full_text)
+    
+    return collapse_repeated_lines("\n".join(parts))
+
+
+def _extract_legacy_doc(path: Path) -> str:
+    """
+    Extract from legacy .doc files by converting to PDF then using PDF extraction.
+    
+    IMPORTANT: Cleans up the temporary converted PDF after extraction.
+    """
+    LOGGER.info("Legacy .doc detected: %s - attempting local conversion", path.name)
+    
+    # Use a temp file in system temp dir, NOT in the library
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+        converted_path = Path(tmp.name)
+    
+    try:
+        # Try Spire.Doc first
+        try:
+            from spire.doc import Document, FileFormat
+            doc = Document()
+            doc.LoadFromFile(str(path))
+            doc.SaveToFile(str(converted_path), FileFormat.PDF)
+            doc.Close()
+            LOGGER.info("Converted %s to PDF via Spire.Doc", path.name)
+        except ImportError:
+            # Fall back to Aspose
+            try:
+                import aspose.words as aw
+                doc = aw.Document(str(path))
+                doc.save(str(converted_path))
+                LOGGER.info("Converted %s to PDF via Aspose.Words", path.name)
+            except Exception as exc:
+                LOGGER.warning("Aspose conversion failed for %s: %s", path.name, exc)
+                raise  # Re-raise to trigger outer except
+        
+        if not converted_path.exists():
+            raise FileNotFoundError("Conversion produced no output file")
+        
+        # Now extract from the converted PDF using the standard PDF handler
+        text = _extract_pdf(converted_path)
+        LOGGER.info("Extracted text from converted PDF: %s", path.name)
+        return text
+        
+    finally:
+        # CRITICAL: Always clean up the temporary PDF
+        if converted_path.exists():
+            try:
+                converted_path.unlink()
+                LOGGER.debug("Cleaned up temporary PDF: %s", converted_path.name)
+            except Exception as exc:
+                LOGGER.warning("Failed to delete temporary PDF %s: %s", converted_path.name, exc)
+
+
+def _extract_pdf(path: Path) -> str:
+    """
+    Extract from PDF using markdown-first approach.
+    
+    Tries pymupdf4llm first (best for LLMs), falls back to custom parser.
+    """
+    # Try high-level markdown extraction first
+    text = extract_with_pymupdf4llm(path)
+    if text:
+        return text
+    
+    # Fallback to custom extraction
+    try:
+        import fitz
+        
+        with fitz.open(str(path)) as doc:
+            page_texts: List[str] = []
+            for page in doc:
+                page_text = _pymupdf_page_to_text(page)
+                if page_text.strip():
+                    page_texts.append(page_text)
+            
+            text = "\n\n".join(page_texts)
+            
+            if len(text.strip()) < 100 and len(doc) > 0:
+                LOGGER.warning("PDF %s yielded minimal text - may be scanned", path.name)
+            
+            return text
+    
+    except ImportError:
+        LOGGER.debug("PyMuPDF not available, using PyPDF2 for %s", path.name)
+        return _extract_pdf_pypdf2(path)
+    
+    except Exception as exc:
+        LOGGER.warning("PyMuPDF failed for %s: %s", path.name, exc)
+        return _extract_pdf_pypdf2(path)
+
+
+def _extract_pdf_pypdf2(path: Path) -> str:
+    """Fallback PDF extraction using PyPDF2."""
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(str(path))
+        pages = []
+        for page in reader.pages:
+            extracted = page.extract_text() or ""
+            if extracted.strip():
+                pages.append(extracted)
+        return "\n".join(pages)
+    except Exception:
+        return ""
+
+
+def _extract_excel(path: Path) -> str:
+    """Extract from Excel files (both .xlsx and .xls)."""
+    excel = pd.ExcelFile(str(path))
+    chunks: List[str] = []
+    
+    for sheet_name in excel.sheet_names[:5]:
+        try:
+            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
+            df.dropna(axis=1, how="all", inplace=True)
+            df.dropna(thresh=2, inplace=True)
+            df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
+            
+            if not df.empty:
+                md = _df_to_markdown(df)
+                if md:
+                    chunks.append(f"[Sheet: {sheet_name}]\n{md}")
+        
+        except Exception as exc:
+            LOGGER.warning("Could not read sheet '%s' from %s: %s", sheet_name, path.name, exc)
+            continue
+    
+    return "\n\n".join(chunks)
 
 
 __all__ = [

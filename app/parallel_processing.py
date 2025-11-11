@@ -150,10 +150,14 @@ class ParallelDocumentProcessor:
                 
                 tracker.increment(progress_callback, "extracting", path.name)
                 
-                LOGGER.debug("Extracted %s in %dms [%d/%d] %s",
+                # Log with filename visible in console
+                status = "✓ SUCCESS" if result.success else "✗ FAILED"
+                LOGGER.info("Extracted %s in %dms [%d/%d] %s",
                            result.filename, result.duration_ms,
-                           tracker.current, tracker.total,
-                           "✓" if result.success else "✗")
+                           tracker.current, tracker.total, status)
+                
+                if not result.success:
+                    LOGGER.warning("  └─ Error: %s", result.error)
         
         total_duration = time.time() - start_time
         
