@@ -13,7 +13,7 @@ from markdown import markdown as md
 import streamlit as st
 
 from .config import AppConfig
-from .indexing import build_index_from_library, load_cached_nodes_and_index
+from .indexing import build_index_from_library, build_index_from_library_parallel, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
 from .logger import LOGGER
@@ -381,6 +381,67 @@ def rebuild_index(app_state: AppState) -> None:
             LOGGER.exception("Failed to rebuild index")
             st.error(f"❌ Failed to rebuild index: {exc}")
 
+def rebuild_index_parallel(app_state: AppState) -> None:
+    """Rebuild index using parallel processing with progress tracking."""
+    
+    # Create progress containers
+    st.write("### 🚀 Parallel Processing Progress")
+    
+    phase1_container = st.container()
+    phase2_container = st.container()
+    
+    with phase1_container:
+        st.write("**Phase 1:** Extracting documents (Gemini)")
+        phase1_progress = st.progress(0.0)
+        phase1_status = st.empty()
+    
+    with phase2_container:
+        st.write("**Phase 2:** Generating embeddings")
+        phase2_progress = st.progress(0.0)
+        phase2_status = st.empty()
+    
+    overall_status = st.empty()
+    
+    # Progress callback
+    def progress_callback(phase: str, current: int, total: int, item: str) -> None:
+        """Update progress bars based on current phase."""
+        progress_pct = current / total if total > 0 else 0.0
+        
+        if phase == "extracting":
+            phase1_progress.progress(progress_pct)
+            phase1_status.text(f"Extracting: {current}/{total} - {item}")
+        
+        elif phase == "embedding":
+            phase2_progress.progress(progress_pct)
+            phase2_status.text(f"Embedding: {current}/{total}")
+    
+    try:
+        overall_status.info("⏳ Starting parallel index rebuild...")
+        
+        # Run parallel processing
+        nodes, index = build_index_from_library_parallel(progress_callback)
+        
+        # Update app state
+        app_state.nodes = nodes
+        app_state.index = index
+        app_state.vector_retriever = None
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers()
+        app_state.ensure_manager().nodes = nodes
+        
+        # Success
+        overall_status.success(
+            f"✅ Rebuilt index with {len(nodes)} chunks using parallel processing!"
+        )
+        LOGGER.info("Parallel index rebuild complete: %d nodes", len(nodes))
+        
+        # Mark progress complete
+        phase1_progress.progress(1.0)
+        phase2_progress.progress(1.0)
+        
+    except Exception as exc:
+        LOGGER.exception("Failed to rebuild index with parallel processing")
+        overall_status.error(f"❌ Failed to rebuild index: {exc}")
 
 def sync_library(app_state: AppState) -> None:
     manager = app_state.ensure_manager()
@@ -749,7 +810,7 @@ def render_app(
         st.error("⚠️ **No index found.** Please build the index first using the sidebar controls.")
         if not read_only_mode:
             if st.button("🔨 Build Index Now"):
-                rebuild_index(app_state)
+                rebuild_index_parallel(app_state)
                 _rerun_app()
         st.stop()
     
@@ -969,7 +1030,7 @@ def render_app(
                 if st.button("📥 Load cache", use_container_width=True):
                     load_or_warn(app_state)
                 if st.button("🔨 Rebuild index", use_container_width=True):
-                    rebuild_index(app_state)
+                    rebuild_index_parallel(app_state)
                 if st.button("🔄 Sync library", use_container_width=True):
                     sync_library(app_state)
         

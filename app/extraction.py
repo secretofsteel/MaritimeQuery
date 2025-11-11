@@ -14,7 +14,7 @@ from .config import AppConfig
 from .constants import EXTRACT_SYSTEM_PROMPT, FORM_CATEGORIES, GEMINI_SCHEMA
 from .files import clean_text_for_llm, read_doc_for_llm, is_scanned_pdf
 from .logger import LOGGER
-
+from .profiling import time_function
 
 def build_extract_prompt(filename: str, file_text: str) -> str:
     """Construct the exact prompt used in the original notebook."""
@@ -109,8 +109,8 @@ def _parse_json_response(raw: str) -> Dict[str, Any]:
         corrected = re.sub(r",\s*([\]}])", r"\1", json_str)
         return json.loads(corrected)
 
-
-def gemini_extract_record(path: Path, max_retries: int = 2) -> Dict[str, Any]:
+@time_function
+def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     """Call Gemini with retries; preserve the exact schema and keys."""
     # Handle scanned PDFs separately
     if path.suffix.lower() == ".pdf" and is_scanned_pdf(path):

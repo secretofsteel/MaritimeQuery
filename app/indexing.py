@@ -7,7 +7,7 @@ import pickle
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import chromadb
 from llama_index.core import Document, StorageContext, VectorStoreIndex
@@ -19,7 +19,7 @@ from .constants import CHUNK_OVERLAP, CHUNK_SIZE
 from .extraction import gemini_extract_record, to_documents_from_gemini
 from .files import current_files_index, load_jsonl, upsert_jsonl_record
 from .logger import LOGGER
-
+from .parallel_processing import ParallelDocumentProcessor, ParallelEmbeddingGenerator
 
 def chunk_documents(documents: Iterable[Document]) -> List[Document]:
     """Split LlamaIndex documents into sentence-aware chunks with metadata headers."""
@@ -118,6 +118,158 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     LOGGER.info("Initial sync cache saved.")
     return nodes, index
 
+
+def build_index_from_library_parallel(
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+) -> Tuple[List[Document], VectorStoreIndex]:
+    """Process the full document library with parallel extraction and embedding generation.
+    
+    This parallel version:
+    1. Identifies uncached files that need Gemini extraction
+    2. Extracts those files in parallel (10 workers)
+    3. Generates embeddings in parallel (10 workers)  
+    4. Writes to ChromaDB sequentially (required - not thread-safe)
+    
+    Args:
+        progress_callback: Optional callback(phase, current, total, item_desc)
+    
+    Returns:
+        Tuple of (nodes, index)
+    """
+    config = AppConfig.get()
+    paths = config.paths
+
+    LOGGER.info("=== Starting Parallel Processing ===")
+    
+    # Phase 0: Determine which files need extraction
+    LOGGER.info("Phase 0: Analyzing document library...")
+    files_index = current_files_index(paths.docs_path)
+    cached_records = load_jsonl(paths.gemini_json_cache)
+    
+    docs_to_extract: List[Path] = []
+    all_documents: List[Document] = []
+    
+    # Check each file
+    for filename, fingerprint in files_index.items():
+        doc_path = paths.docs_path / filename
+        cached = cached_records.get(filename)
+        
+        needs_extraction = not (
+            cached 
+            and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1 
+            and cached.get("size") == fingerprint["size"]
+        )
+        
+        if not needs_extraction and cached and "gemini" in cached:
+            meta = cached["gemini"]
+        else:
+            # Need to extract
+            docs_to_extract.append(doc_path)
+            continue
+        
+        # Use cached extraction
+        if "parse_error" in meta:
+            LOGGER.error("Skipping %s due to cached extraction error: %s", 
+                        filename, meta.get("parse_error"))
+            continue
+        
+        documents_from_cache = to_documents_from_gemini(doc_path, meta)
+        all_documents.extend(documents_from_cache)
+    
+    LOGGER.info("Using %d cached extractions, need to extract %d files", 
+               len(files_index) - len(docs_to_extract), len(docs_to_extract))
+    
+    # Phase 1: Parallel extraction for uncached files
+    if docs_to_extract:
+        LOGGER.info("Phase 1: Parallel extraction of %d documents...", len(docs_to_extract))
+        
+        processor = ParallelDocumentProcessor(max_workers=10)
+        extraction_results = processor.extract_batch(docs_to_extract, progress_callback)
+        
+        # Update JSONL cache with results
+        for result in extraction_results.successful + extraction_results.failed:
+            filename = result.filename
+            fingerprint = files_index[filename]
+            
+            if result.record:
+                upsert_jsonl_record(
+                    paths.gemini_json_cache,
+                    {
+                        "filename": filename,
+                        "mtime": fingerprint["mtime"],
+                        "size": fingerprint["size"],
+                        "gemini": result.record,
+                    },
+                )
+        
+        # Convert successful extractions to documents
+        for result in extraction_results.successful:
+            doc_path = paths.docs_path / result.filename
+            documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
+            all_documents.extend(documents_from_extraction)
+        
+        # Log failures
+        for result in extraction_results.failed:
+            LOGGER.error("Skipping %s due to extraction error: %s", 
+                        result.filename, result.error)
+        
+        LOGGER.info("Phase 1 complete: %d successful, %d failed",
+                   extraction_results.success_count, extraction_results.failure_count)
+    else:
+        LOGGER.info("Phase 1 skipped: All documents cached")
+    
+    LOGGER.info("Total documents loaded: %d", len(all_documents))
+    
+    # Phase 2: Chunking
+    LOGGER.info("Phase 2: Chunking documents...")
+    nodes = chunk_documents(all_documents)
+    LOGGER.info("Created %d chunks", len(nodes))
+    
+    cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
+    
+    # Phase 3: Parallel embedding generation + sequential ChromaDB writes
+    LOGGER.info("Phase 3: Parallel embedding generation...")
+    
+    # Extract texts for embedding
+    chunk_texts = [node.get_content() for node in nodes]
+    
+    # Generate embeddings in parallel
+    embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
+    embedding_batch = embedding_gen.generate_batch(chunk_texts, progress_callback)
+    
+    LOGGER.info("Generated %d embeddings in %.2fs", 
+               len(embedding_batch.embeddings), embedding_batch.duration_sec)
+    
+    # Attach embeddings to nodes
+    for node, embedding in zip(nodes, embedding_batch.embeddings):
+        node.embedding = embedding
+    
+    # Initialize ChromaDB
+    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
+    collection = chroma_client.get_or_create_collection("maritime_docs")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    
+    # Write to ChromaDB (sequential - embeddings already attached)
+    LOGGER.info("Writing %d chunks to ChromaDB (sequential)...", len(nodes))
+    index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, show_progress=True)
+    LOGGER.info("ChromaDB indexing complete")
+    
+    # Update sync cache
+    manager = IncrementalIndexManager(
+        paths.docs_path, 
+        paths.gemini_json_cache, 
+        paths.nodes_cache_path, 
+        paths.cache_info_path, 
+        paths.chroma_path
+    )
+    manager.sync_cache["files_hash"] = manager._get_files_hash(paths.docs_path)
+    manager._save_sync_cache()
+    LOGGER.info("Sync cache updated")
+    
+    LOGGER.info("=== Parallel Processing Complete ===")
+    
+    return nodes, index
 
 def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[VectorStoreIndex]]:
     """Load cached nodes and rehydrate the index if possible."""
@@ -260,6 +412,7 @@ __all__ = [
     "chunk_documents",
     "cache_nodes",
     "build_index_from_library",
+    "build_index_from_library_parallel",
     "load_cached_nodes_and_index",
     "IncrementalIndexManager",
     "SyncResult",
