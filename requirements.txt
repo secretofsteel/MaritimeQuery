@@ -25,4 +25,6 @@ aspose-words
 #PDF processing libraries
 pymupdf
 PyPDF2
+pymupdf-layout
+pymupdf4llm
 

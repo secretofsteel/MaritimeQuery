@@ -13,7 +13,7 @@ from markdown import markdown as md
 import streamlit as st
 
 from .config import AppConfig
-from .indexing import build_index_from_library, load_cached_nodes_and_index
+from .indexing import build_index_from_library, build_index_from_library_parallel, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
 from .logger import LOGGER
@@ -360,9 +360,14 @@ def save_result_as_html(result: Dict, output_file: str = "rag_result.html", titl
 
 
 def load_or_warn(app_state: AppState) -> None:
-    """DEPRECATED: Use app_state.ensure_index_loaded() instead."""
-    if not app_state.ensure_index_loaded():
-        st.warning("⚠️ No cached index found. Please build the index first.")
+    """Load cached index if available."""
+    with st.spinner("Loading cached index..."):
+        if app_state.ensure_index_loaded():
+            st.success(f"✅ Loaded cached index with {len(app_state.nodes)} chunks")
+            LOGGER.info("Loaded cached index: %d nodes", len(app_state.nodes))
+        else:
+            st.warning("⚠️ No cached index found. Please build the index first.")
+            LOGGER.warning("No cached index found")
 
 
 def rebuild_index(app_state: AppState) -> None:
@@ -381,6 +386,83 @@ def rebuild_index(app_state: AppState) -> None:
             LOGGER.exception("Failed to rebuild index")
             st.error(f"❌ Failed to rebuild index: {exc}")
 
+def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool = False) -> None:
+    """Execute parallel index rebuild with progress tracking.
+    
+    Args:
+        app_state: Application state
+        clear_gemini_cache: If True, re-extract all files via Gemini
+    """
+    # Create progress containers
+    st.write("### 🚀 Parallel Processing Progress")
+    
+    phase1_container = st.container()
+    phase2_container = st.container()
+    
+    with phase1_container:
+        st.write("**Phase 1:** Extracting documents (Gemini)")
+        phase1_progress = st.progress(0.0)
+        phase1_status = st.empty()
+    
+    with phase2_container:
+        st.write("**Phase 2:** Generating embeddings")
+        phase2_progress = st.progress(0.0)
+        phase2_status = st.empty()
+    
+    overall_status = st.empty()
+    
+    # Progress callback
+    def progress_callback(phase: str, current: int, total: int, item: str) -> None:
+        """Update progress bars based on current phase."""
+        progress_pct = current / total if total > 0 else 0.0
+        
+        if phase == "extracting":
+            phase1_progress.progress(progress_pct)
+            phase1_status.text(f"Extracting: {current}/{total} - {item}")
+        
+        elif phase == "embedding":
+            phase2_progress.progress(progress_pct)
+            phase2_status.text(f"Embedding: {current}/{total}")
+    
+    try:
+        if clear_gemini_cache:
+            overall_status.warning("⚠️ Will re-extract all files (Gemini cache cleared)")
+        else:
+            overall_status.info("⏳ Starting parallel rebuild (using cached extractions)...")
+        
+        # Run parallel processing
+        nodes, index = build_index_from_library_parallel(
+            progress_callback=progress_callback,
+            clear_gemini_cache=clear_gemini_cache
+        )
+        
+        # Update app state
+        app_state.nodes = nodes
+        app_state.index = index
+        app_state.vector_retriever = None
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers()
+        app_state.ensure_manager().nodes = nodes
+        
+        # Success
+        cache_msg = " (all files re-extracted)" if clear_gemini_cache else ""
+        overall_status.success(
+            f"✅ Rebuilt index with {len(nodes)} chunks using parallel processing!{cache_msg}"
+        )
+        LOGGER.info("Parallel index rebuild complete: %d nodes", len(nodes))
+        
+        # Mark progress complete
+        phase1_progress.progress(1.0)
+        phase2_progress.progress(1.0)
+        
+    except Exception as exc:
+        LOGGER.exception("Failed to rebuild index with parallel processing")
+        overall_status.error(f"❌ Failed to rebuild index: {exc}")
+
+
+def rebuild_index_parallel(app_state: AppState) -> None:
+    """Compatibility wrapper - calls rebuild_index_parallel_execute with default settings."""
+    rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
 def sync_library(app_state: AppState) -> None:
     manager = app_state.ensure_manager()
@@ -749,7 +831,7 @@ def render_app(
         st.error("⚠️ **No index found.** Please build the index first using the sidebar controls.")
         if not read_only_mode:
             if st.button("🔨 Build Index Now"):
-                rebuild_index(app_state)
+                rebuild_index_parallel(app_state)
                 _rerun_app()
         st.stop()
     
@@ -966,11 +1048,28 @@ def render_app(
         # Library management (only if not read-only)
         if not read_only_mode:
             with st.expander("📚 Library Management", expanded=False):
-                if st.button("📥 Load cache", use_container_width=True):
+                # Load cache button
+                if st.button("📥 Load cache", use_container_width=True, key="load_cache_btn"):
                     load_or_warn(app_state)
-                if st.button("🔨 Rebuild index", use_container_width=True):
-                    rebuild_index(app_state)
-                if st.button("🔄 Sync library", use_container_width=True):
+                
+                st.divider()
+                
+                # Rebuild section with checkbox
+                st.write("**Rebuild Index (Parallel)**")
+                clear_cache = st.checkbox(
+                    "🗑️ Clear Gemini cache (re-extract all files)",
+                    value=False,
+                    key="rebuild_clear_cache",
+                    help="Enable to re-extract all files via Gemini. Leave unchecked to use cached extractions (faster)."
+                )
+                
+                if st.button("🔨 Rebuild index", use_container_width=True, key="rebuild_btn", type="primary"):
+                    rebuild_index_parallel_execute(app_state, clear_cache)
+                
+                st.divider()
+                
+                # Sync button
+                if st.button("🔄 Sync library", use_container_width=True, key="sync_btn"):
                     sync_library(app_state)
         
 
