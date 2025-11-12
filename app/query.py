@@ -458,25 +458,125 @@ def _apply_doc_type_boost(nodes: List[NodeWithScore], preferred_doc_type: Option
     return sorted(nodes, key=lambda n: n.score, reverse=True)
 
 
-def _classify_query_intent(query: str) -> str:
+def _classify_query_intent_llm(query: str, app_state: Optional[AppState] = None) -> str:
     """
-    Classify if query needs retrieval or can be answered directly.
-    
+    Classify query intent using LLM for more robust understanding.
+
+    Args:
+        query: User's input message
+        app_state: Optional app state for conversation context
+
+    Returns:
+        "greeting" - Initial greeting (hi, hello)
+        "goodbye" - Farewell (bye, see you)
+        "thank_you" - Gratitude/acknowledgment (thanks, cool beans)
+        "follow_up" - Follow-up question (what else?, tell me more)
+        "clarification" - Asking about previous answer (what do you mean?)
+        "new_query" - New question needing document search
+        "chitchat" - Casual conversation not needing search
+    """
+    # Build context from recent conversation if available
+    context_info = ""
+    if app_state and app_state.query_history:
+        last_entry = app_state.query_history[-1]
+        last_query = last_entry.get("query", "")
+        last_answer = last_entry.get("answer", "")[:150]
+        context_info = f"""
+PREVIOUS CONVERSATION:
+User: {last_query}
+Assistant: {last_answer}...
+
+"""
+
+    prompt = f"""{context_info}CURRENT USER MESSAGE: "{query}"
+
+You are a query router for a maritime documentation assistant. Your job is to classify the user's intent.
+
+CATEGORY DEFINITIONS:
+
+1. **greeting** - Initial greeting or checking in
+   Examples: "hi", "hello", "hey there", "good morning", "how are you"
+
+2. **goodbye** - Ending conversation
+   Examples: "bye", "goodbye", "see you later", "take care", "peace out"
+
+3. **thank_you** - Expressing gratitude or acknowledgment (can be conventional or unconventional)
+   Examples: "thanks", "thank you", "cool beans dude, good to know", "appreciate it", "perfect", "got it", "roger that"
+
+4. **follow_up** - Wants more information about the same topic
+   Examples: "what else?", "tell me more", "anything else?", "can you elaborate?", "what about other options?"
+
+5. **clarification** - Confused about previous answer, asking for explanation
+   Examples: "what do you mean?", "I don't understand", "can you explain that?", "unclear"
+
+6. **new_query** - New question requiring document search (maritime procedures, forms, regulations, etc.)
+   Examples: "what is the ballast procedure?", "which form for drug testing?", "how to handle ice navigation?"
+
+7. **chitchat** - Casual conversation not requiring document search
+   Examples: "how's the weather?", "what can you do?", "tell me a joke"
+
+INSTRUCTIONS:
+- If there's previous conversation, use it to detect follow-ups and clarifications
+- "what else?" after a previous answer = **follow_up**, NOT greeting
+- Unconventional acknowledgments like "cool beans" = **thank_you**, NOT new_query
+- Questions about maritime topics = **new_query**
+- Short messages can still be follow-ups if context suggests continuation
+
+Classify this message into ONE category (lowercase): greeting, goodbye, thank_you, follow_up, clarification, new_query, or chitchat
+
+Reply with ONLY the category name, nothing else."""
+
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+            ),
+        )
+
+        classification = response.text.strip().lower()
+
+        # Validate classification
+        valid_intents = {"greeting", "goodbye", "thank_you", "follow_up", "clarification", "new_query", "chitchat"}
+
+        # Extract the intent if it's in the response
+        for intent in valid_intents:
+            if intent in classification:
+                LOGGER.info("LLM Query Router: %s -> %s", query[:50], intent)
+                return intent
+
+        # Fallback: if no valid intent found, default to new_query (conservative)
+        LOGGER.warning("LLM router returned invalid classification '%s', defaulting to new_query", classification)
+        return "new_query"
+
+    except Exception as exc:
+        LOGGER.warning("LLM intent classification failed: %s, falling back to heuristic", exc)
+        # Fallback to simple heuristic
+        return _classify_query_intent_heuristic(query)
+
+
+def _classify_query_intent_heuristic(query: str) -> str:
+    """
+    Fallback heuristic-based classification when LLM fails.
+    Kept as backup for reliability.
+
     Returns:
         "greeting" - Just saying hi/bye/thanks
         "chitchat" - Casual conversation
         "clarification" - Asking about previous answer
-        "search" - Needs document lookup
+        "new_query" - Needs document lookup
     """
     query_lower = query.strip().lower()
-    
+
     # Fast path: exact matches for common patterns
-    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday", 
+    greetings = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy", "yo", "hey there", "what's going on", "good day", "gday",
                  "hi there", "what's up?", "what's up", "how are you", "whats up", "how's it going", "what's new"}
-    
+
     if query_lower in greetings or len(query.split()) <= 3:
         return "greeting"
-    
+
     # Clarification indicators
     clarification_patterns = [
         r"what do you mean",
@@ -486,27 +586,27 @@ def _classify_query_intent(query: str) -> str:
         r"elaborate",
         r"more details"
     ]
-    
+
     if any(re.search(pattern, query_lower) for pattern in clarification_patterns):
         return "clarification"
-    
+
     # If it has maritime/technical terms, definitely search
     maritime_indicators = [
-        "ship", "vessel", "cargo", "ballast", "marpol", "solas", "imo", 
+        "ship", "vessel", "cargo", "ballast", "marpol", "solas", "imo",
         "procedure", "form", "checklist", "regulation", "policy", "drill", "manual", "chief engineer",
-        "safety", "navigation", "engine", "crew", "master", "officer", "ppe", "supply", 
-        "logbook", "maintenance", "inspection", "emergency", "lifeboat", "fire", "pollution", "incident", "reporting", 
+        "safety", "navigation", "engine", "crew", "master", "officer", "ppe", "supply",
+        "logbook", "maintenance", "inspection", "emergency", "lifeboat", "fire", "pollution", "incident", "reporting",
         "deck", "engineer", "pilot", "mooring", "anchoring", "cargo handling", "stcw", "mlc", "ism code", "psc", "flag",
         "port state", "ship management", "seafarer", "nautical", "chart", "ice navigation", "hull", "machinery", "equipment"
     ]
-    
+
     if any(term in query_lower for term in maritime_indicators):
-        return "search"
-    
+        return "new_query"
+
     # Default: if it's a question, search
     if (("?" in query and query_lower not in greetings) or (len(query.split()) > 5)):
-        return "search"
-    
+        return "new_query"
+
     # Otherwise, probably chitchat
     return "chitchat"
 
@@ -524,36 +624,30 @@ def query_with_confidence(
     use_conversation_context: bool = False,
 ) -> Dict[str, Any]:
     # ============ INTENT CLASSIFICATION ============
-    intent = _classify_query_intent(query_text)
+    intent = _classify_query_intent_llm(query_text, app_state)
     LOGGER.info("Query intent: %s", intent)
-    
-    if intent in ["greeting", "chitchat"]:
+
+    # Non-search intents: greeting, goodbye, thank_you, chitchat
+    if intent in ["greeting", "goodbye", "thank_you", "chitchat"]:
         # Skip retrieval entirely, respond naturally
         LOGGER.info("Skipping retrieval for %s query", intent)
-        
-        simple_responses = {
+
+        # Response templates by intent
+        responses = {
             "greeting": "Hello! I'm here to help you with maritime documentation and procedures. What would you like to know?",
+            "goodbye": "Safe sailing! Feel free to return anytime you need assistance.",
+            "thank_you": "You're welcome! Let me know if you need anything else.",
             "chitchat": "I'm your maritime documentation assistant. Feel free to ask me about ship procedures, safety protocols, forms, or regulations!"
         }
-        
-        # Check for specific patterns
-        query_lower = query_text.lower()
-        if any(word in query_lower for word in ["thanks", "thank", "thx", "tks"]):
-            answer = "You're welcome! Let me know if you need anything else."
-        elif any(word in query_lower for word in ["bye", "goodbye", "see ya", "later", "farewell", "take care", "see you", 
-                "talk to you later", "catch you later", "have a good day", "have a nice day", "peace out", "farewell", "adios", "ciao"]):
-            answer = "Safe sailing! Feel free to return anytime you need assistance."
-        elif any(word in query_lower for word in ["ok", "okay", "got it", "understood", "great", "perfect", "sounds good", "alright", "roger that"]):
-            answer = "Great! Let me know if you have any other questions."
-        else:
-            answer = simple_responses.get(intent, simple_responses["greeting"])
-        
+
+        answer = responses.get(intent, responses["greeting"])
+
         return {
             "query": query_text,
             "answer": answer,
             "confidence_pct": 100,
             "confidence_level": "HIGH 🟢",
-            "confidence_note": "Direct response (no search needed)",
+            "confidence_note": f"Direct response ({intent})",
             "sources": [],
             "num_sources": 0,
             "retriever_type": "none",
@@ -565,6 +659,15 @@ def query_with_confidence(
             "attempts": 0,
             "best_attempt": 0,
         }
+
+    # For follow_up and clarification, we'll continue to document search
+    # but these intents inform the retrieval strategy below
+    if intent == "follow_up":
+        LOGGER.info("Follow-up detected, will prefer cached context if available")
+    elif intent == "clarification":
+        LOGGER.info("Clarification requested, will use cached context")
+    elif intent == "new_query":
+        LOGGER.info("New query detected, proceeding with document search")
     
     # ============ DEBUG ENTRY POINT ============
     if DEBUG_RAG:
@@ -661,61 +764,81 @@ def query_with_confidence(
     
     LOGGER.info("Cache keys - current: %s, last: %s", cache_key, last_cache_key)
     
-    # STEP 6: Detect topic shift using Gemini (SOURCE OF TRUTH)
+    # STEP 6: Intent-aware cache decision (LLM router + topic shift detection)
     topic_shift_detected = False
     context_reset_note = None
     should_reuse_cache = False
-    
+
     if DEBUG_RAG:
-        LOGGER.info("DEBUG: Checking if shift detection needed...")
+        LOGGER.info("DEBUG: Checking cache strategy based on intent: %s", intent)
         LOGGER.info("  - use_conversation_context: %s", use_conversation_context)
         LOGGER.info("  - context_turn_count > 0: %s", app_state.context_turn_count > 0)
         LOGGER.info("  - query_history exists: %s", bool(app_state.query_history))
-    
-    if use_conversation_context and app_state.context_turn_count > 0 and app_state.query_history:
+
+    # Priority 1: Clarifications ALWAYS use cache (never search again)
+    if intent == "clarification" and app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
+        should_reuse_cache = True
+        LOGGER.info("🔍 Clarification detected - using cached context only")
+        if DEBUG_RAG:
+            LOGGER.info("DEBUG: Forcing cache reuse for clarification")
+
+    # Priority 2: Follow-ups prefer cache, but check for topic shift
+    elif use_conversation_context and app_state.context_turn_count > 0 and app_state.query_history:
         if DEBUG_RAG:
             LOGGER.info("DEBUG: Running shift detection...")
-        
+
         # Get last Q&A for shift detection
         last_entry = app_state.query_history[-1]
         last_query = last_entry.get("query", "")
         last_answer = last_entry.get("answer", "")[:200]
-        
-        # Ask Gemini: is this a direct continuation?
-        topic_shift_detected = _detect_topic_shift_with_gemini(query_text, last_query, last_answer)
-        
-        if DEBUG_RAG:
-            LOGGER.info("DEBUG: Shift detected: %s", topic_shift_detected)
-        
-        if topic_shift_detected:
-            # True topic shift - clear everything
-            LOGGER.info("🔄 Topic shift detected, clearing context")
-            if DEBUG_RAG:
-                LOGGER.info("DEBUG: Clearing sticky_chunks (was: %d)", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
-            app_state.sticky_chunks.clear()
-            app_state.context_turn_count = 0
-            context_reset_note = "🔄 Detected topic change (starting fresh search)"
-            should_reuse_cache = False
-            if DEBUG_RAG:
-                LOGGER.info("DEBUG: After clear - sticky_chunks length: %d", len(app_state.sticky_chunks))
-        else:
-            # Shift detector says FOLLOWUP - trust it!
-            if DEBUG_RAG:
-                LOGGER.info("DEBUG: FOLLOWUP detected - checking cache availability...")
-                LOGGER.info("  - sticky_chunks exists: %s", bool(app_state.sticky_chunks))
-                LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
-            
-            # Even if cache keys don't match perfectly, reuse if we have chunks
+
+        # For follow_ups, prefer cache but still check shift detection as backup
+        if intent == "follow_up":
+            LOGGER.info("🔍 Follow-up detected - preferring cached context")
+            # For explicit follow-ups, skip topic shift detection and use cache if available
             if app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
                 should_reuse_cache = True
-                LOGGER.info("✅ Shift detector says FOLLOWUP - reusing cache despite key differences")
+                LOGGER.info("✅ Follow-up intent - reusing cache")
             else:
                 should_reuse_cache = False
                 if DEBUG_RAG:
-                    LOGGER.warning("⚠️ Shift detector says FOLLOWUP but no cached chunks available!")
+                    LOGGER.warning("⚠️ Follow-up but no cached chunks available!")
+        else:
+            # For new_query, use the existing topic shift detection
+            topic_shift_detected = _detect_topic_shift_with_gemini(query_text, last_query, last_answer)
+
+            if DEBUG_RAG:
+                LOGGER.info("DEBUG: Shift detected: %s", topic_shift_detected)
+
+            if topic_shift_detected:
+                # True topic shift - clear everything
+                LOGGER.info("🔄 Topic shift detected, clearing context")
+                if DEBUG_RAG:
+                    LOGGER.info("DEBUG: Clearing sticky_chunks (was: %d)", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+                app_state.sticky_chunks.clear()
+                app_state.context_turn_count = 0
+                context_reset_note = "🔄 Detected topic change (starting fresh search)"
+                should_reuse_cache = False
+                if DEBUG_RAG:
+                    LOGGER.info("DEBUG: After clear - sticky_chunks length: %d", len(app_state.sticky_chunks))
+            else:
+                # No shift detected - reuse cache
+                if DEBUG_RAG:
+                    LOGGER.info("DEBUG: No shift - checking cache availability...")
+                    LOGGER.info("  - sticky_chunks exists: %s", bool(app_state.sticky_chunks))
+                    LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+
+                # Even if cache keys don't match perfectly, reuse if we have chunks
+                if app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
+                    should_reuse_cache = True
+                    LOGGER.info("✅ No shift detected - reusing cache")
+                else:
+                    should_reuse_cache = False
+                    if DEBUG_RAG:
+                        LOGGER.warning("⚠️ No shift but no cached chunks available!")
     else:
         if DEBUG_RAG:
-            LOGGER.info("DEBUG: Skipping shift detection (first query or context disabled)")
+            LOGGER.info("DEBUG: First query or context disabled - fresh retrieval")
     
     # Check hard cap on turns
     if use_conversation_context and app_state.context_turn_count >= MAX_CONTEXT_TURNS:
