@@ -406,7 +406,7 @@ def _extract_txt(path: Path) -> str:
 
 
 def _extract_docx(path: Path) -> str:
-    """Extract from modern Word documents."""
+    """Extract from modern Word documents, preserving table positions."""
     from docx import Document as DocxDocument
     
     document = DocxDocument(str(path))
@@ -429,29 +429,38 @@ def _extract_docx(path: Path) -> str:
             if para.text.strip():
                 parts.append(para.text)
     
-    # Body paragraphs
-    for paragraph in document.paragraphs:
-        if paragraph.text.strip():
-            parts.append(paragraph.text)
-    
-    # Tables
-    for table in document.tables:
-        table_text_parts = []
-        for row in table.rows:
-            row_text_parts = []
-            for cell in row.cells:
-                cell_text = cell.text.strip()
-                if cell_text:
-                    row_text_parts.append(cell_text)
-            if row_text_parts:
-                table_text_parts.append(" | ".join(row_text_parts))
+    # FIXED: Extract body elements in document order (paragraphs AND tables inline)
+    for element in document.element.body:
+        # Paragraph
+        if element.tag.endswith('p'):
+            for para in document.paragraphs:
+                if para._element == element:
+                    if para.text.strip():
+                        parts.append(para.text)
+                    break
         
-        table_full_text = "\n".join(table_text_parts)
-        max_table_chars = 10000
-        if len(table_full_text) > max_table_chars:
-            parts.append(table_full_text[:max_table_chars])
-        else:
-            parts.append(table_full_text)
+        # Table (inline with paragraphs)
+        elif element.tag.endswith('tbl'):
+            for table in document.tables:
+                if table._element == element:
+                    table_text_parts = []
+                    for row in table.rows:
+                        row_text_parts = []
+                        for cell in row.cells:
+                            cell_text = cell.text.strip()
+                            if cell_text:
+                                row_text_parts.append(cell_text)
+                        if row_text_parts:
+                            table_text_parts.append(" | ".join(row_text_parts))
+                    
+                    if table_text_parts:
+                        table_full_text = "\n".join(table_text_parts)
+                        max_table_chars = 10000
+                        if len(table_full_text) > max_table_chars:
+                            parts.append(table_full_text[:max_table_chars])
+                        else:
+                            parts.append(table_full_text)
+                    break
     
     return collapse_repeated_lines("\n".join(parts))
 
@@ -513,10 +522,11 @@ def _extract_pdf(path: Path) -> str:
     
     Tries pymupdf4llm first (best for LLMs), falls back to custom parser.
     """
+    
     # Try high-level markdown extraction first
-    text = extract_with_pymupdf4llm(path)
-    if text:
-        return text
+    #text = extract_with_pymupdf4llm(path)
+    #if text:
+    #    return text
     
     # Fallback to custom extraction
     try:

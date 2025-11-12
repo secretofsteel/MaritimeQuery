@@ -294,27 +294,41 @@ def _gemini_get_structure(filename: str, text_preview: str, max_retries: int = 2
         "required": ["filename", "doc_type", "title", "section_names"]
     }
     
-    prompt = f"""{EXTRACT_SYSTEM_PROMPT}
+    # Create a structure-only prompt that explicitly forbids content extraction
+    structure_prompt = f"""You are a maritime document analysis model performing STRUCTURE EXTRACTION ONLY.
 
-**STRUCTURE EXTRACTION MODE**
+**CRITICAL INSTRUCTIONS:**
+- Extract ONLY document metadata and section names
+- DO NOT extract any section content
+- DO NOT include full text of sections
+- Return ONLY a list of section names (strings), not content
 
-This is Pass 0 of a multi-pass extraction for a large document.
+**Your Task:**
+1. Identify document type, title, category, form number
+2. List ALL section/chapter names in order (just the names!)
+3. Identify any document references (form numbers, procedure names, regulations)
+4. Build document hierarchy if present
 
-**Your task:** Extract ONLY the document structure. Do NOT include section content.
+**What to output:**
+- section_names: Array of strings (section names only, NO content)
+- doc_type: One of: Form, Checklist, Procedure, Regulation, Policy, Manual
+- title: Document title
+- Optional: category, form_number, normalized_topic, hierarchy, references
 
-Required output:
-1. Document metadata (doc_type, title, category, form_number, hierarchy, etc.)
-2. Complete list of ALL section names in order (in 'section_names' array)
-3. Any references found in the document
+**What NOT to output:**
+- Section content (forbidden in this pass)
+- Full text paragraphs
+- Detailed descriptions
 
-**CRITICAL:** The 'section_names' array should contain ONLY the section names (strings), 
-not objects with content. This list will guide subsequent content extraction passes.
+**Schema (follow exactly):**
+{json.dumps(structure_schema, indent=2)}
 
-Schema: {json.dumps(structure_schema, indent=2)}
-Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
+**Category map:**
+{json.dumps(FORM_CATEGORIES, indent=2)}
 
+**Document to analyze:**
 Filename: {filename}
-Document preview (first 100k characters):
+Full document text:
 {text_preview}
 """
     
@@ -325,7 +339,7 @@ Document preview (first 100k characters):
         try:
             response = config.client.models.generate_content(
                 model="gemini-2.5-flash-lite",
-                contents=prompt,
+                contents=structure_prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
                     response_mime_type="application/json",
@@ -334,6 +348,20 @@ Document preview (first 100k characters):
             )
             
             raw = response.text or "{}"
+
+            # DEBUG: Check what we actually got
+            LOGGER.debug("Response object type: %s", type(response))
+            LOGGER.debug("Response.text length: %d", len(response.text) if response.text else 0)
+            
+            # DEBUG: Check if response is suspiciously large (might contain content)
+            if len(raw) > 50000:
+                LOGGER.warning("⚠️  Structure extraction returned %d chars - likely contains section content!", len(raw))
+                #LOGGER.debug("Response preview: %s...", raw[:200])
+                LOGGER.error("Response starts with: %s", raw[:500])
+                LOGGER.error("Response ends with: %s", raw[-500:])
+            else:
+                LOGGER.debug("Structure extraction response: %d chars (good)", len(raw))
+            
             data = _parse_json_response(raw)
             
             # Ensure section_names exists
@@ -349,6 +377,15 @@ Document preview (first 100k characters):
             last_error = str(exc)
             LOGGER.warning("Structure extraction failed for %s (attempt %d): %s", 
                           filename, attempt, exc)
+            
+            # DEBUG: If JSON parse error, log the problematic response
+            if "Unterminated string" in str(exc) or "JSONDecodeError" in str(exc):
+                LOGGER.error("JSON parse error in structure extraction!")
+                LOGGER.error("Response length: %d chars", len(raw) if 'raw' in locals() else 0)
+                if 'raw' in locals() and raw:
+                    LOGGER.error("Response preview (first 1000 chars): %s", raw[:1000])
+                    LOGGER.error("Response preview (last 1000 chars): %s", raw[-1000:])
+            
             if attempt > max_retries:
                 # Return minimal structure on complete failure
                 return {
@@ -375,6 +412,7 @@ def _gemini_extract_chunk_with_resume(
     filename: str,
     chunk_text: str,
     all_section_names: List[str],
+    already_completed_sections: List[str],  # NEW PARAMETER
     last_completed: Optional[str],
     is_first_pass: bool,
     max_retries: int = 2
@@ -386,6 +424,7 @@ def _gemini_extract_chunk_with_resume(
         filename: Original document filename
         chunk_text: Text chunk to process
         all_section_names: Complete list of section names from Pass 0
+        already_completed_sections: List of section names already extracted in previous passes
         last_completed: Name of last section completed in previous pass (None for first pass)
         is_first_pass: Whether this is the first content extraction pass
         max_retries: Number of retry attempts on failure
@@ -406,11 +445,18 @@ def _gemini_extract_chunk_with_resume(
         
         context = f"""This is a CONTINUATION pass.
 
+**ALREADY COMPLETED (DO NOT RE-EXTRACT THESE):**
+{json.dumps(already_completed_sections, indent=2)}
+
 Last completed section: "{last_completed}"
 Next expected section: "{next_section}"
 
-**IMPORTANT:** Resume from the section immediately after "{last_completed}" and continue 
-extracting content until you naturally run low on output space. Stop at a section boundary."""
+**CRITICAL INSTRUCTIONS:**
+1. Skip ALL sections in the "ALREADY COMPLETED" list above
+2. Resume from section "{next_section}"
+3. Extract ONLY sections that are NOT in the completed list
+4. Even if you see text from completed sections in this chunk, DO NOT extract them again
+"""
     
     prompt = f"""{EXTRACT_SYSTEM_PROMPT}
 
@@ -424,8 +470,8 @@ Complete section list YOU identified (for reference):
 **Instructions:**
 1. Extract COMPLETE content for each section you process
 2. Process sections IN ORDER from the section list
-3. Stop naturally at a section boundary when approaching output limits
-4. Do NOT skip sections - if you can't fit a section, don't include it (next pass will get it)
+3. Skip any sections already in the "ALREADY COMPLETED" list
+4. Stop naturally at a section boundary when approaching output limits
 5. Ensure every section you include has its full content
 
 Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
@@ -598,7 +644,7 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
     
     # Pass 0: Get document structure (no content)
     LOGGER.info("Pass 0: Extracting structure...")
-    structure = _gemini_get_structure(path.name, full_text, max_retries)
+    structure = _gemini_get_structure(path.name, full_text, max_retries)  # FIXED: full_text instead of [:100_000]
     
     section_names = structure.get("section_names", [])
     
@@ -615,6 +661,7 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
     # Multi-pass content extraction
     chunk_results = []
     last_completed_section = None
+    already_completed_sections = []  # NEW: Track all completed sections
     total_sections_extracted = 0
     
     for i, chunk_text in enumerate(chunks):
@@ -624,6 +671,7 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
             filename=path.name,
             chunk_text=chunk_text,
             all_section_names=section_names,
+            already_completed_sections=already_completed_sections,  # NEW: Pass completed list
             last_completed=last_completed_section,
             is_first_pass=(i == 0),
             max_retries=max_retries
@@ -636,11 +684,18 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
             break
         
         chunk_results.append(result)
-        total_sections_extracted += len(extracted_sections)
+        
+        # NEW: Add all newly extracted section names to the completed list
+        for section in extracted_sections:
+            section_name = section.get("name", "").strip()
+            if section_name and section_name not in already_completed_sections:
+                already_completed_sections.append(section_name)
+        
+        total_sections_extracted = len(already_completed_sections)  # CHANGED: Use unique count
         
         # Track progress
         last_completed_section = extracted_sections[-1].get("name")
-        LOGGER.info("Pass %d complete: extracted %d sections (total so far: %d/%d)",
+        LOGGER.info("Pass %d complete: extracted %d NEW sections (total unique so far: %d/%d)",
                    i + 1, len(extracted_sections), total_sections_extracted, len(section_names))
         LOGGER.info("Last completed section: '%s'", last_completed_section)
         
