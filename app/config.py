@@ -92,12 +92,18 @@ class AppConfig:
         self.client = genai.Client(api_key=api_key)
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
         self.ocr_enabled = os.getenv("ENABLE_PDF_OCR", "true").lower() == "true"
+        self.visual_extraction_enabled = os.getenv("ENABLE_VISUAL_EXTRACTION", "true").lower() == "true"
 
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
         if self.ocr_enabled:
             LOGGER.info("PDF OCR enabled")
         else:
             LOGGER.info("PDF OCR disabled")
+
+        if self.visual_extraction_enabled:
+            LOGGER.info("PDF visual extraction (images/drawings) enabled")
+        else:
+            LOGGER.info("PDF visual extraction (images/drawings) disabled")
 
     def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""

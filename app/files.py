@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from hashlib import md5
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -95,15 +96,201 @@ def extract_with_pymupdf4llm(path: Path) -> Optional[str]:
         return None
 
 
-def _pymupdf_page_to_text(page) -> str:
+def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optional[str]:
     """
-    Extract text from a PyMuPDF page with layout awareness + table preservation.
+    Send a visual element to Gemini vision model for description.
+
+    Args:
+        image_bytes: PNG image bytes of the visual element
+        context: Optional context about where this visual appears
+
+    Returns:
+        Description text or None if failed
+    """
+    try:
+        from .config import AppConfig
+
+        config = AppConfig.get()
+        client = config.client
+
+        # Create a prompt for technical manual visual extraction
+        prompt = (
+            "You are reading a technical manual. Describe this diagram, chart, image, or drawing "
+            "in a few concise sentences. Preserve all labels, units, measurements, conditions, "
+            "table-like information, and key visual relationships. Be specific and technical."
+        )
+
+        if context:
+            prompt += f"\n\nContext: {context}"
+
+        # Use Gemini Flash for fast, cost-effective vision analysis
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                prompt,
+                {"mime_type": "image/png", "data": image_bytes}
+            ]
+        )
+
+        if response and response.text:
+            return response.text.strip()
+
+        return None
+
+    except Exception as exc:
+        LOGGER.warning("Gemini vision API failed: %s", exc)
+        return None
+
+
+def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any]]:
+    """
+    Extract images and significant drawings from a PDF page.
+
+    Args:
+        page: PyMuPDF page object
+        page_num: Page number for reference
+
+    Returns:
+        List of visual items with rect, type, and description
+    """
+    try:
+        import fitz
+    except ImportError:
+        return []
+
+    visual_items = []
+    page_area = page.rect.width * page.rect.height
+    min_area_threshold = page_area * 0.10  # 10% of page area
+    min_dimension = 100  # minimum 100px in either dimension
+
+    # 1. Extract images
+    try:
+        images = page.get_images(full=True)
+        for img_index, img_info in enumerate(images):
+            try:
+                xref = img_info[0]
+
+                # Get image bounding box
+                img_rects = page.get_image_rects(xref)
+                if not img_rects:
+                    continue
+
+                rect = img_rects[0]  # Use first occurrence
+
+                # Filter by size
+                img_width = rect.width
+                img_height = rect.height
+                img_area = img_width * img_height
+
+                if img_width < min_dimension or img_height < min_dimension:
+                    continue
+
+                if img_area < min_area_threshold:
+                    continue
+
+                # Render the image region to pixmap
+                mat = fitz.Matrix(2, 2)  # 2x scale for better quality
+                pix = page.get_pixmap(matrix=mat, clip=rect)
+
+                # Convert to PNG bytes
+                img_bytes = pix.tobytes("png")
+
+                # Get description from Gemini
+                context = f"Page {page_num + 1}, Image {img_index + 1}"
+                description = _describe_visual_with_gemini(img_bytes, context)
+
+                if description:
+                    visual_items.append({
+                        "kind": "visual",
+                        "type": "image",
+                        "rect": rect,
+                        "y0": float(rect.y0),
+                        "x0": float(rect.x0),
+                        "description": description,
+                        "context": context,
+                    })
+                    LOGGER.info("Extracted image on page %d: %dx%d px", page_num + 1, int(img_width), int(img_height))
+
+            except Exception as exc:
+                LOGGER.debug("Failed to extract image %d on page %d: %s", img_index, page_num + 1, exc)
+                continue
+
+    except Exception as exc:
+        LOGGER.debug("Failed to get images from page %d: %s", page_num + 1, exc)
+
+    # 2. Extract significant drawings/vector graphics
+    try:
+        drawings = page.get_drawings()
+        if drawings:
+            # Group drawings by proximity to identify significant graphic regions
+            # For now, we'll render the entire page and let smaller drawings be filtered
+            # A more sophisticated approach would cluster drawings by bounding box
+
+            # Calculate bounding box of all drawings
+            if len(drawings) > 5:  # Only process if there are enough drawings to be significant
+                all_rects = []
+                for drawing in drawings:
+                    if "rect" in drawing:
+                        all_rects.append(fitz.Rect(drawing["rect"]))
+
+                if all_rects:
+                    # Find the union of all drawing rects
+                    combined_rect = all_rects[0]
+                    for r in all_rects[1:]:
+                        combined_rect |= r
+
+                    # Filter by size
+                    draw_width = combined_rect.width
+                    draw_height = combined_rect.height
+                    draw_area = draw_width * draw_height
+
+                    if (draw_width >= min_dimension and draw_height >= min_dimension and
+                        draw_area >= min_area_threshold):
+
+                        # Render the drawing region
+                        mat = fitz.Matrix(2, 2)
+                        pix = page.get_pixmap(matrix=mat, clip=combined_rect)
+                        img_bytes = pix.tobytes("png")
+
+                        context = f"Page {page_num + 1}, Drawing/Diagram"
+                        description = _describe_visual_with_gemini(img_bytes, context)
+
+                        if description:
+                            visual_items.append({
+                                "kind": "visual",
+                                "type": "drawing",
+                                "rect": combined_rect,
+                                "y0": float(combined_rect.y0),
+                                "x0": float(combined_rect.x0),
+                                "description": description,
+                                "context": context,
+                            })
+                            LOGGER.info("Extracted drawing on page %d: %dx%d px", page_num + 1, int(draw_width), int(draw_height))
+
+    except Exception as exc:
+        LOGGER.debug("Failed to extract drawings from page %d: %s", page_num + 1, exc)
+
+    return visual_items
+
+
+def _pymupdf_page_to_text(page, page_num: int = 0, extract_visuals: bool = False) -> str:
+    """
+    Extract text from a PyMuPDF page with layout awareness + table preservation + visual extraction.
 
     - Uses page.get_text("blocks") for normal text.
     - Uses page.find_tables() for real tables.
+    - Optionally extracts images and drawings with AI descriptions.
     - Converts tables to Markdown.
-    - Inserts tables in correct reading order based on geometry.
+    - Inserts tables and visual descriptions in correct reading order based on geometry.
     - Avoids duplicating table text from the block output.
+
+    Args:
+        page: PyMuPDF page object
+        page_num: Page number for reference (0-indexed)
+        extract_visuals: Whether to extract and describe visual content
+
+    Returns:
+        Extracted text with inline visual descriptions
     """
     try:
         import fitz  # PyMuPDF
@@ -215,21 +402,37 @@ def _pymupdf_page_to_text(page) -> str:
         if not is_inside_table(item["rect"]):
             filtered_items.append(item)
 
-    # 4. Merge text + tables in reading order
-    all_items = filtered_items + table_items
+    # 4. Extract visual content (images and drawings) if enabled
+    visual_items = []
+    if extract_visuals:
+        try:
+            visual_items = _extract_visual_content_from_page(page, page_num)
+            LOGGER.debug("Extracted %d visual items from page %d", len(visual_items), page_num + 1)
+        except Exception as exc:
+            LOGGER.warning("Visual extraction failed for page %d: %s", page_num + 1, exc)
+
+    # 5. Merge text + tables + visuals in reading order
+    all_items = filtered_items + table_items + visual_items
     if not all_items:
         return ""
 
     all_items.sort(key=lambda i: (round(i["y0"], 1), i["x0"]))
 
-    # 5. Build final markdown-ish text
+    # 6. Build final markdown-ish text with inline visual descriptions
     output_parts: List[str] = []
     for item in all_items:
         if item["kind"] == "text":
             output_parts.append(item["text"])
-        else:  # table
+        elif item["kind"] == "table":
             # Tables already markdown; wrap with spacing for clarity.
             output_parts.append(item["text"])
+        elif item["kind"] == "visual":
+            # Format visual descriptions with clear markers
+            visual_type = item.get("type", "visual").upper()
+            context = item.get("context", "")
+            description = item.get("description", "")
+            visual_block = f"[{visual_type} - {context}]\n{description}\n[/{visual_type}]"
+            output_parts.append(visual_block)
 
     return "\n\n".join(part.strip() for part in output_parts if part.strip())
 
@@ -518,38 +721,47 @@ def _extract_legacy_doc(path: Path) -> str:
 
 def _extract_pdf(path: Path) -> str:
     """
-    Extract from PDF using markdown-first approach.
-    
+    Extract from PDF using markdown-first approach with optional visual extraction.
+
     Tries pymupdf4llm first (best for LLMs), falls back to custom parser.
+    If visual extraction is enabled, processes images and drawings with AI descriptions.
     """
-    
+
+    # Check if visual extraction is enabled
+    from .config import AppConfig
+    try:
+        config = AppConfig.get()
+        extract_visuals = getattr(config, 'visual_extraction_enabled', False)
+    except Exception:
+        extract_visuals = False
+
     # Try high-level markdown extraction first
     #text = extract_with_pymupdf4llm(path)
     #if text:
     #    return text
-    
+
     # Fallback to custom extraction
     try:
         import fitz
-        
+
         with fitz.open(str(path)) as doc:
             page_texts: List[str] = []
-            for page in doc:
-                page_text = _pymupdf_page_to_text(page)
+            for page_num, page in enumerate(doc):
+                page_text = _pymupdf_page_to_text(page, page_num=page_num, extract_visuals=extract_visuals)
                 if page_text.strip():
                     page_texts.append(page_text)
-            
+
             text = "\n\n".join(page_texts)
-            
+
             if len(text.strip()) < 100 and len(doc) > 0:
                 LOGGER.warning("PDF %s yielded minimal text - may be scanned", path.name)
-            
+
             return text
-    
+
     except ImportError:
         LOGGER.debug("PyMuPDF not available, using PyPDF2 for %s", path.name)
         return _extract_pdf_pypdf2(path)
-    
+
     except Exception as exc:
         LOGGER.warning("PyMuPDF failed for %s: %s", path.name, exc)
         return _extract_pdf_pypdf2(path)
