@@ -125,7 +125,7 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
 
         # Use Gemini Flash for fast, cost-effective vision analysis
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash-lite",
             contents=[
                 prompt,
                 {"mime_type": "image/png", "data": image_bytes}
