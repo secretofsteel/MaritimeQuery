@@ -376,6 +376,7 @@ def rebuild_index(app_state: AppState) -> None:
             nodes, index = build_index_from_library()
             app_state.nodes = nodes
             app_state.index = index
+            app_state.invalidate_node_map_cache()  # Clear stale cache
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
@@ -435,10 +436,11 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
             progress_callback=progress_callback,
             clear_gemini_cache=clear_gemini_cache
         )
-        
+
         # Update app state
         app_state.nodes = nodes
         app_state.index = index
+        app_state.invalidate_node_map_cache()  # Clear stale cache
         app_state.vector_retriever = None
         app_state.bm25_retriever = None
         app_state.ensure_retrievers()
@@ -474,6 +476,7 @@ def sync_library(app_state: AppState) -> None:
                 f"✅ Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
             )
             app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()  # Clear stale cache
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
