@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import textwrap
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from llama_index.core.schema import NodeWithScore
@@ -637,8 +638,6 @@ Reply with ONLY ONE WORD: chunk_level, section_level, or document_level"""
 
 def _collect_section_recursively(
     section: Dict[str, Any],
-    doc_tree: Dict[str, Any],
-    nodes: List[Document],
     collected_chunks: List[NodeWithScore],
     node_map: Dict[str, NodeWithScore],
     depth: int = 0,
@@ -649,8 +648,6 @@ def _collect_section_recursively(
 
     Args:
         section: Section node from document tree
-        doc_tree: Full document tree for reference
-        nodes: All indexed chunks
         collected_chunks: Output list to populate
         node_map: Map of node_id -> NodeWithScore for fast lookup
         depth: Current recursion depth
@@ -669,7 +666,7 @@ def _collect_section_recursively(
     # Recursively collect from children
     for child in section.get("children", []):
         _collect_section_recursively(
-            child, doc_tree, nodes, collected_chunks, node_map, depth + 1, max_depth
+            child, collected_chunks, node_map, depth + 1, max_depth
         )
 
 
@@ -767,12 +764,21 @@ def retrieve_hierarchical(
             index_section(section, doc_id)
 
     # Build node map: node_id -> NodeWithScore
+    # Handle both Document and TextNode types safely
     node_map: Dict[str, NodeWithScore] = {}
-    for node in app_state.nodes:
-        node_id = getattr(node, 'node_id', None)
+    for item in app_state.nodes:
+        # Try different ID attributes depending on node type
+        node_id = None
+        if hasattr(item, 'node_id'):
+            node_id = item.node_id
+        elif hasattr(item, 'id_'):
+            node_id = item.id_
+        elif hasattr(item, 'doc_id'):
+            node_id = item.doc_id
+
         if node_id:
             # Create NodeWithScore with default score
-            node_map[node_id] = NodeWithScore(node=node, score=0.5)
+            node_map[node_id] = NodeWithScore(node=item, score=0.5)
 
     # Step 4: Collect complete sections (limited to top_sections)
     collected_chunks: List[NodeWithScore] = []
@@ -790,8 +796,6 @@ def retrieve_hierarchical(
         section_chunks: List[NodeWithScore] = []
         _collect_section_recursively(
             section_node,
-            None,  # doc_tree not needed in this implementation
-            app_state.nodes,
             section_chunks,
             node_map
         )
