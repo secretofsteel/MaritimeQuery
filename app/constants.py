@@ -116,6 +116,12 @@ CONFIDENCE_MEDIUM_THRESHOLD = 55
 MAX_CONTEXT_TURNS = 6  # Hard reset after this many exchanges
 CONTEXT_HISTORY_WINDOW = 5  # Number of recent Q&A pairs to include in prompt
 
+# Hierarchical Retrieval Configuration
+HIERARCHICAL_MAX_SECTIONS = 2  # Maximum sections to retrieve per query
+HIERARCHICAL_MAX_DEPTH = 3  # Maximum recursion depth in section tree
+HIERARCHICAL_MIN_CONTEXT_TOKENS = 500  # Fallback to chunks if less than this
+HIERARCHICAL_MAX_CONTEXT_TOKENS = 8000  # Token budget per query
+
 __all__ = [
     "CHUNK_SIZE",
     "CHUNK_OVERLAP",
@@ -127,4 +133,8 @@ __all__ = [
     "CONFIDENCE_MEDIUM_THRESHOLD",
     "MAX_CONTEXT_TURNS",
     "CONTEXT_HISTORY_WINDOW",
+    "HIERARCHICAL_MAX_SECTIONS",
+    "HIERARCHICAL_MAX_DEPTH",
+    "HIERARCHICAL_MIN_CONTEXT_TOKENS",
+    "HIERARCHICAL_MAX_CONTEXT_TOKENS",
 ]

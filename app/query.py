@@ -19,6 +19,10 @@ from .constants import (
     MAX_CONTEXT_TURNS,
     CONTEXT_HISTORY_WINDOW,
     DEBUG_RAG,
+    HIERARCHICAL_MAX_SECTIONS,
+    HIERARCHICAL_MAX_DEPTH,
+    HIERARCHICAL_MIN_CONTEXT_TOKENS,
+    HIERARCHICAL_MAX_CONTEXT_TOKENS,
 )
 from .indexing import load_document_trees
 from .logger import LOGGER
@@ -641,7 +645,7 @@ def _collect_section_recursively(
     collected_chunks: List[NodeWithScore],
     node_map: Dict[str, NodeWithScore],
     depth: int = 0,
-    max_depth: int = 3
+    max_depth: int = HIERARCHICAL_MAX_DEPTH
 ) -> None:
     """
     Recursively collect all chunks from a section and its subsections.
@@ -673,7 +677,7 @@ def _collect_section_recursively(
 def retrieve_hierarchical(
     query: str,
     app_state: AppState,
-    top_sections: int = 2
+    top_sections: int = HIERARCHICAL_MAX_SECTIONS
 ) -> List[NodeWithScore]:
     """
     Retrieve complete sections hierarchically for procedural queries.
@@ -694,6 +698,11 @@ def retrieve_hierarchical(
         List of NodeWithScore with complete section chunks
     """
     LOGGER.info("🔍 Starting hierarchical retrieval for query: %s", query[:50])
+
+    # Early exit if hierarchical not available
+    if not getattr(app_state, 'hierarchical_enabled', False):
+        LOGGER.warning("Hierarchical retrieval not available, falling back to chunks")
+        return []
 
     # Ensure retrievers are ready
     app_state.ensure_retrievers()
@@ -763,26 +772,13 @@ def retrieve_hierarchical(
         for section in tree.get("sections", []):
             index_section(section, doc_id)
 
-    # Build node map: node_id -> NodeWithScore
-    # Handle both Document and TextNode types safely
-    node_map: Dict[str, NodeWithScore] = {}
-    for item in app_state.nodes:
-        # Try different ID attributes depending on node type
-        node_id = None
-        if hasattr(item, 'node_id'):
-            node_id = item.node_id
-        elif hasattr(item, 'id_'):
-            node_id = item.id_
-        elif hasattr(item, 'doc_id'):
-            node_id = item.doc_id
+    # Build node map: use cached version from AppState
+    node_map = app_state.get_node_map()
 
-        if node_id:
-            # Create NodeWithScore with default score
-            node_map[node_id] = NodeWithScore(node=item, score=0.5)
-
-    # Step 4: Collect complete sections (limited to top_sections)
+    # Step 4: Collect complete sections (limited to top_sections and token budget)
     collected_chunks: List[NodeWithScore] = []
     collected_count = 0
+    total_tokens = 0  # Track token usage for budget enforcement
 
     for doc_id, section_id in section_refs[:top_sections]:
         key = (doc_id, section_id)
@@ -801,10 +797,21 @@ def retrieve_hierarchical(
         )
 
         if section_chunks:
+            # Check token budget before adding
+            section_tokens = sum(len(c.node.text.split()) for c in section_chunks)
+
+            if total_tokens + section_tokens > HIERARCHICAL_MAX_CONTEXT_TOKENS:
+                LOGGER.warning("Token budget exceeded (%d + %d > %d), stopping section collection",
+                              total_tokens, section_tokens, HIERARCHICAL_MAX_CONTEXT_TOKENS)
+                break
+
             collected_chunks.extend(section_chunks)
             collected_count += 1
-            LOGGER.info("Collected %d chunks from section %s (total: %d)",
-                       len(section_chunks), section_id, len(collected_chunks))
+            total_tokens += section_tokens
+
+            LOGGER.info("Collected %d chunks (%d tokens) from section %s (total: %d chunks, %d tokens)",
+                       len(section_chunks), section_tokens, section_id,
+                       len(collected_chunks), total_tokens)
 
     if not collected_chunks:
         LOGGER.warning("No chunks collected from sections, falling back to chunk-level")
@@ -1273,70 +1280,175 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
     else:
         LOGGER.info("🔍 FRESH RETRIEVAL PATH")
         # Fresh retrieval
-        LOGGER.info("Fresh retrieval: topic=%s, scope=%s, context_enabled=%s", 
+        LOGGER.info("Fresh retrieval: topic=%s, scope=%s, context_enabled=%s",
                    current_topic, current_scope, use_conversation_context)
-        
-        while attempt <= max_attempts:
-            if retriever_type == "vector":
-                vector_nodes = vector_retriever.retrieve(query_text)
-                bm25_nodes: List[NodeWithScore] = []
-                nodes = list(vector_nodes)
-            elif retriever_type == "bm25":
-                bm25_nodes = bm25_retriever.retrieve(query_text)
-                vector_nodes = []
-                nodes = list(bm25_nodes)
-            else:
-                vector_nodes = vector_retriever.retrieve(query_text)
-                bm25_nodes = bm25_retriever.retrieve(query_text)
-                nodes = reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=60, top_k=40)
 
-            nodes = _apply_section_score_adjustments(nodes)
+        # ============ HIERARCHICAL RETRIEVAL INTEGRATION ============
+        # Classify retrieval strategy for search intents
+        retrieval_strategy = "chunk_level"  # Default
+        hierarchical_success = False
 
-            if expand_references and nodes:
-                nodes = _expand_references(nodes, vector_retriever)
+        if intent in ["new_query", "follow_up"]:
+            # Only classify strategy for actual search queries
+            retrieval_strategy = classify_retrieval_strategy(query_text)
+            LOGGER.info("📊 Retrieval strategy: %s", retrieval_strategy)
 
-            nodes = include_session_uploads(nodes, query_text)
+            # Route based on strategy
+            if retrieval_strategy == "section_level" and app_state.hierarchical_enabled:
+                # Use hierarchical retrieval for procedural queries
+                LOGGER.info("🔍 Using hierarchical retrieval (section-level)")
 
-            if rerank and USE_RERANKER and cohere_client:
-                try:
-                    documents = [node.node.text[:1000] for node in nodes]
-                    rerank_results = cohere_client.rerank(
-                        model="rerank-v3.5",
-                        query=query_text,
-                        documents=documents,
-                        top_n=min(len(documents), 30),
-                    )
-                    nodes = [
-                        NodeWithScore(node=nodes[result.index].node, score=result.relevance_score)
-                        for result in rerank_results.results
-                    ]
-                except Exception as exc:  # pragma: no cover - optional path
-                    LOGGER.warning("Reranking failed: %s", exc)
+                nodes = retrieve_hierarchical(
+                    query_text,
+                    app_state,
+                    top_sections=HIERARCHICAL_MAX_SECTIONS
+                )
 
-            nodes = maximal_marginal_relevance(nodes, top_k=30, lambda_param=0.6)
-            confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
-            
-            # Apply doc type boosting
-            if doc_type_preference:
-                nodes = _apply_doc_type_boost(nodes, doc_type_preference)
-                LOGGER.info("Applied doc type boost: %s", doc_type_preference)
+                # Fallback: if insufficient context, use chunk-level
+                total_text = "".join([n.node.text for n in nodes]) if nodes else ""
+                if not nodes or len(total_text) < HIERARCHICAL_MIN_CONTEXT_TOKENS:
+                    LOGGER.warning("Hierarchical retrieval insufficient (%d tokens), falling back to chunks",
+                                 len(total_text))
+                    retrieval_strategy = "chunk_level"
+                    # nodes will be retrieved in chunk-level path below
+                else:
+                    LOGGER.info("✅ Hierarchical retrieval: %d chunks from complete sections", len(nodes))
+                    hierarchical_success = True
 
-            current_result = {
-                "attempt": attempt,
-                "query": query_text,
-                "nodes": nodes,
-                "confidence_pct": confidence_pct,
-                "confidence_level": confidence_level,
-                "confidence_note": confidence_note,
-            }
-            if best_result is None or confidence_pct > best_result["confidence_pct"]:
-                best_result = current_result
+                    # Apply post-retrieval processing
+                    nodes = _apply_section_score_adjustments(nodes)
 
-            refinement_history.append({"attempt": attempt, "query": query_text, "confidence": confidence_pct})
+                    if expand_references and nodes:
+                        nodes = _expand_references(nodes, vector_retriever)
 
-            if confidence_pct < confidence_threshold and attempt < max_attempts and auto_refine:
-                prompt = textwrap.dedent(
-                    f"""You are helping to search maritime company documentation (manuals, forms, procedures).
+                    nodes = include_session_uploads(nodes, query_text)
+
+                    # Reranking for hierarchical results (optional)
+                    if rerank and USE_RERANKER and cohere_client:
+                        try:
+                            documents = [node.node.text[:1000] for node in nodes]
+                            rerank_results = cohere_client.rerank(
+                                model="rerank-v3.5",
+                                query=query_text,
+                                documents=documents,
+                                top_n=min(len(documents), 30),
+                            )
+                            nodes = [
+                                NodeWithScore(node=nodes[result.index].node, score=result.relevance_score)
+                                for result in rerank_results.results
+                            ]
+                        except Exception as exc:  # pragma: no cover - optional path
+                            LOGGER.warning("Reranking failed: %s", exc)
+
+                    # Calculate confidence
+                    confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+
+                    # Set best_result for hierarchical path
+                    best_result = {
+                        "attempt": 1,
+                        "query": query_text,
+                        "nodes": nodes,
+                        "confidence_pct": confidence_pct,
+                        "confidence_level": confidence_level,
+                        "confidence_note": f"{confidence_note} (hierarchical)",
+                    }
+                    final_query_used = query_text
+                    attempt = 1
+
+            elif retrieval_strategy == "document_level":
+                # Not implemented yet - fall back to section_level
+                LOGGER.info("Document-level not implemented, using section-level")
+                # Try hierarchical with more sections
+                if app_state.hierarchical_enabled:
+                    nodes = retrieve_hierarchical(query_text, app_state, top_sections=3)
+
+                    total_text = "".join([n.node.text for n in nodes]) if nodes else ""
+                    if nodes and len(total_text) >= HIERARCHICAL_MIN_CONTEXT_TOKENS:
+                        hierarchical_success = True
+                        nodes = _apply_section_score_adjustments(nodes)
+                        nodes = include_session_uploads(nodes, query_text)
+                        confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+                        best_result = {
+                            "attempt": 1,
+                            "query": query_text,
+                            "nodes": nodes,
+                            "confidence_pct": confidence_pct,
+                            "confidence_level": confidence_level,
+                            "confidence_note": f"{confidence_note} (hierarchical)",
+                        }
+                        final_query_used = query_text
+                        attempt = 1
+                    else:
+                        retrieval_strategy = "chunk_level"
+                else:
+                    retrieval_strategy = "chunk_level"
+
+        # If strategy is chunk_level OR hierarchical failed, use existing retrieval
+        if retrieval_strategy == "chunk_level" or not hierarchical_success:
+            if retrieval_strategy == "chunk_level":
+                LOGGER.info("🔍 Using chunk-level retrieval")
+
+            while attempt <= max_attempts:
+                if retriever_type == "vector":
+                    vector_nodes = vector_retriever.retrieve(query_text)
+                    bm25_nodes: List[NodeWithScore] = []
+                    nodes = list(vector_nodes)
+                elif retriever_type == "bm25":
+                    bm25_nodes = bm25_retriever.retrieve(query_text)
+                    vector_nodes = []
+                    nodes = list(bm25_nodes)
+                else:
+                    vector_nodes = vector_retriever.retrieve(query_text)
+                    bm25_nodes = bm25_retriever.retrieve(query_text)
+                    nodes = reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=60, top_k=40)
+
+                nodes = _apply_section_score_adjustments(nodes)
+
+                if expand_references and nodes:
+                    nodes = _expand_references(nodes, vector_retriever)
+
+                nodes = include_session_uploads(nodes, query_text)
+
+                if rerank and USE_RERANKER and cohere_client:
+                    try:
+                        documents = [node.node.text[:1000] for node in nodes]
+                        rerank_results = cohere_client.rerank(
+                            model="rerank-v3.5",
+                            query=query_text,
+                            documents=documents,
+                            top_n=min(len(documents), 30),
+                        )
+                        nodes = [
+                            NodeWithScore(node=nodes[result.index].node, score=result.relevance_score)
+                            for result in rerank_results.results
+                        ]
+                    except Exception as exc:  # pragma: no cover - optional path
+                        LOGGER.warning("Reranking failed: %s", exc)
+
+                nodes = maximal_marginal_relevance(nodes, top_k=30, lambda_param=0.6)
+                confidence_pct, confidence_level, confidence_note = calculate_confidence(nodes)
+
+                # Apply doc type boosting
+                if doc_type_preference:
+                    nodes = _apply_doc_type_boost(nodes, doc_type_preference)
+                    LOGGER.info("Applied doc type boost: %s", doc_type_preference)
+
+                current_result = {
+                    "attempt": attempt,
+                    "query": query_text,
+                    "nodes": nodes,
+                    "confidence_pct": confidence_pct,
+                    "confidence_level": confidence_level,
+                    "confidence_note": confidence_note,
+                }
+                if best_result is None or confidence_pct > best_result["confidence_pct"]:
+                    best_result = current_result
+
+                refinement_history.append({"attempt": attempt, "query": query_text, "confidence": confidence_pct})
+
+                if confidence_pct < confidence_threshold and attempt < max_attempts and auto_refine:
+                    prompt = textwrap.dedent(
+                        f"""You are helping to search maritime company documentation (manuals, forms, procedures).
 
 Original question: "{query_text}"
 
@@ -1350,12 +1462,12 @@ Avoid fancy language. Use simple words that would appear in a company manual.
 Previous attempts: {[entry['query'] for entry in refinement_history]}
 
 Rephrase this question to better match maritime documentation language. Do not over-complicate the language. Do not repeat the question as phrased by the user. Return ONLY the rephrased question, nothing else."""
-                )
-                refined = LlamaSettings.llm.complete(prompt)
-                query_text = refined.text.strip().strip('"').strip("'")
-                attempt += 1
-                continue
-            break
+                    )
+                    refined = LlamaSettings.llm.complete(prompt)
+                    query_text = refined.text.strip().strip('"').strip("'")
+                    attempt += 1
+                    continue
+                break
         
         if DEBUG_RAG:
             LOGGER.info("DEBUG: Fresh retrieval complete, nodes: %d", len(nodes))
@@ -1536,6 +1648,15 @@ Please provide a clear, concise answer with proper citations."""
         if hasattr(app_state, 'last_scope'):
             app_state.last_scope = current_scope
 
+    # Calculate sections retrieved for hierarchical
+    sections_retrieved_count = 0
+    if 'retrieval_strategy' in locals() and retrieval_strategy == "section_level":
+        sections_retrieved_count = len(set(
+            n.node.metadata.get('section_id')
+            for n in nodes
+            if n.node.metadata.get('section_id')
+        ))
+
     result = {
         "query": original_query,
         "topic_extracted": current_topic,
@@ -1552,6 +1673,8 @@ Please provide a clear, concise answer with proper citations."""
         "sources": sources_info,
         "num_sources": len(nodes),
         "retriever_type": retrieval_mode,
+        "retrieval_strategy": retrieval_strategy if 'retrieval_strategy' in locals() else "chunk_level",
+        "sections_retrieved": sections_retrieved_count,
         "context_mode": use_conversation_context,
         "context_turn": app_state.context_turn_count if use_conversation_context else 0,
         "context_reset_note": context_reset_note,

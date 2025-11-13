@@ -53,14 +53,11 @@ def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = Tr
         section_id = None
         if assign_section_ids and metadata.get("section"):
             section_name = metadata["section"]
-            # Parse section ID using same logic as extraction
-            import re
-            match = re.match(r'^([\d\.]+)\.?\s+(.+)$', section_name.strip())
-            if match:
-                section_id = match.group(1).rstrip('.')
-            else:
-                # Non-numbered section - use the section name as ID
-                section_id = section_name.strip()
+            # Use extraction function for consistency
+            from .extraction import _parse_section_identifier
+            parsed = _parse_section_identifier(section_name)
+            if parsed:
+                section_id = parsed["section_id"]
 
         for chunk_text in parser.split_text(document.text):
             full_text = f"{header}\n---\n{chunk_text}"
