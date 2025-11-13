@@ -19,6 +19,7 @@ from .constants import (
     CONTEXT_HISTORY_WINDOW,
     DEBUG_RAG,
 )
+from .indexing import load_document_trees
 from .logger import LOGGER
 from .state import AppState
 
@@ -555,6 +556,347 @@ Reply with ONLY the category name, nothing else."""
         LOGGER.warning("LLM intent classification failed: %s, falling back to heuristic", exc)
         # Fallback to simple heuristic
         return _classify_query_intent_heuristic(query)
+
+
+def classify_retrieval_strategy(query: str) -> str:
+    """
+    Classify query to determine retrieval strategy.
+
+    Uses Gemini Flash Lite to detect procedural queries that benefit from section-level retrieval.
+
+    Args:
+        query: User query text
+
+    Returns:
+        "chunk_level" - Specific facts, details (existing behavior)
+        "section_level" - Procedural queries, how-to, procedures, steps
+        "document_level" - Full document context needed (not implemented yet)
+    """
+    prompt = f"""Classify this maritime query into ONE retrieval strategy:
+
+Query: "{query}"
+
+STRATEGIES:
+
+1. **chunk_level** - Specific facts, discrete details, single data points
+   Examples:
+   - "What is the discharge temperature limit?"
+   - "What's the max ballast capacity?"
+   - "Who is responsible for safety equipment?"
+   - "What PPE is required for deck work?"
+
+2. **section_level** - Procedural queries needing complete instructions/context
+   Examples:
+   - "What is the ballast discharge procedure?"
+   - "How do I handle ice navigation?"
+   - "What are the steps for drug testing?"
+   - "What is the procedure for reporting incidents?"
+   - "How to conduct fire drills?"
+
+3. **document_level** - Needs full document overview (rare)
+   Examples:
+   - "Summarize the safety manual"
+   - "What's covered in the ISM code?"
+
+RULES:
+- If query asks "how to", "procedure", "steps", "process" → section_level
+- If query asks "what is [specific fact]" → chunk_level
+- If query asks for summary/overview → document_level
+- When in doubt, default to chunk_level
+
+Reply with ONLY ONE WORD: chunk_level, section_level, or document_level"""
+
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+            ),
+        )
+
+        classification = response.text.strip().lower()
+
+        # Validate and extract
+        if "section_level" in classification or "section-level" in classification:
+            LOGGER.info("Query strategy: section_level (procedural)")
+            return "section_level"
+        elif "document_level" in classification or "document-level" in classification:
+            LOGGER.info("Query strategy: document_level (overview)")
+            return "document_level"
+        else:
+            # Default to chunk_level
+            LOGGER.info("Query strategy: chunk_level (specific facts)")
+            return "chunk_level"
+
+    except Exception as exc:
+        LOGGER.warning("Strategy classification failed: %s, defaulting to chunk_level", exc)
+        return "chunk_level"
+
+
+def _collect_section_recursively(
+    section: Dict[str, Any],
+    doc_tree: Dict[str, Any],
+    nodes: List[Document],
+    collected_chunks: List[NodeWithScore],
+    node_map: Dict[str, NodeWithScore],
+    depth: int = 0,
+    max_depth: int = 3
+) -> None:
+    """
+    Recursively collect all chunks from a section and its subsections.
+
+    Args:
+        section: Section node from document tree
+        doc_tree: Full document tree for reference
+        nodes: All indexed chunks
+        collected_chunks: Output list to populate
+        node_map: Map of node_id -> NodeWithScore for fast lookup
+        depth: Current recursion depth
+        max_depth: Maximum recursion depth to prevent infinite loops
+    """
+    if depth > max_depth:
+        LOGGER.warning("Max depth reached in section recursion")
+        return
+
+    # Collect chunks from this section
+    chunk_ids = section.get("chunk_ids", [])
+    for chunk_id in chunk_ids:
+        if chunk_id in node_map:
+            collected_chunks.append(node_map[chunk_id])
+
+    # Recursively collect from children
+    for child in section.get("children", []):
+        _collect_section_recursively(
+            child, doc_tree, nodes, collected_chunks, node_map, depth + 1, max_depth
+        )
+
+
+def retrieve_hierarchical(
+    query: str,
+    app_state: AppState,
+    top_sections: int = 2
+) -> List[NodeWithScore]:
+    """
+    Retrieve complete sections hierarchically for procedural queries.
+
+    Process:
+    1. Use existing hybrid_search to find top 5 relevant chunks
+    2. Extract section_ids from those chunks
+    3. Load document_trees.json
+    4. For each section_id, fetch complete section (all chunks + subsections recursively)
+    5. Return structured sections with hierarchy preserved
+
+    Args:
+        query: User query
+        app_state: Application state with retrievers and nodes
+        top_sections: Maximum number of sections to retrieve (token budget)
+
+    Returns:
+        List of NodeWithScore with complete section chunks
+    """
+    LOGGER.info("🔍 Starting hierarchical retrieval for query: %s", query[:50])
+
+    # Ensure retrievers are ready
+    app_state.ensure_retrievers()
+    vector_retriever = app_state.vector_retriever
+    bm25_retriever = app_state.bm25_retriever
+
+    if not vector_retriever or not bm25_retriever:
+        LOGGER.error("Retrievers not initialized")
+        return []
+
+    # Step 1: Use hybrid search to find top relevant chunks
+    vector_results = vector_retriever.retrieve(query)
+    bm25_results = bm25_retriever.retrieve(query)
+    hybrid_results = reciprocal_rank_fusion(vector_results, bm25_results, k=60, top_k=10)
+
+    if not hybrid_results:
+        LOGGER.warning("No hybrid results found")
+        return []
+
+    # Step 2: Extract section_ids and document sources from top chunks
+    section_refs: List[Tuple[str, str]] = []  # (doc_id, section_id)
+    seen_sections = set()
+
+    for node_with_score in hybrid_results[:5]:  # Top 5 chunks to find sections
+        metadata = node_with_score.node.metadata
+        source = metadata.get("source", "")
+        section_id = metadata.get("section_id")
+
+        if not section_id or not source:
+            continue
+
+        doc_id = Path(source).stem
+        key = (doc_id, section_id)
+
+        if key not in seen_sections:
+            section_refs.append(key)
+            seen_sections.add(key)
+
+    if not section_refs:
+        LOGGER.warning("No section_ids found in top chunks, falling back to chunk-level")
+        return hybrid_results
+
+    LOGGER.info("Found %d unique sections from top chunks", len(section_refs))
+
+    # Step 3: Load document trees
+    config = AppConfig.get()
+    trees_path = config.paths.cache_dir / "document_trees.json"
+    document_trees = load_document_trees(trees_path)
+
+    if not document_trees:
+        LOGGER.warning("No document trees available, falling back to chunk-level")
+        return hybrid_results
+
+    # Build tree index: (doc_id, section_id) -> section_node
+    tree_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def index_section(section: Dict[str, Any], doc_id: str):
+        """Recursively index all sections."""
+        section_id = section.get("section_id")
+        if section_id:
+            tree_index[(doc_id, section_id)] = section
+        for child in section.get("children", []):
+            index_section(child, doc_id)
+
+    for tree in document_trees:
+        doc_id = tree.get("doc_id", "")
+        for section in tree.get("sections", []):
+            index_section(section, doc_id)
+
+    # Build node map: node_id -> NodeWithScore
+    node_map: Dict[str, NodeWithScore] = {}
+    for node in app_state.nodes:
+        node_id = getattr(node, 'node_id', None)
+        if node_id:
+            # Create NodeWithScore with default score
+            node_map[node_id] = NodeWithScore(node=node, score=0.5)
+
+    # Step 4: Collect complete sections (limited to top_sections)
+    collected_chunks: List[NodeWithScore] = []
+    collected_count = 0
+
+    for doc_id, section_id in section_refs[:top_sections]:
+        key = (doc_id, section_id)
+        if key not in tree_index:
+            LOGGER.warning("Section (%s, %s) not found in tree index", doc_id, section_id)
+            continue
+
+        section_node = tree_index[key]
+
+        # Collect this section and all subsections recursively
+        section_chunks: List[NodeWithScore] = []
+        _collect_section_recursively(
+            section_node,
+            None,  # doc_tree not needed in this implementation
+            app_state.nodes,
+            section_chunks,
+            node_map
+        )
+
+        if section_chunks:
+            collected_chunks.extend(section_chunks)
+            collected_count += 1
+            LOGGER.info("Collected %d chunks from section %s (total: %d)",
+                       len(section_chunks), section_id, len(collected_chunks))
+
+    if not collected_chunks:
+        LOGGER.warning("No chunks collected from sections, falling back to chunk-level")
+        return hybrid_results
+
+    LOGGER.info("✅ Hierarchical retrieval complete: %d sections, %d total chunks",
+               collected_count, len(collected_chunks))
+
+    return collected_chunks
+
+
+def format_hierarchical_context(
+    nodes: List[NodeWithScore],
+    document_trees: List[Dict[str, Any]]
+) -> str:
+    """
+    Format hierarchical sections as structured markdown with proper indentation.
+
+    Example output:
+        ## 3. Discharge Procedure
+        [Source: Ballast Water Management, Section 3]
+
+          ### 3.1 Pre-Discharge Preparation
+          [content from chunks]
+
+            #### 3.1.1 Verify Tank Levels
+            [content]
+
+    Args:
+        nodes: Retrieved chunks with section_id metadata
+        document_trees: Document tree structures for hierarchy info
+
+    Returns:
+        Formatted markdown string with hierarchical structure
+    """
+    # Group chunks by (doc_id, section_id)
+    section_chunks: Dict[Tuple[str, str], List[NodeWithScore]] = {}
+
+    for node in nodes:
+        metadata = node.node.metadata
+        source = metadata.get("source", "")
+        section_id = metadata.get("section_id")
+
+        if not section_id:
+            continue
+
+        doc_id = Path(source).stem
+        key = (doc_id, section_id)
+
+        if key not in section_chunks:
+            section_chunks[key] = []
+
+        section_chunks[key].append(node)
+
+    # Build tree index for lookup
+    tree_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def index_section(section: Dict[str, Any], doc_id: str):
+        section_id = section.get("section_id")
+        if section_id:
+            tree_index[(doc_id, section_id)] = section
+        for child in section.get("children", []):
+            index_section(child, doc_id)
+
+    for tree in document_trees:
+        doc_id = tree.get("doc_id", "")
+        for section in tree.get("sections", []):
+            index_section(section, doc_id)
+
+    # Build formatted output
+    output_parts = []
+
+    for (doc_id, section_id), chunks in section_chunks.items():
+        # Lookup section info
+        section_info = tree_index.get((doc_id, section_id), {})
+        title = section_info.get("title", section_id)
+        level = section_info.get("level", 1)
+
+        # Markdown heading based on level
+        heading_prefix = "#" * (level + 1)  # level 1 → ##, level 2 → ###, etc.
+        indent = "  " * (level - 1)  # Indentation for visual hierarchy
+
+        # Format section header
+        output_parts.append(f"\n{indent}{heading_prefix} {section_id}. {title}")
+        output_parts.append(f"{indent}[Source: {doc_id}, Section {section_id}]\n")
+
+        # Add chunk content
+        for chunk in chunks:
+            content = chunk.node.text
+            # Remove metadata header if present (starts with "Document:")
+            if "\n---\n" in content:
+                content = content.split("\n---\n", 1)[1]
+
+            output_parts.append(f"{indent}{content}\n")
+
+    return "\n".join(output_parts)
 
 
 def _classify_query_intent_heuristic(query: str) -> str:
@@ -1223,4 +1565,11 @@ Please provide a clear, concise answer with proper citations."""
     return result
 
 
-__all__ = ["calculate_confidence", "reciprocal_rank_fusion", "query_with_confidence"]
+__all__ = [
+    "calculate_confidence",
+    "reciprocal_rank_fusion",
+    "query_with_confidence",
+    "classify_retrieval_strategy",
+    "retrieve_hierarchical",
+    "format_hierarchical_context",
+]
