@@ -8,6 +8,7 @@ import re
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from google.genai import types
 
 import pandas as pd
 
@@ -108,6 +109,7 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
         Description text or None if failed
     """
     try:
+        from google.genai import types
         from .config import AppConfig
 
         config = AppConfig.get()
@@ -115,9 +117,9 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
 
         # Create a prompt for technical manual visual extraction
         prompt = (
-            "You are reading a technical manual. Describe this diagram, chart, image, or drawing "
-            "in a few concise sentences. Preserve all labels, units, measurements, conditions, "
-            "table-like information, and key visual relationships. Be specific and technical."
+            "You are reading a technical manual. Describe in detail this diagram, chart, image, or drawing "
+            "Preserve all labels, units, measurements, conditions, table-like information, information flow if flowchart, and key visual relationships"
+            "Be specific and technical. Use bullet points and tables if needed."
         )
 
         if context:
@@ -127,8 +129,13 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
         response = client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=[
-                prompt,
-                {"mime_type": "image/png", "data": image_bytes}
+                types.Part(text=prompt),
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type="image/png",
+                        data=image_bytes
+                    )
+                )
             ]
         )
 
@@ -141,10 +148,12 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
         LOGGER.warning("Gemini vision API failed: %s", exc)
         return None
 
-
 def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any]]:
     """
     Extract images and significant drawings from a PDF page.
+    
+    Uses PyMuPDF's cluster_drawings() to intelligently group nearby vector paths
+    into coherent diagrams, avoiding scattered decorative elements.
 
     Args:
         page: PyMuPDF page object
@@ -160,32 +169,40 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
 
     visual_items = []
     page_area = page.rect.width * page.rect.height
-    min_area_threshold = page_area * 0.10  # 10% of page area
-    min_dimension = 100  # minimum 100px in either dimension
+    
+    # Separate thresholds for images vs drawings
+    # Images: more permissive - catch smaller but meaningful content
+    image_min_area_threshold = page_area * 0.05  
+    image_min_dimension = 100  
+    
+    # Drawings: more restrictive - only catch large diagrams
+    drawing_min_area_threshold = page_area * 0.30 
+    drawing_min_dimension = 150  
 
-    # 1. Extract images
+    # 1. Extract embedded images
     try:
         images = page.get_images(full=True)
         for img_index, img_info in enumerate(images):
             try:
                 xref = img_info[0]
 
-                # Get image bounding box
+                # Get image bounding box (rendered size on page, not pixel dimensions)
                 img_rects = page.get_image_rects(xref)
                 if not img_rects:
                     continue
 
                 rect = img_rects[0]  # Use first occurrence
 
-                # Filter by size
+                # Filter by RENDERED size on page
                 img_width = rect.width
                 img_height = rect.height
                 img_area = img_width * img_height
 
-                if img_width < min_dimension or img_height < min_dimension:
+                # Skip small images (icons, logos, decorative elements)
+                if img_width < image_min_dimension or img_height < image_min_dimension:
                     continue
 
-                if img_area < min_area_threshold:
+                if img_area < image_min_area_threshold:
                     continue
 
                 # Render the image region to pixmap
@@ -209,7 +226,7 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
                         "description": description,
                         "context": context,
                     })
-                    LOGGER.info("Extracted image on page %d: %dx%d px", page_num + 1, int(img_width), int(img_height))
+                    LOGGER.info("Extracted image on page %d: %dx%d pts", page_num + 1, int(img_width), int(img_height))
 
             except Exception as exc:
                 LOGGER.debug("Failed to extract image %d on page %d: %s", img_index, page_num + 1, exc)
@@ -218,57 +235,64 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
     except Exception as exc:
         LOGGER.debug("Failed to get images from page %d: %s", page_num + 1, exc)
 
-    # 2. Extract significant drawings/vector graphics
+    # 2. Extract significant vector graphics clusters
     try:
-        drawings = page.get_drawings()
-        if drawings:
-            # Group drawings by proximity to identify significant graphic regions
-            # For now, we'll render the entire page and let smaller drawings be filtered
-            # A more sophisticated approach would cluster drawings by bounding box
+        # Use PyMuPDF's intelligent clustering to group nearby drawings
+        # tolerance=5 means drawings within 5 points are considered part of same cluster
+        drawing_clusters = page.cluster_drawings(x_tolerance=10, y_tolerance=10)
 
-            # Calculate bounding box of all drawings
-            if len(drawings) > 5:  # Only process if there are enough drawings to be significant
-                all_rects = []
-                for drawing in drawings:
-                    if "rect" in drawing:
-                        all_rects.append(fitz.Rect(drawing["rect"]))
-
-                if all_rects:
-                    # Find the union of all drawing rects
-                    combined_rect = all_rects[0]
-                    for r in all_rects[1:]:
-                        combined_rect |= r
-
-                    # Filter by size
-                    draw_width = combined_rect.width
-                    draw_height = combined_rect.height
-                    draw_area = draw_width * draw_height
-
-                    if (draw_width >= min_dimension and draw_height >= min_dimension and
-                        draw_area >= min_area_threshold):
-
-                        # Render the drawing region
-                        mat = fitz.Matrix(2, 2)
-                        pix = page.get_pixmap(matrix=mat, clip=combined_rect)
-                        img_bytes = pix.tobytes("png")
-
-                        context = f"Page {page_num + 1}, Drawing/Diagram"
-                        description = _describe_visual_with_gemini(img_bytes, context)
-
-                        if description:
-                            visual_items.append({
-                                "kind": "visual",
-                                "type": "drawing",
-                                "rect": combined_rect,
-                                "y0": float(combined_rect.y0),
-                                "x0": float(combined_rect.x0),
-                                "description": description,
-                                "context": context,
-                            })
-                            LOGGER.info("Extracted drawing on page %d: %dx%d px", page_num + 1, int(draw_width), int(draw_height))
+        if drawing_clusters is None:
+            drawing_clusters = []
+        
+        if drawing_clusters:
+            LOGGER.debug("Found %d drawing clusters on page %d", len(drawing_clusters), page_num + 1)
+            
+            for cluster_idx, cluster_rect in enumerate(drawing_clusters):
+                # Filter by size - only process large clusters (likely real diagrams)
+                cluster_width = cluster_rect.width
+                cluster_height = cluster_rect.height
+                cluster_area = cluster_width * cluster_height
+                
+                # Skip small clusters (borders, caution boxes, scattered lines)
+                if cluster_width < drawing_min_dimension or cluster_height < drawing_min_dimension:
+                    LOGGER.debug("Skipping small cluster %d on page %d: %dx%d pts", 
+                                cluster_idx, page_num + 1, int(cluster_width), int(cluster_height))
+                    continue
+                
+                if cluster_area < drawing_min_area_threshold:
+                    LOGGER.debug("Skipping cluster %d on page %d: area %.1f%% of page", 
+                                cluster_idx, page_num + 1, (cluster_area / page_area) * 100)
+                    continue
+                
+                # This is a significant diagram - render and describe it
+                try:
+                    mat = fitz.Matrix(2, 2)  # 2x scale for better quality
+                    pix = page.get_pixmap(matrix=mat, clip=cluster_rect)
+                    img_bytes = pix.tobytes("png")
+                    
+                    context = f"Page {page_num + 1}, Diagram/Flowchart {cluster_idx + 1}"
+                    description = _describe_visual_with_gemini(img_bytes, context)
+                    
+                    if description:
+                        visual_items.append({
+                            "kind": "visual",
+                            "type": "drawing",
+                            "rect": cluster_rect,
+                            "y0": float(cluster_rect.y0),
+                            "x0": float(cluster_rect.x0),
+                            "description": description,
+                            "context": context,
+                        })
+                        LOGGER.info("Extracted drawing cluster on page %d: %dx%d pts (%.1f%% of page)", 
+                                   page_num + 1, int(cluster_width), int(cluster_height), 
+                                   (cluster_area / page_area) * 100)
+                
+                except Exception as exc:
+                    LOGGER.debug("Failed to render cluster %d on page %d: %s", cluster_idx, page_num + 1, exc)
+                    continue
 
     except Exception as exc:
-        LOGGER.debug("Failed to extract drawings from page %d: %s", page_num + 1, exc)
+        LOGGER.debug("Failed to extract drawing clusters from page %d: %s", page_num + 1, exc)
 
     return visual_items
 
