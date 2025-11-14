@@ -137,7 +137,7 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     char_count = len(full_text)
     
     # Route based on document size
-    if char_count > 250_000:
+    if char_count > 200_000:
         LOGGER.info("Large document detected (%d chars), using multi-pass extraction for %s", 
                    char_count, path.name)
         return _gemini_extract_large_document(path, full_text, max_retries)
@@ -415,7 +415,7 @@ def _gemini_extract_chunk_with_resume(
     already_completed_sections: List[str],  # NEW PARAMETER
     last_completed: Optional[str],
     is_first_pass: bool,
-    max_retries: int = 2
+    max_retries: int = 0
 ) -> Dict[str, Any]:
     """
     Extract section content from a text chunk with resume capability.
@@ -473,6 +473,7 @@ Complete section list YOU identified (for reference):
 3. Skip any sections already in the "ALREADY COMPLETED" list
 4. Stop naturally at a section boundary when approaching output limits
 5. Ensure every section you include has its full content
+6. ALWAYS properly close JSON output
 
 Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
 Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
@@ -655,7 +656,7 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
     LOGGER.info("Structure extracted: %d sections identified", len(section_names))
     
     # Create overlapping chunks
-    chunks = _create_overlapping_chunks(full_text, chunk_size=150_000, overlap=10_000)
+    chunks = _create_overlapping_chunks(full_text, chunk_size=100_000, overlap=7_000)
     LOGGER.info("Document split into %d chunks for processing", len(chunks))
     
     # Multi-pass content extraction
