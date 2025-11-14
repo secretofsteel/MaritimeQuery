@@ -975,6 +975,7 @@ def query_with_confidence(
     expand_references: bool = True,
     rerank: bool = False,
     use_conversation_context: bool = False,
+    enable_hierarchical: bool = True,
 ) -> Dict[str, Any]:
     # ============ INTENT CLASSIFICATION ============
     intent = _classify_query_intent_llm(query_text, app_state)
@@ -1294,7 +1295,7 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
             LOGGER.info("📊 Retrieval strategy: %s", retrieval_strategy)
 
             # Route based on strategy
-            if retrieval_strategy == "section_level" and app_state.hierarchical_enabled:
+            if retrieval_strategy == "section_level" and app_state.hierarchical_enabled and enable_hierarchical:
                 # Use hierarchical retrieval for procedural queries
                 LOGGER.info("🔍 Using hierarchical retrieval (section-level)")
 
