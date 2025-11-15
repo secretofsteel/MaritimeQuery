@@ -58,11 +58,13 @@ class AppState:
     session_upload_manager: Optional[SessionUploadManager] = None
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
+    _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
+    hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
 
     def ensure_index_loaded(self) -> bool:
         """
         Lazy-load the index if not already present.
-        
+
         Returns:
             True if index is ready (loaded or already present)
             False if index could not be loaded
@@ -74,29 +76,32 @@ class AppState:
             # Fallback for non-Streamlit contexts (testing, etc.)
             LOGGER.warning("Streamlit not available, using in-memory flag for index loading")
             st = None
-        
+
         # Already loaded and ready
         if self.nodes and self.index:
             LOGGER.debug("Index already loaded: %d nodes", len(self.nodes))
+            # Check hierarchical support if not already checked
+            if not self.hierarchical_enabled:
+                self._validate_hierarchical_support()
             return True
-        
+
         # Check session state flag (persistent across Streamlit reruns)
         if st is not None:
             if "index_load_attempted" not in st.session_state:
                 st.session_state["index_load_attempted"] = False
-            
+
             # Already tried and failed, don't spam attempts
             if st.session_state["index_load_attempted"] and not self.nodes:
                 LOGGER.debug("Index load previously failed, skipping retry")
                 return False
-            
+
             # Mark that we're attempting to load
             st.session_state["index_load_attempted"] = True
-        
+
         LOGGER.info("Attempting to load cached index...")
         try:
             nodes, index = load_cached_nodes_and_index()
-            
+
             if nodes and index:
                 self.nodes = nodes
                 self.index = index
@@ -104,17 +109,21 @@ class AppState:
                 self.vector_retriever = None
                 self.bm25_retriever = None
                 self.ensure_retrievers()
-                
+
                 # Update manager if it exists
                 if self.manager:
                     self.manager.nodes = nodes
-                
+
                 LOGGER.info("Successfully loaded %d cached nodes", len(nodes))
+
+                # Validate hierarchical support
+                self._validate_hierarchical_support()
+
                 return True
             else:
                 LOGGER.warning("No cached index found. User must build index first.")
                 return False
-                
+
         except Exception as exc:
             LOGGER.exception("Failed to load cached index: %s", exc)
             return False
@@ -372,6 +381,60 @@ class AppState:
             log_path.unlink()
         self.history_loaded = True
         LOGGER.info("History cleared")
+
+    def _validate_hierarchical_support(self) -> None:
+        """Validate that document trees exist for hierarchical retrieval."""
+        config = AppConfig.get()
+        trees_path = config.paths.cache_dir / "document_trees.json"
+
+        if not trees_path.exists():
+            LOGGER.warning("⚠️  Document trees not found at %s", trees_path)
+            LOGGER.warning("   Hierarchical retrieval is DISABLED")
+            LOGGER.warning("   To enable: Rebuild index via Admin → Full Rebuild")
+            self.hierarchical_enabled = False
+        else:
+            from .indexing import load_document_trees
+            trees = load_document_trees(trees_path)
+            if trees:
+                LOGGER.info("✅ Loaded %d document trees - hierarchical retrieval ENABLED", len(trees))
+                self.hierarchical_enabled = True
+            else:
+                LOGGER.warning("⚠️  Document trees file empty - hierarchical retrieval DISABLED")
+                self.hierarchical_enabled = False
+
+    def get_node_map(self) -> Dict[str, Any]:
+        """
+        Get or build cached node map for hierarchical retrieval.
+
+        Returns:
+            Dictionary mapping node_id -> NodeWithScore
+        """
+        if self._node_map_cache is None:
+            from llama_index.core.schema import NodeWithScore
+
+            node_map: Dict[str, Any] = {}
+            for item in self.nodes:
+                # Get node_id (handles multiple attribute names)
+                node_id = None
+                if hasattr(item, 'node_id'):
+                    node_id = item.node_id
+                elif hasattr(item, 'id_'):
+                    node_id = item.id_
+                elif hasattr(item, 'doc_id'):
+                    node_id = item.doc_id
+
+                if node_id:
+                    node_map[node_id] = NodeWithScore(node=item, score=0.5)
+
+            self._node_map_cache = node_map
+            LOGGER.info("Built node map cache with %d entries", len(node_map))
+
+        return self._node_map_cache
+
+    def invalidate_node_map_cache(self) -> None:
+        """Invalidate node map cache when index is rebuilt."""
+        self._node_map_cache = None
+        LOGGER.debug("Node map cache invalidated")
 
 
 __all__ = ["AppState"]

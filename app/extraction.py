@@ -97,19 +97,111 @@ Filename: {path.name}"""
     return data
 
 
-def _parse_json_response(raw: str) -> Dict[str, Any]:
-    """Parse a JSON string, removing code fences and trailing commas if necessary."""
-    json_match = re.search(r"```(?:json)?\s*\n*(.*?)\s*\n*```", raw, re.DOTALL)
-    json_str = json_match.group(1).strip() if json_match else raw.strip()
+def _parse_json_response(raw: str, *, allow_repair: bool = True) -> Dict[str, Any]:
+    """
+    Parse a JSON response from Gemini with extra robustness.
+
+    Steps:
+    - Prefer fenced ```json blocks if present
+    - Trim to the substring between the first '{' and last '}'
+    - Strip nasty control characters
+    - Try normal parse, then trailing-comma fix
+    - Optionally ask Gemini to repair its own broken JSON
+    """
+    if not raw:
+        raise ValueError("Empty JSON response from Gemini")
+
+    # 1) Prefer ```json fences if present
+    fence_match = re.search(r"```(?:json)?\s*\n*(.*?)\s*```", raw, re.DOTALL)
+    json_str = fence_match.group(1) if fence_match else raw
+    json_str = json_str.strip()
     if not json_str:
-        raise ValueError("Empty JSON response")
+        raise ValueError("Empty JSON after stripping fences")
+
+    # 2) Trim to the main JSON object between first '{' and last '}'
+    start = json_str.find("{")
+    end = json_str.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        json_str = json_str[start : end + 1]
+
+    # 3) Strip non-printable control characters (keep \n, \t)
+    json_str = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", json_str)
+
+    # 4) First parse attempt
     try:
         return json.loads(json_str)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("Primary JSON parse failed: %s", exc)
+
+    # 5) Try trailing-comma fix
+    try:
         corrected = re.sub(r",\s*([\]}])", r"\1", json_str)
         return json.loads(corrected)
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("JSON parse failed after comma fix: %s", exc)
 
-@time_function
+    # 6) Optional repair with Gemini itself
+    if allow_repair:
+        LOGGER.warning("Attempting Gemini-based JSON repair")
+        repaired = _repair_broken_json_with_gemini(json_str)
+        return repaired
+
+    # 7) Still broken → hard fail (doc will not be indexed)
+    raise ValueError("Unable to parse Gemini JSON response after all repair attempts")
+
+
+def _repair_broken_json_with_gemini(raw: str) -> Dict[str, Any]:
+    """
+    Ask Gemini to repair its own broken JSON, using the same schema.
+
+    This is only called in rare failure cases. If this also fails or
+    returns invalid JSON, we re-raise and the caller treats the document
+    as a failed extraction (no indexing).
+    """
+    config = AppConfig.get()
+
+    # Keep it bounded; no need to send a 200k-character meltdown back
+    snippet = raw[:8000]
+
+    prompt = (
+        "You previously attempted to output a JSON object matching this schema:\n\n"
+        f"{json.dumps(GEMINI_SCHEMA, indent=2)}\n\n"
+        "However, the output contained JSON syntax errors or was corrupted.\n\n"
+        "Task:\n"
+        "- Repair the JSON so that it is syntactically valid.\n"
+        "- Ensure it conforms to the schema as closely as possible.\n"
+        "- If required fields are missing, fill them with sensible defaults "
+        "(empty strings, empty lists, or null).\n"
+        "- Do NOT include explanations, markdown fences, or any extra text.\n"
+        "- Return ONLY a single JSON object.\n\n"
+        "Broken JSON output follows:\n"
+        f"{snippet}\n"
+    )
+
+    response = config.client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            response_mime_type="application/json",
+            response_schema=GEMINI_SCHEMA,
+        ),
+    )
+
+    fixed = response.text or "{}"
+
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError as exc:
+        LOGGER.error(
+            "Repair response was not valid JSON: %s; snippet=%r",
+            exc,
+            fixed[:500],
+        )
+        # Bubble up so the caller treats this as a hard failure
+        raise
+
+
 @time_function
 def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     """
@@ -137,7 +229,7 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     char_count = len(full_text)
     
     # Route based on document size
-    if char_count > 250_000:
+    if char_count > 200_000:
         LOGGER.info("Large document detected (%d chars), using multi-pass extraction for %s", 
                    char_count, path.name)
         return _gemini_extract_large_document(path, full_text, max_retries)
@@ -415,7 +507,7 @@ def _gemini_extract_chunk_with_resume(
     already_completed_sections: List[str],  # NEW PARAMETER
     last_completed: Optional[str],
     is_first_pass: bool,
-    max_retries: int = 2
+    max_retries: int = 0
 ) -> Dict[str, Any]:
     """
     Extract section content from a text chunk with resume capability.
@@ -473,6 +565,7 @@ Complete section list YOU identified (for reference):
 3. Skip any sections already in the "ALREADY COMPLETED" list
 4. Stop naturally at a section boundary when approaching output limits
 5. Ensure every section you include has its full content
+6. ALWAYS properly close JSON output
 
 Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
 Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
@@ -491,7 +584,7 @@ Document chunk:
                 model="gemini-2.5-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.0,
+                    temperature=0.1,
                     response_mime_type="application/json",
                     response_schema=GEMINI_SCHEMA,
                 ),
@@ -508,6 +601,7 @@ Document chunk:
         except Exception as exc:
             last_error = str(exc)
             LOGGER.warning("Chunk extraction failed (attempt %d): %s", attempt, exc)
+            LOGGER.error("Response ends with: %s", raw[-500:])
             if attempt > max_retries:
                 return {
                     "filename": filename,
@@ -704,6 +798,32 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
             LOGGER.info("All expected sections extracted, stopping early")
             break
     
+    # After processing all chunks, verify none of them failed hard
+    chunk_errors = [
+        r.get("parse_error")
+        for r in chunk_results
+        if isinstance(r, dict) and r.get("parse_error")
+    ]
+    if chunk_errors:
+        LOGGER.error(
+            "Multi-pass extraction for %s failed due to chunk errors (showing up to 3): %s",
+            path.name,
+            chunk_errors[:3],
+        )
+        # Treat the whole document as a failed extraction
+        raise ValueError(
+            f"Multi-pass chunk extraction failed for {path.name}: {chunk_errors[0]}"
+        )
+
+    # If we get here, all chunks that contributed had valid JSON
+    merged = _stitch_multipass_results(
+        structure=structure,
+        chunk_results=chunk_results,
+        filename=path.name,
+    )
+    return merged
+
+
     # Stitch everything together
     LOGGER.info("Stitching %d passes into final result...", len(chunk_results))
     final_result = _stitch_multipass_results(structure, chunk_results, path.name)
@@ -733,7 +853,7 @@ def _gemini_extract_single_pass(path: Path, full_text: str, max_retries: int) ->
                 model="gemini-2.5-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.0,
+                    temperature=0.1,
                     response_mime_type="application/json",
                     response_schema=GEMINI_SCHEMA,
                 ),
@@ -761,10 +881,145 @@ def _gemini_extract_single_pass(path: Path, full_text: str, max_retries: int) ->
     return data
 
 
+def _parse_section_identifier(section_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse section name to extract section_id, title, and level.
+
+    Examples:
+        "3. Discharge Procedure" → {section_id: "3", title: "Discharge Procedure", level: 1}
+        "3.1 Pre-Discharge" → {section_id: "3.1", title: "Pre-Discharge", level: 2}
+        "3.1.1 Verify Levels" → {section_id: "3.1.1", title: "Verify Levels", level: 3}
+        "Introduction" → {section_id: "Introduction", title: "Introduction", level: 1}
+
+    Args:
+        section_name: Section name from Gemini extraction
+
+    Returns:
+        Dict with section_id, title, level or None if parsing fails
+    """
+    if not section_name:
+        return None
+
+    # Try to match numbered sections (e.g., "3.", "3.1", "3.1.1")
+    # Pattern: optional digits.digits.digits followed by optional dot and space, then title
+    import re
+    match = re.match(r'^([\d\.]+)\.?\s+(.+)$', section_name.strip())
+
+    if match:
+        section_id = match.group(1).rstrip('.')  # "3.1." → "3.1"
+        title = match.group(2).strip()
+        # Count dots to determine level (1 → level 1, 1.1 → level 2, 1.1.1 → level 3)
+        level = section_id.count('.') + 1
+
+        return {
+            "section_id": section_id,
+            "title": title,
+            "level": level
+        }
+
+    # No numbering found - treat whole name as title with section_id = title
+    return {
+        "section_id": section_name.strip(),
+        "title": section_name.strip(),
+        "level": 1  # Default to top-level
+    }
+
+
+def build_document_tree(meta: Dict[str, Any], doc_id: str) -> Dict[str, Any]:
+    """
+    Build a hierarchical document tree from Gemini extraction metadata.
+
+    Captures section structure with parent-child relationships for hierarchical retrieval.
+    Each section node contains: section_id, title, level, parent_id, children, chunk_ids.
+
+    Args:
+        meta: Gemini extraction record with sections
+        doc_id: Document identifier (typically filename without extension)
+
+    Returns:
+        Document tree structure:
+        {
+            "doc_id": "Ballast Water Management",
+            "doc_type": "Procedure",
+            "title": "Ballast Water Management Procedure",
+            "sections": [
+                {
+                    "section_id": "3",
+                    "title": "Discharge Procedure",
+                    "level": 1,
+                    "parent_id": null,
+                    "chunk_ids": [],  # Will be populated during chunking
+                    "children": [...]
+                }
+            ]
+        }
+    """
+    sections_raw = meta.get("sections", [])
+
+    if not sections_raw:
+        return {
+            "doc_id": doc_id,
+            "doc_type": meta.get("doc_type", "UNKNOWN"),
+            "title": meta.get("title", doc_id),
+            "sections": []
+        }
+
+    # Parse all sections and build flat list first
+    parsed_sections = []
+    for idx, section in enumerate(sections_raw):
+        if not isinstance(section, dict):
+            continue
+
+        section_name = section.get("name", "").strip()
+        if not section_name:
+            continue
+
+        parsed = _parse_section_identifier(section_name)
+        if parsed:
+            parsed["original_name"] = section_name
+            parsed["chunk_ids"] = []  # Will be populated during indexing
+            parsed["children"] = []
+            parsed["parent_id"] = None
+            parsed_sections.append(parsed)
+
+    # Build parent-child relationships based on section_id hierarchy
+    # Algorithm: For each section, find its parent by looking for longest matching prefix
+    for i, section in enumerate(parsed_sections):
+        section_id = section["section_id"]
+
+        # Skip non-numeric section IDs (can't determine hierarchy)
+        if '.' not in section_id and not section_id.replace('.', '').isdigit():
+            continue
+
+        # Find parent: e.g., for "3.1.2", parent is "3.1"
+        parts = section_id.split('.')
+        if len(parts) > 1:
+            # Parent section_id is everything except last part
+            parent_id = '.'.join(parts[:-1])
+
+            # Find parent in parsed_sections
+            for parent in parsed_sections:
+                if parent["section_id"] == parent_id:
+                    section["parent_id"] = parent_id
+                    parent["children"].append(section)
+                    break
+
+    # Build tree structure: only top-level sections (those without parents) at root
+    root_sections = [s for s in parsed_sections if s["parent_id"] is None]
+
+    return {
+        "doc_id": doc_id,
+        "doc_type": meta.get("doc_type", "UNKNOWN"),
+        "title": meta.get("title", doc_id),
+        "sections": root_sections
+    }
+
+
 __all__ = [
     "build_extract_prompt",
     "gemini_extract_record",
-    "gemini_extract_from_scanned_pdf", 
+    "gemini_extract_from_scanned_pdf",
     "format_references_for_metadata",
     "to_documents_from_gemini",
+    "build_document_tree",
 ]

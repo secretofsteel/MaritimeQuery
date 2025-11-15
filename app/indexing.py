@@ -16,13 +16,22 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from .config import AppConfig
 from .constants import CHUNK_OVERLAP, CHUNK_SIZE
-from .extraction import gemini_extract_record, to_documents_from_gemini
+from .extraction import gemini_extract_record, to_documents_from_gemini, build_document_tree
 from .files import current_files_index, load_jsonl, upsert_jsonl_record
 from .logger import LOGGER
 from .parallel_processing import ParallelDocumentProcessor, ParallelEmbeddingGenerator
 
-def chunk_documents(documents: Iterable[Document]) -> List[Document]:
-    """Split LlamaIndex documents into sentence-aware chunks with metadata headers."""
+def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
+    """
+    Split LlamaIndex documents into sentence-aware chunks with metadata headers.
+
+    Args:
+        documents: Documents to chunk
+        assign_section_ids: If True, assign section_id to chunk metadata based on section name
+
+    Returns:
+        List of chunked documents with section_ids in metadata
+    """
     parser = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     nodes: List[Document] = []
     for document in documents:
@@ -40,9 +49,24 @@ def chunk_documents(documents: Iterable[Document]) -> List[Document]:
             header_parts.append(f"Section: {metadata['section']}")
         header = "\n".join(header_parts)
 
+        # Extract section_id from section name if enabled
+        section_id = None
+        if assign_section_ids and metadata.get("section"):
+            section_name = metadata["section"]
+            # Use extraction function for consistency
+            from .extraction import _parse_section_identifier
+            parsed = _parse_section_identifier(section_name)
+            if parsed:
+                section_id = parsed["section_id"]
+
         for chunk_text in parser.split_text(document.text):
             full_text = f"{header}\n---\n{chunk_text}"
             chunk_metadata = {**metadata, "chunk_text_len": len(chunk_text)}
+
+            # Add section_id to metadata if available
+            if section_id:
+                chunk_metadata["section_id"] = section_id
+
             nodes.append(Document(text=full_text, metadata=chunk_metadata))
     return nodes
 
@@ -63,6 +87,105 @@ def cache_nodes(nodes: List[Document], documents_count: int, cache_path: Path, i
     LOGGER.info("Cached %s nodes", len(nodes))
 
 
+def save_document_trees(trees: List[Dict[str, Any]], trees_path: Path) -> None:
+    """
+    Save document trees to JSON file.
+
+    Args:
+        trees: List of document tree structures
+        trees_path: Path to save JSON file (data/document_trees.json)
+    """
+    trees_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with trees_path.open("w", encoding="utf-8") as f:
+        json.dump(trees, f, indent=2, ensure_ascii=False)
+
+    LOGGER.info("Saved %d document trees to %s", len(trees), trees_path)
+
+
+def load_document_trees(trees_path: Path) -> List[Dict[str, Any]]:
+    """
+    Load document trees from JSON file.
+
+    Args:
+        trees_path: Path to document trees JSON file
+
+    Returns:
+        List of document tree structures, empty list if file doesn't exist
+    """
+    if not trees_path.exists():
+        LOGGER.debug("No document trees file found at %s", trees_path)
+        return []
+
+    try:
+        with trees_path.open("r", encoding="utf-8") as f:
+            trees = json.load(f)
+        LOGGER.info("Loaded %d document trees from %s", len(trees), trees_path)
+        return trees
+    except Exception as exc:
+        LOGGER.error("Failed to load document trees: %s", exc)
+        return []
+
+
+def map_chunks_to_tree_sections(
+    nodes: List[Document],
+    trees: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Map chunk IDs to document tree sections based on section_id metadata.
+
+    Updates tree structures in-place by populating chunk_ids arrays.
+
+    Args:
+        nodes: Chunked documents with section_id in metadata
+        trees: Document tree structures to populate
+
+    Returns:
+        Updated trees with chunk_ids populated
+    """
+    # Build a map of (doc_id, section_id) -> tree_section for fast lookup
+    section_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def register_section(tree_section: Dict[str, Any], doc_id: str):
+        """Recursively register all sections in the map."""
+        section_id = tree_section.get("section_id")
+        if section_id:
+            section_map[(doc_id, section_id)] = tree_section
+
+        # Register children recursively
+        for child in tree_section.get("children", []):
+            register_section(child, doc_id)
+
+    # Register all sections from all trees
+    for tree in trees:
+        doc_id = tree.get("doc_id", "")
+        for section in tree.get("sections", []):
+            register_section(section, doc_id)
+
+    # Map chunks to sections
+    for idx, node in enumerate(nodes):
+        metadata = node.metadata
+        source = metadata.get("source", "")
+        section_id = metadata.get("section_id")
+
+        if not section_id:
+            continue
+
+        # Use source filename without extension as doc_id
+        doc_id = Path(source).stem if source else ""
+
+        # Find matching section
+        key = (doc_id, section_id)
+        if key in section_map:
+            tree_section = section_map[key]
+            # Use node_id or create a unique ID
+            chunk_id = getattr(node, 'node_id', f"chunk_{idx:04d}")
+            tree_section["chunk_ids"].append(chunk_id)
+
+    LOGGER.info("Mapped %d chunks to tree sections", len(nodes))
+    return trees
+
+
 def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     """Process the full document library and build the vector index."""
     config = AppConfig.get()
@@ -70,6 +193,7 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 
     LOGGER.info("Processing library via Gemini...")
     documents: List[Document] = []
+    document_trees: List[Dict[str, Any]] = []  # NEW: Collect document trees
     files_index = current_files_index(paths.docs_path)
     cached_records = load_jsonl(paths.gemini_json_cache)
 
@@ -95,11 +219,25 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
             LOGGER.error("Skipping %s due to extraction error: %s", filename, meta.get("parse_error"))
             continue
 
+        # NEW: Build document tree
+        doc_id = doc_path.stem
+        tree = build_document_tree(meta, doc_id)
+        document_trees.append(tree)
+
         documents.extend(to_documents_from_gemini(doc_path, meta))
 
     LOGGER.info("Loaded %s Gemini-derived document sections", len(documents))
-    nodes = chunk_documents(documents)
+    LOGGER.info("Built %s document trees", len(document_trees))
+
+    nodes = chunk_documents(documents, assign_section_ids=True)
     LOGGER.info("Created %s chunks", len(nodes))
+
+    # NEW: Map chunks to tree sections
+    document_trees = map_chunks_to_tree_sections(nodes, document_trees)
+
+    # NEW: Save document trees
+    trees_path = paths.cache_dir / "document_trees.json"
+    save_document_trees(document_trees, trees_path)
 
     cache_nodes(nodes, len(documents), paths.nodes_cache_path, paths.cache_info_path)
 
@@ -180,34 +318,40 @@ def build_index_from_library_parallel(
     # Phase 0: Determine which files need extraction
     LOGGER.info("Phase 0: Analyzing document library...")
     files_index = current_files_index(paths.docs_path)
-    
+
     docs_to_extract: List[Path] = []
     all_documents: List[Document] = []
-    
+    document_trees: List[Dict[str, Any]] = []  # NEW: Collect document trees
+
     # Check each file
     for filename, fingerprint in files_index.items():
         doc_path = paths.docs_path / filename
         cached = cached_records.get(filename)
-        
+
         needs_extraction = not (
-            cached 
-            and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1 
+            cached
+            and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1
             and cached.get("size") == fingerprint["size"]
         )
-        
+
         if not needs_extraction and cached and "gemini" in cached:
             meta = cached["gemini"]
         else:
             # Need to extract
             docs_to_extract.append(doc_path)
             continue
-        
+
         # Use cached extraction
         if "parse_error" in meta:
-            LOGGER.error("Skipping %s due to cached extraction error: %s", 
+            LOGGER.error("Skipping %s due to cached extraction error: %s",
                         filename, meta.get("parse_error"))
             continue
-        
+
+        # NEW: Build document tree from cached extraction
+        doc_id = doc_path.stem
+        tree = build_document_tree(meta, doc_id)
+        document_trees.append(tree)
+
         documents_from_cache = to_documents_from_gemini(doc_path, meta)
         all_documents.extend(documents_from_cache)
     
@@ -240,6 +384,12 @@ def build_index_from_library_parallel(
         # Convert successful extractions to documents
         for result in extraction_results.successful:
             doc_path = paths.docs_path / result.filename
+
+            # NEW: Build document tree from fresh extraction
+            doc_id = doc_path.stem
+            tree = build_document_tree(result.record, doc_id)
+            document_trees.append(tree)
+
             documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
             all_documents.extend(documents_from_extraction)
         
@@ -254,12 +404,20 @@ def build_index_from_library_parallel(
         LOGGER.info("Phase 1 skipped: All documents cached")
     
     LOGGER.info("Total documents loaded: %d", len(all_documents))
-    
+    LOGGER.info("Built %d document trees", len(document_trees))
+
     # Phase 2: Chunking
     LOGGER.info("Phase 2: Chunking documents...")
-    nodes = chunk_documents(all_documents)
+    nodes = chunk_documents(all_documents, assign_section_ids=True)
     LOGGER.info("Created %d chunks", len(nodes))
-    
+
+    # NEW: Map chunks to tree sections
+    document_trees = map_chunks_to_tree_sections(nodes, document_trees)
+
+    # NEW: Save document trees
+    trees_path = paths.cache_dir / "document_trees.json"
+    save_document_trees(document_trees, trees_path)
+
     cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
     
     # Phase 3: Parallel embedding generation + sequential ChromaDB writes
