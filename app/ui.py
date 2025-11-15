@@ -376,7 +376,6 @@ def rebuild_index(app_state: AppState) -> None:
             nodes, index = build_index_from_library()
             app_state.nodes = nodes
             app_state.index = index
-            app_state.invalidate_node_map_cache()  # Clear stale cache
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
@@ -436,11 +435,10 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
             progress_callback=progress_callback,
             clear_gemini_cache=clear_gemini_cache
         )
-
+        
         # Update app state
         app_state.nodes = nodes
         app_state.index = index
-        app_state.invalidate_node_map_cache()  # Clear stale cache
         app_state.vector_retriever = None
         app_state.bm25_retriever = None
         app_state.ensure_retrievers()
@@ -476,7 +474,6 @@ def sync_library(app_state: AppState) -> None:
                 f"✅ Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
             )
             app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()  # Clear stale cache
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
@@ -866,7 +863,6 @@ def render_app(
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
     st.session_state.setdefault("use_context", True)  # Default ON for context-aware chat
-    st.session_state.setdefault("use_hierarchical", True)  # Default ON for hierarchical retrieval
 
     # Sidebar configuration
     with st.sidebar:
@@ -1048,15 +1044,7 @@ def render_app(
                 st.caption(f"📍 Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
                 if app_state.context_turn_count >= MAX_CONTEXT_TURNS - 1:
                     st.caption("⚠️ Next query will start fresh")
-
-            # Hierarchical retrieval toggle (A/B testing)
-            use_hierarchical = st.checkbox(
-                "🔍 Hierarchical retrieval",
-                value=True,
-                key="use_hierarchical",
-                help="Use section-level retrieval for procedures"
-            )
-
+        
         # Library management (only if not read-only)
         if not read_only_mode:
             with st.expander("📚 Library Management", expanded=False):
@@ -1393,7 +1381,6 @@ def render_app(
                             fortify=fortify_option,
                             rerank=rerank_option,
                             use_conversation_context=use_context,
-                            enable_hierarchical=use_hierarchical,
                         )
 
                         # Add messages to session

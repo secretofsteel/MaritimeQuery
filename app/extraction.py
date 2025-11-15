@@ -137,7 +137,7 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     char_count = len(full_text)
     
     # Route based on document size
-    if char_count > 200_000:
+    if char_count > 250_000:
         LOGGER.info("Large document detected (%d chars), using multi-pass extraction for %s", 
                    char_count, path.name)
         return _gemini_extract_large_document(path, full_text, max_retries)
@@ -415,7 +415,7 @@ def _gemini_extract_chunk_with_resume(
     already_completed_sections: List[str],  # NEW PARAMETER
     last_completed: Optional[str],
     is_first_pass: bool,
-    max_retries: int = 0
+    max_retries: int = 2
 ) -> Dict[str, Any]:
     """
     Extract section content from a text chunk with resume capability.
@@ -473,7 +473,6 @@ Complete section list YOU identified (for reference):
 3. Skip any sections already in the "ALREADY COMPLETED" list
 4. Stop naturally at a section boundary when approaching output limits
 5. Ensure every section you include has its full content
-6. ALWAYS properly close JSON output
 
 Schema: {json.dumps(GEMINI_SCHEMA, indent=2)}
 Category map: {json.dumps(FORM_CATEGORIES, indent=2)}
@@ -656,7 +655,7 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
     LOGGER.info("Structure extracted: %d sections identified", len(section_names))
     
     # Create overlapping chunks
-    chunks = _create_overlapping_chunks(full_text, chunk_size=100_000, overlap=7_000)
+    chunks = _create_overlapping_chunks(full_text, chunk_size=150_000, overlap=10_000)
     LOGGER.info("Document split into %d chunks for processing", len(chunks))
     
     # Multi-pass content extraction
@@ -762,145 +761,10 @@ def _gemini_extract_single_pass(path: Path, full_text: str, max_retries: int) ->
     return data
 
 
-def _parse_section_identifier(section_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse section name to extract section_id, title, and level.
-
-    Examples:
-        "3. Discharge Procedure" → {section_id: "3", title: "Discharge Procedure", level: 1}
-        "3.1 Pre-Discharge" → {section_id: "3.1", title: "Pre-Discharge", level: 2}
-        "3.1.1 Verify Levels" → {section_id: "3.1.1", title: "Verify Levels", level: 3}
-        "Introduction" → {section_id: "Introduction", title: "Introduction", level: 1}
-
-    Args:
-        section_name: Section name from Gemini extraction
-
-    Returns:
-        Dict with section_id, title, level or None if parsing fails
-    """
-    if not section_name:
-        return None
-
-    # Try to match numbered sections (e.g., "3.", "3.1", "3.1.1")
-    # Pattern: optional digits.digits.digits followed by optional dot and space, then title
-    import re
-    match = re.match(r'^([\d\.]+)\.?\s+(.+)$', section_name.strip())
-
-    if match:
-        section_id = match.group(1).rstrip('.')  # "3.1." → "3.1"
-        title = match.group(2).strip()
-        # Count dots to determine level (1 → level 1, 1.1 → level 2, 1.1.1 → level 3)
-        level = section_id.count('.') + 1
-
-        return {
-            "section_id": section_id,
-            "title": title,
-            "level": level
-        }
-
-    # No numbering found - treat whole name as title with section_id = title
-    return {
-        "section_id": section_name.strip(),
-        "title": section_name.strip(),
-        "level": 1  # Default to top-level
-    }
-
-
-def build_document_tree(meta: Dict[str, Any], doc_id: str) -> Dict[str, Any]:
-    """
-    Build a hierarchical document tree from Gemini extraction metadata.
-
-    Captures section structure with parent-child relationships for hierarchical retrieval.
-    Each section node contains: section_id, title, level, parent_id, children, chunk_ids.
-
-    Args:
-        meta: Gemini extraction record with sections
-        doc_id: Document identifier (typically filename without extension)
-
-    Returns:
-        Document tree structure:
-        {
-            "doc_id": "Ballast Water Management",
-            "doc_type": "Procedure",
-            "title": "Ballast Water Management Procedure",
-            "sections": [
-                {
-                    "section_id": "3",
-                    "title": "Discharge Procedure",
-                    "level": 1,
-                    "parent_id": null,
-                    "chunk_ids": [],  # Will be populated during chunking
-                    "children": [...]
-                }
-            ]
-        }
-    """
-    sections_raw = meta.get("sections", [])
-
-    if not sections_raw:
-        return {
-            "doc_id": doc_id,
-            "doc_type": meta.get("doc_type", "UNKNOWN"),
-            "title": meta.get("title", doc_id),
-            "sections": []
-        }
-
-    # Parse all sections and build flat list first
-    parsed_sections = []
-    for idx, section in enumerate(sections_raw):
-        if not isinstance(section, dict):
-            continue
-
-        section_name = section.get("name", "").strip()
-        if not section_name:
-            continue
-
-        parsed = _parse_section_identifier(section_name)
-        if parsed:
-            parsed["original_name"] = section_name
-            parsed["chunk_ids"] = []  # Will be populated during indexing
-            parsed["children"] = []
-            parsed["parent_id"] = None
-            parsed_sections.append(parsed)
-
-    # Build parent-child relationships based on section_id hierarchy
-    # Algorithm: For each section, find its parent by looking for longest matching prefix
-    for i, section in enumerate(parsed_sections):
-        section_id = section["section_id"]
-
-        # Skip non-numeric section IDs (can't determine hierarchy)
-        if '.' not in section_id and not section_id.replace('.', '').isdigit():
-            continue
-
-        # Find parent: e.g., for "3.1.2", parent is "3.1"
-        parts = section_id.split('.')
-        if len(parts) > 1:
-            # Parent section_id is everything except last part
-            parent_id = '.'.join(parts[:-1])
-
-            # Find parent in parsed_sections
-            for parent in parsed_sections:
-                if parent["section_id"] == parent_id:
-                    section["parent_id"] = parent_id
-                    parent["children"].append(section)
-                    break
-
-    # Build tree structure: only top-level sections (those without parents) at root
-    root_sections = [s for s in parsed_sections if s["parent_id"] is None]
-
-    return {
-        "doc_id": doc_id,
-        "doc_type": meta.get("doc_type", "UNKNOWN"),
-        "title": meta.get("title", doc_id),
-        "sections": root_sections
-    }
-
-
 __all__ = [
     "build_extract_prompt",
     "gemini_extract_record",
-    "gemini_extract_from_scanned_pdf",
+    "gemini_extract_from_scanned_pdf", 
     "format_references_for_metadata",
     "to_documents_from_gemini",
-    "build_document_tree",
 ]
