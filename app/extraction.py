@@ -608,6 +608,15 @@ def _stitch_multipass_results(
     
     merged["sections"] = all_sections
 
+    # Check for parse errors from structure or chunk extractions
+    if structure.get("parse_error"):
+        merged["parse_error"] = structure["parse_error"]
+    else:
+        for result in chunk_results:
+            if result.get("parse_error"):
+                merged["parse_error"] = result["parse_error"]
+                break
+
     # Validation: check coverage against structure
     expected_sections = set(structure.get("section_names", []))
     extracted_sections = set(s["name"] for s in all_sections)
@@ -616,7 +625,6 @@ def _stitch_multipass_results(
     if missing_sections:
         LOGGER.warning("Multi-pass extraction missed %d sections for %s: %s",
                       len(missing_sections), filename, list(missing_sections)[:5])
-        merged["parse_error"] = f"Incomplete extraction: {len(missing_sections)}/{len(expected_sections)} sections missing"
 
     LOGGER.info("Stitched %d passes into %d sections for %s (expected %d)",
                len(chunk_results), len(all_sections), filename, len(expected_sections))
