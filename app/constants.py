@@ -110,6 +110,56 @@ EXTRACT_SYSTEM_PROMPT = (
     "For any document that is part of company's Management System, then label it 'Procedure'"
 )
 
+# Plaintext extraction prompt (alternative to JSON for content extraction)
+# Used when AppConfig.use_plaintext_extraction = True
+# Structure extraction (Pass 0) still uses JSON
+EXTRACT_PLAINTEXT_PROMPT = """You are extracting section content from a maritime document.
+
+**CRITICAL: Output format is PLAINTEXT with delimiters, NOT JSON**
+
+Output ONLY using this exact format (no JSON, no markdown, no code blocks):
+
+=== SECTION START ===
+SECTION_NAME: [exact section name from list]
+CONTENT:
+[full section content here - preserve all text, tables, lists]
+
+=== SECTION END ===
+
+**Rules:**
+1. One delimited block per section
+2. Use EXACT section names from the provided list
+3. Include COMPLETE content for each section
+4. Extract content as clean, readable text:
+   - Replace all sequences of dots (....) with single ellipsis (...)
+   - Replace all tabs with single space
+   - Replace multiple spaces with single space
+   - Do NOT try to preserve visual alignment or formatting
+   - Content should be clean text suitable for search
+5. Process sections IN ORDER from the list
+6. Skip sections marked as already completed (if provided)
+7. No additional text outside the delimited blocks
+8. Do NOT include references, metadata, or document structure (that was extracted separately)
+9. Focus ONLY on extracting section content
+
+**What to extract:**
+- Section content (text, tables, lists, all details)
+
+**What NOT to extract:**
+- Document metadata (title, type, category, etc.) - already extracted
+- References - already extracted
+- Document structure/hierarchy - already extracted
+- Any JSON formatting
+- Markdown code blocks
+
+**Output must be:**
+- Plain text with delimiters
+- No JSON syntax
+- No markdown formatting
+- No code blocks
+- Just delimited section content blocks
+"""
+
 CONFIDENCE_HIGH_THRESHOLD = 75
 CONFIDENCE_MEDIUM_THRESHOLD = 55
 
@@ -130,6 +180,7 @@ __all__ = [
     "GEMINI_SCHEMA",
     "FORM_CATEGORIES",
     "EXTRACT_SYSTEM_PROMPT",
+    "EXTRACT_PLAINTEXT_PROMPT",
     "CONFIDENCE_HIGH_THRESHOLD",
     "CONFIDENCE_MEDIUM_THRESHOLD",
     "MAX_CONTEXT_TURNS",

@@ -107,6 +107,11 @@ class AppConfig:
         self.ocr_enabled = os.getenv("ENABLE_PDF_OCR", "true").lower() == "true"
         self.visual_extraction_enabled = os.getenv("ENABLE_VISUAL_EXTRACTION", "true").lower() == "true"
 
+        # Plaintext extraction mode (internal development/testing only)
+        # When True: Use plaintext delimited format instead of JSON for section content
+        # Structure extraction (Pass 0) always uses JSON regardless
+        self.use_plaintext_extraction = os.getenv("USE_PLAINTEXT_EXTRACTION", "false").lower() == "true"
+
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
         if self.ocr_enabled:
             LOGGER.info("PDF OCR enabled")
@@ -117,6 +122,11 @@ class AppConfig:
             LOGGER.info("PDF visual extraction (images/drawings) enabled")
         else:
             LOGGER.info("PDF visual extraction (images/drawings) disabled")
+
+        if self.use_plaintext_extraction:
+            LOGGER.info("Plaintext extraction mode enabled (development/testing)")
+        else:
+            LOGGER.info("JSON extraction mode enabled (default)")
 
     def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""

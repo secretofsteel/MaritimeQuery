@@ -11,7 +11,7 @@ from llama_index.core import Document
 from google.genai import types
 
 from .config import AppConfig
-from .constants import EXTRACT_SYSTEM_PROMPT, FORM_CATEGORIES, GEMINI_SCHEMA
+from .constants import EXTRACT_SYSTEM_PROMPT, EXTRACT_PLAINTEXT_PROMPT, FORM_CATEGORIES, GEMINI_SCHEMA
 from .files import clean_text_for_llm, read_doc_for_llm, is_scanned_pdf
 from .logger import LOGGER
 from .profiling import time_function
@@ -206,16 +206,20 @@ def _repair_broken_json_with_gemini(raw: str) -> Dict[str, Any]:
 def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     """
     Extract structured information from documents using Gemini.
-    
+
     Automatically routes to appropriate extraction strategy:
     - Scanned PDFs → OCR-based vision extraction
-    - Large documents (>250k chars) → Multi-pass extraction
+    - Large documents (>200k chars) → Multi-pass extraction
     - Normal documents → Single-pass extraction
-    
+
+    Routing also considers plaintext vs JSON extraction mode:
+    - JSON mode (default): Combined extraction in one call (single-pass) or N+1 calls (multipass)
+    - Plaintext mode: Structure extraction first (JSON), then content extraction (plaintext)
+
     Args:
         path: Path to document file
         max_retries: Number of retry attempts on failure
-    
+
     Returns:
         Extraction record with metadata and sections
     """
@@ -223,20 +227,44 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     if path.suffix.lower() == ".pdf" and is_scanned_pdf(path):
         LOGGER.info("Detected scanned PDF: %s", path.name)
         return gemini_extract_from_scanned_pdf(path, max_retries)
-    
+
     # Read full document text
     full_text = clean_text_for_llm(read_doc_for_llm(path))
     char_count = len(full_text)
-    
-    # Route based on document size
-    if char_count > 200_000:
-        LOGGER.info("Large document detected (%d chars), using multi-pass extraction for %s", 
-                   char_count, path.name)
-        return _gemini_extract_large_document(path, full_text, max_retries)
+    config = AppConfig.get()
+
+    # Plaintext mode: always extract structure first
+    if config.use_plaintext_extraction:
+        LOGGER.info("Plaintext extraction mode enabled for %s", path.name)
+
+        # Extract structure (metadata, references, section names)
+        structure = _gemini_get_structure(path.name, full_text, max_retries)
+
+        # Check for structure extraction failure
+        if structure.get("parse_error"):
+            LOGGER.error("Structure extraction failed for %s: %s",
+                        path.name, structure.get("parse_error"))
+            # Do not proceed to content extraction if structure failed
+            return structure
+
+        # Route based on document size
+        if char_count > 200_000:
+            LOGGER.info("Large document (%d chars), using multipass plaintext extraction", char_count)
+            return _gemini_extract_large_document_plaintext(path, full_text, structure, max_retries)
+        else:
+            LOGGER.info("Normal document (%d chars), using single-pass plaintext extraction", char_count)
+            return _gemini_extract_single_pass_plaintext(path, full_text, structure, max_retries)
+
+    # JSON mode (default): existing behavior
     else:
-        LOGGER.debug("Normal-sized document (%d chars), using single-pass extraction for %s",
-                    char_count, path.name)
-        return _gemini_extract_single_pass(path, full_text, max_retries)
+        if char_count > 200_000:
+            LOGGER.info("Large document detected (%d chars), using multi-pass extraction for %s",
+                       char_count, path.name)
+            return _gemini_extract_large_document(path, full_text, max_retries)
+        else:
+            LOGGER.debug("Normal-sized document (%d chars), using single-pass extraction for %s",
+                        char_count, path.name)
+            return _gemini_extract_single_pass(path, full_text, max_retries)
 
 
 def format_references_for_metadata(references: Dict[str, List[str]]) -> str:
@@ -401,11 +429,50 @@ def _gemini_get_structure(filename: str, text_preview: str, max_retries: int = 2
 3. Identify any document references (form numbers, procedure names, regulations)
 4. Build document hierarchy if present
 
+**Maritime Document Classification Guidelines:**
+
+**Form Number Detection:**
+- Look for patterns like "Form C 002", "CBO 015", "EN 004", etc.
+- Check document header, footer, and first page
+- Extract the complete code (letter + number)
+- If filename contains form code, use it to validate
+
+**Checklist Identification:**
+- Documents with "Checklist" in title are type "Checklist"
+- Often have checkbox items or verification steps
+- May have form codes like "CBO 015 - Cargo Operation Checklist"
+
+**Section Naming:**
+- PRESERVE section numbers (e.g., "3.1 Safety Procedures", not just "Safety Procedures")
+- Include full hierarchical numbering (1, 1.1, 1.1.1, etc.)
+- Extract section names exactly as they appear
+- For unnumbered sections, use the heading text
+
+**Reference Extraction Patterns:**
+- Forms: "Form C 002", "Form EN 004", etc.
+- Procedures: Full procedure names (e.g., "Ballast Water Management Procedure")
+- Regulations: SOLAS, MARPOL chapters (e.g., "SOLAS Chapter V", "MARPOL Annex VI")
+- Policies: Company policy names
+- Reports: Incident reports, audit reports, etc.
+- Extract references as they appear (don't abbreviate)
+
+**Document Type Classification:**
+- Form: Standardized document for recording data (often has form code)
+- Checklist: Verification/compliance checklist (often has checkbox items)
+- Procedure: Step-by-step operational instructions
+- Regulation: Legal/regulatory requirements
+- Policy: Company rules and guidelines
+- Manual: Equipment manual or instruction set
+
 **What to output:**
 - section_names: Array of strings (section names only, NO content)
 - doc_type: One of: Form, Checklist, Procedure, Regulation, Policy, Manual
-- title: Document title
-- Optional: category, form_number, normalized_topic, hierarchy, references
+- title: Document title (for Forms/Checklists, include form code)
+- category: Form category if applicable (from category map)
+- form_number: Extracted form/checklist code (e.g., "C 002", "CBO 015")
+- normalized_topic: Main topic/subject of document
+- hierarchy: Document hierarchy if present (e.g., ["Chapter 3", "Section 3.1"])
+- references: Dict of referenced documents by type
 
 **What NOT to output:**
 - Section content (forbidden in this pass)
@@ -834,6 +901,129 @@ def _gemini_extract_large_document(path: Path, full_text: str, max_retries: int 
     return final_result
 
 
+def _gemini_extract_large_document_plaintext(
+    path: Path,
+    full_text: str,
+    structure: Dict[str, Any],
+    max_retries: int = 2
+) -> Dict[str, Any]:
+    """
+    Multi-pass extraction for large documents using plaintext format.
+
+    Strategy:
+    - Pass 0: Structure already extracted (passed as parameter)
+    - Pass 1-N: Extract content in chunks using plaintext format
+    - Stitch: Merge structure + content results
+
+    Args:
+        path: Path to document file
+        full_text: Complete document text
+        structure: Pre-extracted structure from _gemini_get_structure()
+        max_retries: Retry attempts per pass
+
+    Returns:
+        Complete extraction record with all sections
+    """
+    LOGGER.info("=== Starting multi-pass plaintext extraction for %s ===", path.name)
+
+    section_names = structure.get("section_names", [])
+
+    if not section_names:
+        LOGGER.warning("No sections detected in structure, cannot proceed with plaintext multipass")
+        # Return structure with empty sections
+        return {
+            "filename": path.name,
+            "doc_type": structure.get("doc_type", "UNKNOWN"),
+            "title": structure.get("title", path.stem),
+            "sections": [],
+            "references": structure.get("references", {}),
+            "hierarchy": structure.get("hierarchy", []),
+            "plaintext_extraction": True,
+            "ocr_used": False,
+            "extraction_warning": "No sections identified in structure pass"
+        }
+
+    LOGGER.info("Structure extracted: %d sections identified", len(section_names))
+
+    # Create overlapping chunks
+    chunks = _create_overlapping_chunks(full_text, chunk_size=150_000, overlap=10_000)
+    LOGGER.info("Document split into %d chunks for processing", len(chunks))
+
+    # Multi-pass content extraction
+    chunk_results = []
+    last_completed_section = None
+    already_completed_sections = []
+    total_sections_extracted = 0
+
+    for i, chunk_text in enumerate(chunks):
+        LOGGER.info("Pass %d/%d: Extracting content from chunk (plaintext)...", i + 1, len(chunks))
+
+        result = _gemini_extract_chunk_plaintext(
+            filename=path.name,
+            chunk_text=chunk_text,
+            all_section_names=section_names,
+            already_completed_sections=already_completed_sections,
+            last_completed=last_completed_section,
+            is_first_pass=(i == 0),
+            max_retries=max_retries
+        )
+
+        extracted_sections = result.get("sections", [])
+
+        if not extracted_sections:
+            LOGGER.warning("No sections extracted in pass %d, stopping", i + 1)
+            break
+
+        chunk_results.append(result)
+
+        # Add newly extracted section names to completed list
+        for section in extracted_sections:
+            section_name = section.get("name", "").strip()
+            if section_name and section_name not in already_completed_sections:
+                already_completed_sections.append(section_name)
+
+        total_sections_extracted = len(already_completed_sections)
+
+        # Track progress
+        last_completed_section = extracted_sections[-1].get("name")
+        LOGGER.info("Pass %d complete: extracted %d NEW sections (total unique so far: %d/%d)",
+                   i + 1, len(extracted_sections), total_sections_extracted, len(section_names))
+        LOGGER.info("Last completed section: '%s'", last_completed_section)
+
+        # Early termination if all sections extracted
+        if total_sections_extracted >= len(section_names):
+            LOGGER.info("All expected sections extracted, stopping early")
+            break
+
+    # Check for chunk errors
+    chunk_errors = [
+        r.get("parse_error")
+        for r in chunk_results
+        if isinstance(r, dict) and r.get("parse_error")
+    ]
+    if chunk_errors:
+        LOGGER.error(
+            "Multi-pass plaintext extraction for %s failed due to chunk errors: %s",
+            path.name,
+            chunk_errors[:3],
+        )
+        raise ValueError(
+            f"Multi-pass plaintext chunk extraction failed for {path.name}: {chunk_errors[0]}"
+        )
+
+    # Stitch everything together
+    LOGGER.info("Stitching %d passes into final result...", len(chunk_results))
+    final_result = _stitch_multipass_results(structure, chunk_results, path.name)
+
+    # Add plaintext flag
+    final_result["plaintext_extraction"] = True
+
+    LOGGER.info("=== Multi-pass plaintext extraction complete: %d sections extracted ===",
+               len(final_result.get("sections", [])))
+
+    return final_result
+
+
 def _gemini_extract_single_pass(path: Path, full_text: str, max_retries: int) -> Dict[str, Any]:
     """
     Original single-pass extraction for normal-sized documents.
@@ -879,6 +1069,299 @@ def _gemini_extract_single_pass(path: Path, full_text: str, max_retries: int) ->
         data["parse_error"] = last_error
     data.setdefault("ocr_used", False)
     return data
+
+
+def _parse_plaintext_sections(raw_text: str) -> List[Dict[str, str]]:
+    """
+    Parse delimited plaintext into section list.
+
+    Extracts sections from plaintext format:
+        === SECTION START ===
+        SECTION_NAME: Section Name
+        CONTENT:
+        Section content here...
+        === SECTION END ===
+
+    Args:
+        raw_text: Raw plaintext response from Gemini
+
+    Returns:
+        List of dicts with 'name' and 'content' keys
+        Example: [{"name": "3.1 Safety", "content": "..."}]
+    """
+    # Strip markdown code fences if Gemini added them despite text/plain
+    text = raw_text.strip()
+    if text.startswith("```"):
+        # Remove opening fence
+        text = re.sub(r'^```(?:plaintext|text)?\s*\n?', '', text)
+        # Remove closing fence
+        text = re.sub(r'\n?```\s*$', '', text)
+
+    # Regex pattern to match section blocks
+    # Using DOTALL to match across newlines
+    pattern = r'=== SECTION START ===\s*SECTION_NAME:\s*(.+?)\s*CONTENT:\s*(.*?)\s*=== SECTION END ==='
+
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    sections = []
+    for name, content in matches:
+        name = name.strip()
+        content = content.strip()
+
+        if name and content:  # Only include non-empty sections
+            sections.append({
+                "name": name,
+                "content": content
+            })
+
+    LOGGER.info("Plaintext parser extracted %d sections", len(sections))
+
+    return sections
+
+
+def _build_plaintext_prompt(
+    filename: str,
+    text: str,
+    section_names: Optional[List[str]] = None,
+    already_completed: Optional[List[str]] = None
+) -> str:
+    """
+    Build prompt for plaintext extraction.
+
+    Args:
+        filename: Original document filename
+        text: Document text or chunk
+        section_names: List of section names to extract (for multipass)
+        already_completed: List of sections already extracted (for multipass resume)
+
+    Returns:
+        Complete prompt string for plaintext extraction
+    """
+    prompt_parts = [EXTRACT_PLAINTEXT_PROMPT]
+
+    # Add section-specific instructions
+    if section_names:
+        prompt_parts.append("\n**Section list (extract in order):**")
+        prompt_parts.append(json.dumps(section_names, indent=2))
+
+    if already_completed:
+        prompt_parts.append("\n**ALREADY COMPLETED (DO NOT RE-EXTRACT):**")
+        prompt_parts.append(json.dumps(already_completed, indent=2))
+        prompt_parts.append("\n**Skip all sections in the completed list above!**")
+
+    # Add document info
+    prompt_parts.append(f"\n**Document to extract:**")
+    prompt_parts.append(f"Filename: {filename}")
+    prompt_parts.append(f"\nDocument text:\n{text}")
+
+    return "\n".join(prompt_parts)
+
+
+def _gemini_extract_single_pass_plaintext(
+    path: Path,
+    full_text: str,
+    structure: Dict[str, Any],
+    max_retries: int
+) -> Dict[str, Any]:
+    """
+    Single-pass extraction using plaintext format.
+
+    Extracts section content only - metadata comes from structure parameter.
+
+    Args:
+        path: Path to document file
+        full_text: Complete document text
+        structure: Pre-extracted structure from _gemini_get_structure()
+        max_retries: Number of retry attempts on failure
+
+    Returns:
+        Complete extraction record matching JSON structure format
+    """
+    config = AppConfig.get()
+    LOGGER.info("Using plaintext extraction (single-pass) for %s", path.name)
+
+    # Get section names from structure
+    section_names = structure.get("section_names", [])
+
+    # Build plaintext extraction prompt
+    prompt = _build_plaintext_prompt(
+        filename=path.name,
+        text=full_text,
+        section_names=section_names if section_names else None,
+        already_completed=None
+    )
+
+    last_error: Optional[str] = None
+
+    for attempt in range(1, max_retries + 2):
+        try:
+            response = config.client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="text/plain",  # NOT JSON
+                ),
+            )
+
+            raw = response.text or ""
+
+            # Parse plaintext response
+            sections = _parse_plaintext_sections(raw)
+
+            if not sections:
+                LOGGER.warning("No sections extracted from plaintext response for %s", path.name)
+
+            # Merge structure metadata + plaintext sections
+            final = {
+                "filename": path.name,
+                "doc_type": structure.get("doc_type", "UNKNOWN"),
+                "title": structure.get("title", path.stem),
+                "hierarchy": structure.get("hierarchy", []),
+                "references": structure.get("references", {}),
+                "sections": sections,
+                "plaintext_extraction": True,
+                "ocr_used": False,
+            }
+
+            # Copy optional fields from structure
+            if structure.get("category"):
+                final["category"] = structure["category"]
+            if structure.get("form_number"):
+                final["form_number"] = structure["form_number"]
+            if structure.get("normalized_topic"):
+                final["normalized_topic"] = structure["normalized_topic"]
+
+            LOGGER.info("Plaintext single-pass extracted %d sections for %s",
+                       len(sections), path.name)
+
+            return final
+
+        except Exception as exc:
+            last_error = str(exc)
+            LOGGER.warning("Plaintext extraction failed for %s (attempt %d): %s",
+                          path.name, attempt, exc)
+
+            if attempt > max_retries:
+                return {
+                    "filename": path.name,
+                    "doc_type": structure.get("doc_type", "UNKNOWN"),
+                    "title": structure.get("title", path.stem),
+                    "sections": [],
+                    "references": structure.get("references", {}),
+                    "parse_error": f"Plaintext extraction failed: {last_error}",
+                    "plaintext_extraction": True,
+                    "ocr_used": False,
+                }
+            continue
+
+    # Fallback (should never reach)
+    return {
+        "filename": path.name,
+        "doc_type": structure.get("doc_type", "UNKNOWN"),
+        "title": structure.get("title", path.stem),
+        "sections": [],
+        "references": structure.get("references", {}),
+        "plaintext_extraction": True,
+        "ocr_used": False,
+    }
+
+
+def _gemini_extract_chunk_plaintext(
+    filename: str,
+    chunk_text: str,
+    all_section_names: List[str],
+    already_completed_sections: List[str],
+    last_completed: Optional[str],
+    is_first_pass: bool,
+    max_retries: int = 0
+) -> Dict[str, Any]:
+    """
+    Multipass content extraction using plaintext.
+
+    Args:
+        filename: Original document filename
+        chunk_text: Text chunk to process
+        all_section_names: Complete list of section names from structure
+        already_completed_sections: List of section names already extracted
+        last_completed: Name of last section completed in previous pass
+        is_first_pass: Whether this is the first content extraction pass
+        max_retries: Number of retry attempts on failure
+
+    Returns:
+        Dict with sections array: {"sections": [...], "references": {}}
+    """
+    config = AppConfig.get()
+
+    # Build context about where we are
+    if is_first_pass:
+        context_msg = "This is the FIRST content extraction pass. Start from the beginning."
+    else:
+        try:
+            last_idx = all_section_names.index(last_completed)
+            next_section = all_section_names[last_idx + 1] if last_idx + 1 < len(all_section_names) else "END"
+        except (ValueError, IndexError):
+            next_section = "UNKNOWN"
+
+        context_msg = f"""This is a CONTINUATION pass.
+Last completed section: "{last_completed}"
+Next expected section: "{next_section}"
+Resume from section "{next_section}" and skip all already completed sections."""
+
+    LOGGER.info("Plaintext multipass extraction: %s", context_msg)
+
+    # Build plaintext prompt
+    prompt = _build_plaintext_prompt(
+        filename=filename,
+        text=chunk_text,
+        section_names=all_section_names,
+        already_completed=already_completed_sections if already_completed_sections else None
+    )
+
+    # Prepend context
+    prompt = f"{context_msg}\n\n{prompt}"
+
+    last_error: Optional[str] = None
+
+    for attempt in range(1, max_retries + 2):
+        try:
+            response = config.client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="text/plain",
+                ),
+            )
+
+            raw = response.text or ""
+
+            # Parse plaintext response
+            sections = _parse_plaintext_sections(raw)
+
+            LOGGER.info("Plaintext chunk extracted %d sections", len(sections))
+
+            return {
+                "sections": sections,
+                "references": {}  # References come from structure pass
+            }
+
+        except Exception as exc:
+            last_error = str(exc)
+            LOGGER.warning("Plaintext chunk extraction failed (attempt %d): %s", attempt, exc)
+
+            if attempt > max_retries:
+                return {
+                    "filename": filename,
+                    "doc_type": "UNKNOWN",
+                    "title": Path(filename).stem,
+                    "sections": [],
+                    "references": {},
+                    "parse_error": f"Plaintext chunk extraction failed: {last_error}"
+                }
+            continue
+
+    return {"sections": [], "references": {}}
 
 
 def _parse_section_identifier(section_name: str) -> Optional[Dict[str, Any]]:
