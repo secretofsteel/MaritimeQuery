@@ -1,5 +1,4 @@
 #Core app
-pip==24
 streamlit
 markdown
 
@@ -21,6 +20,7 @@ xlrd
 pandas
 spire.doc
 aspose-words
+rapidfuzz
 
 #PDF processing libraries
 pymupdf
