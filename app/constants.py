@@ -6,6 +6,13 @@ import os
 CHUNK_SIZE = 1024
 CHUNK_OVERLAP = 200
 
+
+# Python slicing extraction configuration
+# Fuzzy matching threshold for finding section boundaries in raw text (0-1 scale)
+# Lower values = more lenient matching, higher values = stricter matching
+# Recommended range: 0.80-0.90 for maritime documents with formatting variations
+PYTHON_SLICING_FUZZY_THRESHOLD = 0.80
+
 # Debug mode toggle (can be controlled via environment variable or admin UI)
 DEBUG_RAG = os.getenv("DEBUG_RAG", "false").lower() == "true"
 
@@ -109,6 +116,7 @@ EXTRACT_SYSTEM_PROMPT = (
     "Use 'Manual' only when it is a set of instructions or equipment manual"
     "For any document that is part of company's Management System, then label it 'Procedure'"
 )
+
 
 CONFIDENCE_HIGH_THRESHOLD = 75
 CONFIDENCE_MEDIUM_THRESHOLD = 55
