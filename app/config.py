@@ -118,6 +118,7 @@ class AppConfig:
         else:
             LOGGER.info("PDF visual extraction (images/drawings) disabled")
 
+
     def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""
         docs_path = ensure_directory(docs_path.expanduser().resolve())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import pickle
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -13,6 +14,9 @@ from google.genai import types
 import pandas as pd
 
 from .logger import LOGGER
+
+
+
 
 def _df_to_markdown(df, max_rows: int = 100, max_cols: int = 12) -> str:
     """Convert DataFrame to markdown table for LLM consumption."""
@@ -596,11 +600,66 @@ def clean_text_for_llm(text: str) -> str:
 
     return text.strip()
 
-def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
-    """Extract text from various document formats."""
+
+def _get_text_cache_path(file_path: Path, cache_dir: Path) -> Path:
+    """
+    Generate cache path for extracted text.
+    
+    Uses filename + hash for easy identification while avoiding collisions.
+    """
+    # Create hash of mtime + size for cache invalidation
+    file_stat = file_path.stat()
+    cache_key = f"{file_stat.st_mtime}_{file_stat.st_size}"
+    cache_hash = md5(cache_key.encode()).hexdigest()[:8]  # Short hash
+    
+    # Use actual filename + short hash
+    # Remove extension and sanitize filename
+    base_name = file_path.stem
+    safe_name = re.sub(r'[^\w\-]', '_', base_name)  # Replace special chars
+    
+    return cache_dir / f"{safe_name}_{cache_hash}.pkl"
+
+
+def read_doc_for_llm(path: Path, max_chars: Optional[int] = None, use_cache: bool = True) -> str:
+    """
+    Extract text from various document formats.
+    
+    Args:
+        path: Path to document
+        max_chars: Optional character limit
+        use_cache: If True, cache extracted text to avoid reprocessing (default: True)
+    
+    Returns:
+        Extracted text
+    """
+    from .config import AppConfig  # Import here to avoid circular dependency
+    
+    # Check cache if enabled
+    if use_cache:
+        config = AppConfig.get()
+        cache_dir = config.paths.cache_dir / "text_extracts"
+        cache_dir.mkdir(exist_ok=True)
+        
+        cache_path = _get_text_cache_path(path, cache_dir)
+        
+        if cache_path.exists():
+            try:
+                LOGGER.debug("Loading cached text extraction for %s", path.name)
+                with open(cache_path, 'rb') as f:
+                    cached_text = pickle.load(f)
+                
+                # Apply max_chars if specified
+                if max_chars and len(cached_text) > max_chars:
+                    return cached_text[:max_chars]
+                return cached_text
+                
+            except Exception as exc:
+                LOGGER.warning("Failed to load text cache for %s: %s", path.name, exc)
+                # Fall through to re-extract
+    
+    # Extract text (existing logic)
     ext = path.suffix.lower()
     
-    # Dispatch to format-specific handler
     handlers = {
         '.txt': _extract_txt,
         '.docx': _extract_docx,
@@ -613,14 +672,25 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
     handler = handlers.get(ext)
     if not handler:
         LOGGER.warning("Unsupported file type: %s", ext)
-        return ""
+        text = ""
+    else:
+        try:
+            LOGGER.debug("Extracting text from %s", path.name)
+            text = handler(path)
+        except Exception as exc:
+            LOGGER.error("Failed to extract %s: %s", path.name, exc)
+            text = f"[READ_ERROR] {exc}"
     
-    try:
-        text = handler(path)
-    except Exception as exc:
-        LOGGER.error("Failed to extract %s: %s", path.name, exc)
-        text = f"[READ_ERROR] {exc}"
+    # Cache the extracted text if enabled
+    if use_cache and text and not text.startswith("[READ_ERROR]"):
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(text, f)
+            LOGGER.debug("Cached text extraction for %s (%d chars)", path.name, len(text))
+        except Exception as exc:
+            LOGGER.warning("Failed to cache text for %s: %s", path.name, exc)
     
+    # Apply max_chars if specified
     if max_chars and len(text) > max_chars:
         text = text[:max_chars]
     
