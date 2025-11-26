@@ -1,11 +1,11 @@
-"""Index creation, chunking, and incremental updates."""
-
+"""Index creation, chunking, and incremental updates with status tracking."""
 
 from __future__ import annotations
 
 import json
 import pickle
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +22,14 @@ from .extraction import gemini_extract_record, to_documents_from_gemini, build_d
 from .files import current_files_index, load_jsonl, upsert_jsonl_record, write_jsonl
 from .logger import LOGGER
 from .parallel_processing import ParallelDocumentProcessor, ParallelEmbeddingGenerator
+from .processing_status import (
+    DocumentProcessingStatus,
+    ProcessingReport,
+    StageResult,
+    StageStatus,
+    save_processing_report,
+)
+
 
 def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
     """
@@ -129,7 +137,6 @@ def load_document_trees(trees_path: Path) -> List[Dict[str, Any]]:
         return []
 
 
-
 def map_chunks_to_tree_sections(
     nodes: List[Document],
     trees: List[Dict[str, Any]]
@@ -188,6 +195,7 @@ def map_chunks_to_tree_sections(
     LOGGER.info("Mapped %d chunks to tree sections", len(nodes))
     return trees
 
+
 def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     """Process the full document library and build the vector index."""
     config = AppConfig.get()
@@ -245,8 +253,9 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 
 
 def build_index_from_library_parallel(
-    progress_callback: Optional[Callable[[str, int, int, str], None]] = None
-) -> Tuple[List[Document], VectorStoreIndex]:
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    clear_gemini_cache: bool = False,
+) -> Tuple[List[Document], VectorStoreIndex, ProcessingReport]:
     """Process the full document library with parallel extraction and embedding generation.
     
     This parallel version:
@@ -257,19 +266,41 @@ def build_index_from_library_parallel(
     
     Args:
         progress_callback: Optional callback(phase, current, total, item_desc)
+        clear_gemini_cache: If True, force re-extraction of all files
     
     Returns:
-        Tuple of (nodes, index)
+        Tuple of (nodes, index, processing_report)
     """
     config = AppConfig.get()
     paths = config.paths
+    
+    start_time = time.time()
 
     LOGGER.info("=== Starting Parallel Processing ===")
     
+    # Create processing report
+    files_index = current_files_index(paths.docs_path)
+    report = ProcessingReport(
+        timestamp=datetime.now().isoformat(),
+        total_files=len(files_index),
+    )
+    
+    # Track status for each file
+    file_statuses: Dict[str, DocumentProcessingStatus] = {}
+    for filename in files_index.keys():
+        file_statuses[filename] = DocumentProcessingStatus(
+            filename=filename,
+            file_size_bytes=files_index[filename]["size"],
+        )
+    
     # Phase 0: Determine which files need extraction
     LOGGER.info("Phase 0: Analyzing document library...")
-    files_index = current_files_index(paths.docs_path)
     cached_records = load_jsonl(paths.gemini_json_cache)
+    
+    # Clear cache if requested
+    if clear_gemini_cache:
+        LOGGER.warning("Clearing Gemini extraction cache - all files will be re-extracted")
+        cached_records = {}
     
     docs_to_extract: List[Path] = []
     all_documents: List[Document] = []
@@ -278,8 +309,12 @@ def build_index_from_library_parallel(
     for filename, fingerprint in files_index.items():
         doc_path = paths.docs_path / filename
         cached = cached_records.get(filename)
+        status = file_statuses[filename]
         
-        needs_extraction = not (
+        # Mark parsing as success (file exists and is readable)
+        status.parsing = StageResult(StageStatus.SUCCESS, "File parsed successfully")
+        
+        needs_extraction = clear_gemini_cache or not (
             cached 
             and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1 
             and cached.get("size") == fingerprint["size"]
@@ -287,16 +322,42 @@ def build_index_from_library_parallel(
         
         if not needs_extraction and cached and "gemini" in cached:
             meta = cached["gemini"]
+            status.used_cache = True
         else:
             # Need to extract
             docs_to_extract.append(doc_path)
             continue
         
         # Use cached extraction
-        if "parse_error" in meta:
-            LOGGER.error("Skipping %s due to cached extraction error: %s", 
-                        filename, meta.get("parse_error"))
+        if "parse_error" in meta or "extraction_error" in meta:
+            error_msg = meta.get("parse_error") or meta.get("extraction_error")
+            status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
+            LOGGER.error("Skipping %s due to cached extraction error: %s", filename, error_msg)
+            report.add_status(status)
             continue
+        
+        # Check validation from cache
+        if "validation_error" in meta:
+            validation_data = meta.get("validation", {})
+            coverage = validation_data.get("ngram_coverage", 0)
+            status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
+            status.validation = StageResult(
+                StageStatus.WARNING,
+                f"Low quality extraction (coverage: {coverage:.1%})",
+                details=validation_data
+            )
+        else:
+            status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
+            validation_data = meta.get("validation", {})
+            if validation_data:
+                coverage = validation_data.get("ngram_coverage", 0)
+                status.validation = StageResult(
+                    StageStatus.SUCCESS,
+                    f"Validation passed (coverage: {coverage:.1%})",
+                    details=validation_data
+                )
+            else:
+                status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
         
         documents_from_cache = to_documents_from_gemini(doc_path, meta)
         all_documents.extend(documents_from_cache)
@@ -311,12 +372,14 @@ def build_index_from_library_parallel(
         processor = ParallelDocumentProcessor(max_workers=10)
         extraction_results = processor.extract_batch(docs_to_extract, progress_callback)
         
-        # Update JSONL cache with results
+        # Update JSONL cache and statuses with results
         for result in extraction_results.successful + extraction_results.failed:
             filename = result.filename
             fingerprint = files_index[filename]
+            status = file_statuses[filename]
             
             if result.record:
+                # Update cache
                 upsert_jsonl_record(
                     paths.gemini_json_cache,
                     {
@@ -326,17 +389,48 @@ def build_index_from_library_parallel(
                         "gemini": result.record,
                     },
                 )
+                
+                # Update status based on extraction result
+                if "parse_error" in result.record or "extraction_error" in result.record:
+                    error_msg = result.record.get("parse_error") or result.record.get("extraction_error")
+                    status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
+                else:
+                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded")
+                    
+                    # Check validation
+                    if "validation_error" in result.record:
+                        validation_data = result.record.get("validation", {})
+                        coverage = validation_data.get("ngram_coverage", 0)
+                        status.validation = StageResult(
+                            StageStatus.WARNING,
+                            f"Low quality extraction (coverage: {coverage:.1%})",
+                            details=validation_data
+                        )
+                    else:
+                        validation_data = result.record.get("validation", {})
+                        if validation_data:
+                            coverage = validation_data.get("ngram_coverage", 0)
+                            status.validation = StageResult(
+                                StageStatus.SUCCESS,
+                                f"Validation passed (coverage: {coverage:.1%})",
+                                details=validation_data
+                            )
+                        else:
+                            status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
         
         # Convert successful extractions to documents
         for result in extraction_results.successful:
-            doc_path = paths.docs_path / result.filename
-            documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
-            all_documents.extend(documents_from_extraction)
+            # Only add if no parse/extraction errors
+            if "parse_error" not in result.record and "extraction_error" not in result.record:
+                doc_path = paths.docs_path / result.filename
+                documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
+                all_documents.extend(documents_from_extraction)
         
         # Log failures
         for result in extraction_results.failed:
-            LOGGER.error("Skipping %s due to extraction error: %s", 
-                        result.filename, result.error)
+            status = file_statuses[result.filename]
+            status.extraction = StageResult(StageStatus.FAILED, f"Extraction error: {result.error}")
+            LOGGER.error("Skipping %s due to extraction error: %s", result.filename, result.error)
         
         LOGGER.info("Phase 1 complete: %d successful, %d failed",
                    extraction_results.success_count, extraction_results.failure_count)
@@ -350,9 +444,22 @@ def build_index_from_library_parallel(
     nodes = chunk_documents(all_documents)
     LOGGER.info("Created %d chunks", len(nodes))
     
+    # Track chunks per file
+    chunks_per_file: Dict[str, int] = {}
+    for node in nodes:
+        source = node.metadata.get("source", "")
+        if source:
+            filename = Path(source).name
+            chunks_per_file[filename] = chunks_per_file.get(filename, 0) + 1
+    
+    # Update chunk counts in statuses
+    for filename, count in chunks_per_file.items():
+        if filename in file_statuses:
+            file_statuses[filename].chunks_created = count
+    
     cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
     
-    # Phase 3: Parallel embedding generation + sequential ChromaDB writes
+    # Phase 3: Parallel embedding generation
     LOGGER.info("Phase 3: Parallel embedding generation...")
     
     # Extract texts for embedding
@@ -368,6 +475,14 @@ def build_index_from_library_parallel(
     # Attach embeddings to nodes
     for node, embedding in zip(nodes, embedding_batch.embeddings):
         node.embedding = embedding
+    
+    # Mark all files with chunks as having successful embedding
+    for filename in chunks_per_file.keys():
+        if filename in file_statuses:
+            file_statuses[filename].embedding = StageResult(
+                StageStatus.SUCCESS,
+                f"Embedded {chunks_per_file[filename]} chunks"
+            )
     
     # Initialize ChromaDB
     chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
@@ -392,9 +507,26 @@ def build_index_from_library_parallel(
     manager._save_sync_cache()
     LOGGER.info("Sync cache updated")
     
-    LOGGER.info("=== Parallel Processing Complete ===")
+    # Finalize report
+    elapsed_time = time.time() - start_time
+    report.total_duration_sec = elapsed_time
     
-    return nodes, index
+    # Add all file statuses to report
+    for status in file_statuses.values():
+        report.add_status(status)
+    
+    # Save report
+    report_path = paths.cache_dir / "last_processing_report.json"
+    save_processing_report(report, report_path)
+    LOGGER.info("Processing report saved to %s", report_path)
+    
+    LOGGER.info("=== Parallel Processing Complete ===")
+    LOGGER.info("Total time: %.2f seconds", elapsed_time)
+    LOGGER.info("Results: %d successful, %d warnings, %d failed",
+               report.successful, report.warnings, report.failed)
+    
+    return nodes, index, report
+
 
 def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[VectorStoreIndex]]:
     """Load cached nodes and rehydrate the index if possible."""
@@ -413,6 +545,9 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
         return cached_nodes, index
     LOGGER.info("No existing cache found.")
     return None, None
+
+
+# ... rest of file continues with IncrementalIndexManager class unchanged ...
 
 
 @dataclass

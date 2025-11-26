@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import html
 from markdown import markdown as md
-
 import streamlit as st
 
 from .config import AppConfig
@@ -19,10 +18,236 @@ from .state import AppState
 from .logger import LOGGER
 from .constants import MAX_CONTEXT_TURNS  # Import for context display
 from .session_uploads import MAX_UPLOADS_PER_SESSION
+from .processing_status import ProcessingReport, DocumentProcessingStatus, StageStatus
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
+
+
+def _stage_icon(status: StageStatus) -> str:
+    """Get icon for stage status."""
+    icons = {
+        StageStatus.SUCCESS: "✅",
+        StageStatus.WARNING: "⚠️",
+        StageStatus.FAILED: "❌",
+        StageStatus.SKIPPED: "⏭️",
+        StageStatus.PENDING: "⏳",
+    }
+    return icons.get(status, "❓")
+
+
+def render_processing_status_table(report: ProcessingReport) -> None:
+    """Display processing status table after index build/sync.
+    
+    Shows:
+    - Summary metrics
+    - Detailed table of all files with stage-by-stage status
+    - Expandable details for files with issues
+    
+    Args:
+        report: ProcessingReport from build_index_from_library_parallel
+    """
+    
+    with st.expander("📊 Processing Status Report", expanded=True):
+        # Summary stats
+        st.markdown("### Summary")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("Total Files", report.total_files)
+        with col2:
+            st.metric("✅ Successful", report.successful)
+        with col3:
+            st.metric("⚠️ Warnings", report.warnings)
+        with col4:
+            st.metric("❌ Failed", report.failed)
+        with col5:
+            if report.total_duration_sec:
+                st.metric("⏱️ Duration", f"{report.total_duration_sec:.1f}s")
+        
+        st.markdown("---")
+        
+        # Detailed table
+        if report.file_statuses:
+            st.markdown("### Detailed Status")
+            
+            # Create dataframe for display
+            table_data = []
+            for status in report.file_statuses:
+                # Determine row color based on overall status
+                row_data = {
+                    "📄 File": status.filename,
+                    "Status": status.status_emoji,
+                    "Parse": _stage_icon(status.parsing.status),
+                    "Extract": _stage_icon(status.extraction.status),
+                    "Validate": _stage_icon(status.validation.status),
+                    "Embed": _stage_icon(status.embedding.status),
+                    "Chunks": status.chunks_created if status.chunks_created else "-",
+                    "Size": _format_file_size(status.file_size_bytes) if status.file_size_bytes else "-",
+                }
+                
+                # Add cache indicator
+                if status.used_cache:
+                    row_data["📄 File"] = f"{status.filename} 💾"
+                
+                table_data.append(row_data)
+            
+            # Display table
+            st.dataframe(
+                table_data,
+                use_container_width=True,
+                height=min(400, len(table_data) * 35 + 38),  # Dynamic height
+                hide_index=True,
+            )
+            
+            # Legend
+            with st.expander("ℹ️ Legend"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("""
+                    **Status Icons:**
+                    - ✅ Success
+                    - ⚠️ Warning
+                    - ❌ Failed
+                    - ⏭️ Skipped
+                    - ⏳ Pending
+                    """)
+                with col2:
+                    st.markdown("""
+                    **Indicators:**
+                    - 💾 Used cached extraction
+                    - Chunks: Number of text chunks created
+                    - Size: Original file size
+                    """)
+            
+            st.markdown("---")
+            
+            # Show details for failed/warning files
+            problem_files = [
+                s for s in report.file_statuses 
+                if s.overall_status in [StageStatus.FAILED, StageStatus.WARNING]
+            ]
+            
+            if problem_files:
+                st.markdown("### ⚠️ Files Requiring Attention")
+                st.caption(f"{len(problem_files)} file(s) with issues")
+                
+                for status in problem_files:
+                    with st.expander(f"{status.status_emoji} {status.filename}", expanded=False):
+                        # Show issue in each stage
+                        for stage_name in ["parsing", "extraction", "validation", "embedding"]:
+                            stage_result = getattr(status, stage_name)
+                            
+                            if stage_result.status == StageStatus.FAILED:
+                                st.error(f"**{stage_name.title()}:** {stage_result.message}")
+                                if stage_result.details:
+                                    with st.expander("📋 Technical Details"):
+                                        st.json(stage_result.details)
+                            
+                            elif stage_result.status == StageStatus.WARNING:
+                                st.warning(f"**{stage_name.title()}:** {stage_result.message}")
+                                if stage_result.details:
+                                    with st.expander("📋 Technical Details"):
+                                        st.json(stage_result.details)
+                        
+                        # Show file info
+                        if status.file_size_bytes:
+                            st.info(f"**File Size:** {_format_file_size(status.file_size_bytes)}")
+                        if status.chunks_created:
+                            st.info(f"**Chunks Created:** {status.chunks_created}")
+            
+            else:
+                st.success("✅ All files processed successfully!")
+        
+        else:
+            st.info("No file status information available.")
+
+
+def render_admin_index_management(app_state) -> None:
+    """Render the index management section of admin panel.
+    
+    This replaces the sidebar index controls and puts them in main area.
+    Includes the processing status table display.
+    
+    Args:
+        app_state: AppState instance
+    """
+    st.header("📚 Document Library Management")
+    
+    st.markdown("""
+    Build or sync the document index to process maritime documents.
+    The index powers the search and retrieval system.
+    """)
+    
+    # Build controls
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        clear_cache = st.checkbox(
+            "🔄 Clear Gemini cache and re-extract all files",
+            value=False,
+            help="Force re-extraction of all documents (slower but ensures fresh data)"
+        )
+        
+        if clear_cache:
+            st.warning("⚠️ All files will be re-extracted via Gemini API. This may take several minutes.")
+    
+    with col2:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        
+        if st.button(
+            "🔨 Rebuild Index", 
+            type="primary", 
+            use_container_width=True,
+            help="Process all documents and rebuild the search index"
+        ):
+            rebuild_index_parallel_execute(app_state, clear_cache)
+    
+    st.divider()
+    
+    # Sync controls
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.markdown("""
+        **Sync Library** checks for new, modified, or deleted files and updates the index incrementally.
+        This is faster than a full rebuild.
+        """)
+    
+    with col2:
+        if st.button(
+            "🔄 Sync Library",
+            use_container_width=True,
+            help="Incrementally update index with file changes"
+        ):
+            sync_library(app_state)
+    
+    st.divider()
+    
+    # Show last processing report if available
+    if "last_processing_report" in st.session_state:
+        report = st.session_state["last_processing_report"]
+        render_processing_status_table(report)
+    else:
+        with st.expander("📊 Processing Status Report"):
+            st.info("No recent processing report available. Build or sync the index to see processing status.")
+            
+            # Check if saved report exists on disk
+            from .config import AppConfig
+            config = AppConfig.get()
+            report_path = config.paths.cache_dir / "last_processing_report.json"
+            
+            if report_path.exists():
+                if st.button("📂 Load Last Report from Disk"):
+                    from .processing_status import load_processing_report
+                    report = load_processing_report(report_path)
+                    if report:
+                        st.session_state["last_processing_report"] = report
+                        st.rerun()
+                    else:
+                        st.error("Failed to load report")
 
 def _rerun_app() -> None:
     """Compat helper for rerunning the Streamlit script across versions."""
@@ -432,10 +657,13 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
             overall_status.info("⏳ Starting parallel rebuild (using cached extractions)...")
         
         # Run parallel processing
-        nodes, index = build_index_from_library_parallel(
+        nodes, index, report = build_index_from_library_parallel(
             progress_callback=progress_callback,
             clear_gemini_cache=clear_gemini_cache
         )
+
+        # Store report in session state
+        st.session_state["last_processing_report"] = report
 
         # Update app state
         app_state.nodes = nodes
@@ -452,6 +680,10 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
             f"✅ Rebuilt index with {len(nodes)} chunks using parallel processing!{cache_msg}"
         )
         LOGGER.info("Parallel index rebuild complete: %d nodes", len(nodes))
+
+        # Display processing status table
+        if report:
+            render_processing_status_table(report)
         
         # Mark progress complete
         phase1_progress.progress(1.0)
