@@ -191,7 +191,12 @@ class AppState:
         return session_id
 
     def switch_session(self, session_id: str) -> None:
-        """Switch the active chat session, loading messages if necessary."""
+        """
+        Switch the active chat session, loading messages if necessary.
+        
+        NEW: Automatically restores conversation context (topic, cached chunks, etc.)
+        from the last assistant message in the loaded session.
+        """
         manager = self.ensure_session_manager()
         if not manager.get_session(session_id):
             LOGGER.warning("Requested session does not exist: %s", session_id)
@@ -199,12 +204,151 @@ class AppState:
 
         if session_id != self.current_session_id:
             self.current_session_id = session_id
-            self.reset_session()
+            self.reset_session()  # Clear current context
 
         # Drop any cached messages so they reload fresh from disk
         self._session_messages_cache.pop(session_id, None)
         self.get_current_session_messages()
         self.refresh_session_upload_cache(session_id)
+        
+        # NEW: Restore context from session
+        self.restore_session_context()
+
+        # Rebuild query_history from messages
+        messages = self.get_current_session_messages()
+        self.query_history.clear()
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                query_result = {
+                    "query": msg.get("query", ""),
+                    "answer": msg.get("content", ""),
+                    "topic_extracted": msg.get("topic_extracted"),
+                    "confidence_pct": msg.get("confidence_pct", 0),
+                    "sources": msg.get("sources", []),
+                }
+                self.query_history.append(query_result)
+
+        LOGGER.info("Rebuilt query_history with %d entries", len(self.query_history))
+
+    def restore_session_context(self) -> None:
+        """
+        Restore conversation context from the currently loaded session.
+        
+        This method:
+        1. Finds the last assistant message with context_state
+        2. Restores topic, scope, doc_type preferences, and turn count
+        3. Retrieves cached chunks from ChromaDB using stored IDs
+        4. Re-indexes uploaded files from their JSONL extractions
+        
+        Called automatically after switch_session().
+        """
+        if not self.current_session_id:
+            LOGGER.debug("No active session to restore context from")
+            return
+        
+        messages = self.get_current_session_messages()
+        if not messages:
+            LOGGER.debug("No messages in session, nothing to restore")
+            return
+        
+        # Find LAST assistant message with context_state
+        last_context_state = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                context_state = msg.get("context_state")
+                if context_state:
+                    last_context_state = context_state
+                    break
+        
+        if not last_context_state:
+            LOGGER.info("No context state found in session, starting fresh")
+            return
+        
+        # Restore context fields
+        self.last_topic = last_context_state.get("topic")
+        self.last_doc_type_pref = last_context_state.get("doc_type_pref")
+        self.last_scope = last_context_state.get("scope")
+        self.context_turn_count = last_context_state.get("turn_count", 0)
+        
+        LOGGER.info("📂 Restored session context: topic='%s', scope='%s', turn=%d/6", 
+                self.last_topic, self.last_scope, self.context_turn_count)
+        
+        # Restore cached chunks by retrieving from ChromaDB using IDs
+        cached_chunk_ids = last_context_state.get("cached_chunk_ids", [])
+        if cached_chunk_ids and self.nodes:
+            # Build node map (id -> node) for fast lookup
+            LOGGER.debug("Building node map for chunk restoration...")
+            from llama_index.core.schema import NodeWithScore
+
+            node_map = {}
+            for node in self.nodes:
+                # Get the actual node ID
+                node_id = getattr(node, 'id_', getattr(node, 'node_id', None))
+                if node_id:
+                    node_map[node_id] = node
+
+            # Retrieve chunks and wrap as NodeWithScore
+            restored_chunks = []
+            missing_chunks = 0
+            for chunk_id in cached_chunk_ids:
+                if chunk_id in node_map:
+                    # Wrap in NodeWithScore (same format as sticky_chunks)
+                    node = node_map[chunk_id]
+                    restored_chunks.append(NodeWithScore(node=node, score=0.8))
+                else:
+                    missing_chunks += 1
+
+            if missing_chunks > 0:
+                LOGGER.warning("⚠️  %d/%d cached chunks not found in current index (may have been rebuilt)",
+                            missing_chunks, len(cached_chunk_ids))
+        
+        elif cached_chunk_ids:
+            LOGGER.warning("⚠️ Cannot restore chunks: index not loaded")
+        
+        # Re-index uploaded files if they exist
+        # Note: This is a placeholder - full implementation needed in session_uploads.py
+        self._restore_session_uploads()
+
+    def _restore_session_uploads(self) -> None:
+        """
+        Re-index uploaded files from JSONL extractions.
+        
+        Reads extraction JSONLs from sessions/{session_id}/uploads/
+        and temporarily re-indexes them (generates embeddings and adds to index).
+        
+        This is called automatically when loading a session with uploaded files.
+        
+        NOTE: Currently a placeholder. Full implementation requires:
+        1. Reading JSONL extraction files
+        2. Converting to Document objects
+        3. Generating embeddings
+        4. Temporarily adding to index (session-scoped)
+        5. Updating session_upload_chunks_cache
+        """
+        if not self.current_session_id:
+            return
+        
+        from .config import AppConfig
+        config = AppConfig.get()
+        upload_dir = config.paths.cache_dir / "sessions" / self.current_session_id / "uploads"
+        
+        if not upload_dir.exists():
+            LOGGER.debug("No upload directory for session")
+            return
+        
+        # Find all extraction JSONLs
+        extraction_files = list(upload_dir.glob("*.jsonl"))
+        if not extraction_files:
+            LOGGER.debug("No uploaded file extractions to restore")
+            return
+        
+        LOGGER.info("📎 Found %d uploaded files to re-index...", len(extraction_files))
+        
+        # TODO: Full implementation
+        # For Phase 1, we'll just log that files exist
+        # User will need to re-upload if they want to query them
+        LOGGER.info("⚠️ Upload restoration not yet implemented - re-upload files if needed")
 
     def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
         """Flatten a Message object into the format expected by the UI."""
@@ -240,14 +384,54 @@ class AppState:
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Persist and cache a new chat message for the active session."""
+        """
+        Persist and cache a new chat message for the active session.
+        
+        NEW: For assistant messages, automatically captures and saves context state
+        (topic, scope, cached chunks) for later restoration.
+        """
         session_id = self.current_session_id
         if not session_id:
             session_id = self.create_new_session()
 
+        # NEW: If this is an assistant message, capture context state
+        if role == "assistant" and metadata is not None:
+            # Build context state snapshot
+            context_state = {
+                "topic": self.last_topic,
+                "doc_type_pref": self.last_doc_type_pref,
+                "scope": self.last_scope,
+                "turn_count": self.context_turn_count,
+                "cached_chunk_ids": [],
+            }
+
+            # Capture cached chunk IDs (not full chunks - just references)
+            if self.sticky_chunks:
+                # sticky_chunks contains NodeWithScore objects with .node attribute
+                chunk_ids = []
+                for i, item in enumerate(self.sticky_chunks[:40]):
+                    # Handle both NodeWithScore and raw Document objects
+                    if hasattr(item, 'node'):
+                        # It's a NodeWithScore
+                        node = item.node
+                    else:
+                        # It's a raw Document
+                        node = item
+                    
+                    # Get ID from node
+                    node_id = getattr(node, 'id_', getattr(node, 'node_id', f"chunk_{i}"))
+                    chunk_ids.append(node_id)
+                
+                context_state["cached_chunk_ids"] = chunk_ids
+                LOGGER.debug("Captured %d cached chunk IDs for context restoration", len(chunk_ids))
+            
+            # Add to message metadata
+            metadata["context_state"] = context_state
+
         manager = self.ensure_session_manager()
         manager.add_message(session_id, role=role, content=content, metadata=metadata)
 
+        # Update cache
         cached_entry: Dict[str, Any] = {
             "role": role,
             "content": content,
