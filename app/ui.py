@@ -96,7 +96,7 @@ def render_processing_status_table(report: ProcessingReport) -> None:
             # Display table
             st.dataframe(
                 table_data,
-                use_container_width=True,
+                width="stretch",
                 height=min(400, len(table_data) * 35 + 38),  # Dynamic height
                 hide_index=True,
             )
