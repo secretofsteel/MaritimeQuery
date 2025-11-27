@@ -214,6 +214,23 @@ class AppState:
         # NEW: Restore context from session
         self.restore_session_context()
 
+        # Rebuild query_history from messages
+        messages = self.get_current_session_messages()
+        self.query_history.clear()
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                query_result = {
+                    "query": msg.get("query", ""),
+                    "answer": msg.get("content", ""),
+                    "topic_extracted": msg.get("topic_extracted"),
+                    "confidence_pct": msg.get("confidence_pct", 0),
+                    "sources": msg.get("sources", []),
+                }
+                self.query_history.append(query_result)
+
+        LOGGER.info("Rebuilt query_history with %d entries", len(self.query_history))
+
     def restore_session_context(self) -> None:
         """
         Restore conversation context from the currently loaded session.
@@ -262,27 +279,29 @@ class AppState:
         if cached_chunk_ids and self.nodes:
             # Build node map (id -> node) for fast lookup
             LOGGER.debug("Building node map for chunk restoration...")
+            from llama_index.core.schema import NodeWithScore
+
             node_map = {}
             for node in self.nodes:
-                node_id = getattr(node, 'node_id', getattr(node, 'id_', None))
+                # Get the actual node ID
+                node_id = getattr(node, 'id_', getattr(node, 'node_id', None))
                 if node_id:
                     node_map[node_id] = node
-            
-            # Retrieve chunks
+
+            # Retrieve chunks and wrap as NodeWithScore
             restored_chunks = []
+            missing_chunks = 0
             for chunk_id in cached_chunk_ids:
                 if chunk_id in node_map:
-                    restored_chunks.append(node_map[chunk_id])
+                    # Wrap in NodeWithScore (same format as sticky_chunks)
+                    node = node_map[chunk_id]
+                    restored_chunks.append(NodeWithScore(node=node, score=0.8))
                 else:
-                    LOGGER.warning("Chunk ID not found in index: %s", chunk_id)
-            
-            if restored_chunks:
-                self.sticky_chunks = restored_chunks
-                LOGGER.info("✅ Restored %d/%d cached chunks", 
-                        len(restored_chunks), len(cached_chunk_ids))
-            else:
-                LOGGER.warning("⚠️ Could not restore any cached chunks (IDs not found in current index)")
-                # This is OK - just means we'll do fresh retrieval on next query
+                    missing_chunks += 1
+
+            if missing_chunks > 0:
+                LOGGER.warning("⚠️  %d/%d cached chunks not found in current index (may have been rebuilt)",
+                            missing_chunks, len(cached_chunk_ids))
         
         elif cached_chunk_ids:
             LOGGER.warning("⚠️ Cannot restore chunks: index not loaded")
@@ -385,16 +404,26 @@ class AppState:
                 "turn_count": self.context_turn_count,
                 "cached_chunk_ids": [],
             }
-            
+
             # Capture cached chunk IDs (not full chunks - just references)
             if self.sticky_chunks:
-                # Get up to 40 chunk IDs for restoration
-                context_state["cached_chunk_ids"] = [
-                    getattr(chunk, 'node_id', getattr(chunk, 'id_', f"chunk_{i}"))
-                    for i, chunk in enumerate(self.sticky_chunks[:40])
-                ]
-                LOGGER.debug("Captured %d cached chunk IDs for context restoration", 
-                            len(context_state["cached_chunk_ids"]))
+                # sticky_chunks contains NodeWithScore objects with .node attribute
+                chunk_ids = []
+                for i, item in enumerate(self.sticky_chunks[:40]):
+                    # Handle both NodeWithScore and raw Document objects
+                    if hasattr(item, 'node'):
+                        # It's a NodeWithScore
+                        node = item.node
+                    else:
+                        # It's a raw Document
+                        node = item
+                    
+                    # Get ID from node
+                    node_id = getattr(node, 'id_', getattr(node, 'node_id', f"chunk_{i}"))
+                    chunk_ids.append(node_id)
+                
+                context_state["cached_chunk_ids"] = chunk_ids
+                LOGGER.debug("Captured %d cached chunk IDs for context restoration", len(chunk_ids))
             
             # Add to message metadata
             metadata["context_state"] = context_state

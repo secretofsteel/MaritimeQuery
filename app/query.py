@@ -1639,10 +1639,9 @@ Please provide a clear, concise answer with proper citations."""
         LOGGER.info("DEBUG: Updating conversation state...")
     
     if use_conversation_context:
-        if app_state.context_turn_count > 0:
-            app_state.context_turn_count += 1
-            if DEBUG_RAG:
-                LOGGER.info("DEBUG: Incremented context_turn_count to %d", app_state.context_turn_count)
+        app_state.context_turn_count += 1
+        if DEBUG_RAG:
+            LOGGER.info("DEBUG: Incremented context_turn_count to %d", app_state.context_turn_count)
         app_state.last_topic = current_topic
         if hasattr(app_state, 'last_doc_type_pref'):
             app_state.last_doc_type_pref = doc_type_preference
