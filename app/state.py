@@ -313,22 +313,13 @@ class AppState:
     def _restore_session_uploads(self) -> None:
         """
         Re-index uploaded files from JSONL extractions.
-        
-        Reads extraction JSONLs from sessions/{session_id}/uploads/
-        and temporarily re-indexes them (generates embeddings and adds to index).
-        
-        This is called automatically when loading a session with uploaded files.
-        
-        NOTE: Currently a placeholder. Full implementation requires:
-        1. Reading JSONL extraction files
-        2. Converting to Document objects
-        3. Generating embeddings
-        4. Temporarily adding to index (session-scoped)
-        5. Updating session_upload_chunks_cache
         """
         if not self.current_session_id:
             return
         
+        upload_manager = self.ensure_session_upload_manager()
+        
+        # Check if there are any extraction JSONLs to restore
         from .config import AppConfig
         config = AppConfig.get()
         upload_dir = config.paths.cache_dir / "sessions" / self.current_session_id / "uploads"
@@ -337,7 +328,7 @@ class AppState:
             LOGGER.debug("No upload directory for session")
             return
         
-        # Find all extraction JSONLs
+        # Count extraction files
         extraction_files = list(upload_dir.glob("*.jsonl"))
         if not extraction_files:
             LOGGER.debug("No uploaded file extractions to restore")
@@ -345,10 +336,36 @@ class AppState:
         
         LOGGER.info("📎 Found %d uploaded files to re-index...", len(extraction_files))
         
-        # TODO: Full implementation
-        # For Phase 1, we'll just log that files exist
-        # User will need to re-upload if they want to query them
-        LOGGER.info("⚠️ Upload restoration not yet implemented - re-upload files if needed")
+        # NEW: Add spinner here ↓
+        import streamlit as st
+        
+        with st.spinner(f"📎 Re-indexing {len(extraction_files)} uploaded file{'s' if len(extraction_files) != 1 else ''}..."):
+            # Restore uploads from JSONLs
+            try:
+                result = upload_manager.restore_uploads_from_jsonl(self.current_session_id)
+                
+                status = result.get("status")
+                if status == "restored":
+                    restored = result.get("restored_count", 0)
+                    failed = result.get("failed_count", 0)
+                    total_chunks = result.get("total_chunks", 0)
+                    
+                    if restored > 0:
+                        LOGGER.info("✅ Restored %d uploaded files (%d chunks)", restored, total_chunks)
+                    if failed > 0:
+                        LOGGER.warning("⚠️  Failed to restore %d uploaded files", failed)
+                    
+                    # Refresh cache so UI shows restored files
+                    self.refresh_session_upload_cache(self.current_session_id)
+                elif status == "no_uploads":
+                    LOGGER.debug("No uploads to restore")
+                else:
+                    LOGGER.warning("Upload restoration failed: %s", result.get("reason", "Unknown error"))
+                    
+            except Exception as exc:
+                LOGGER.error("Failed to restore session uploads: %s", exc)
+                import traceback
+                traceback.print_exc()
 
     def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
         """Flatten a Message object into the format expected by the UI."""
