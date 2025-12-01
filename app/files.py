@@ -100,6 +100,63 @@ def extract_with_pymupdf4llm(path: Path) -> Optional[str]:
         )
         return None
 
+def _extract_images_from_docx(document, extract_visuals: bool = True) -> List[Dict[str, Any]]:
+    """
+    Extract embedded images from DOCX using python-docx.
+    
+    Args:
+        document: python-docx Document object
+        extract_visuals: Whether to process images with Gemini Vision
+    
+    Returns:
+        List of dicts with image position, bytes, and description
+    """
+    if not extract_visuals:
+        return []
+    
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    
+    images = []
+    
+    # Track which paragraph each image is in
+    for para_idx, paragraph in enumerate(document.paragraphs):
+        # Check for inline shapes (images) in this paragraph
+        for run in paragraph.runs:
+            # Get the run's XML element to find images
+            inline_shapes = run._element.xpath('.//a:blip')
+            
+            for blip in inline_shapes:
+                # Get the relationship ID for the embedded image
+                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                
+                if not rId:
+                    continue
+                
+                try:
+                    # Get the image part from the relationship
+                    image_part = document.part.related_parts[rId]
+                    image_bytes = image_part.blob
+                    
+                    # Get description from Gemini Vision
+                    context = f"Paragraph {para_idx + 1}"
+                    description = _describe_visual_with_gemini(image_bytes, context)
+                    
+                    if description:
+                        images.append({
+                            "position": para_idx,
+                            "image_bytes": image_bytes,
+                            "description": description,
+                            "context": context,
+                        })
+                        LOGGER.info("Extracted image from paragraph %d in DOCX", para_idx + 1)
+                
+                except Exception as exc:
+                    LOGGER.debug("Failed to extract image from paragraph %d: %s", para_idx + 1, exc)
+                    continue
+    
+    return images
+
+
 
 def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optional[str]:
     """
@@ -702,11 +759,28 @@ def _extract_txt(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _extract_docx(path: Path) -> str:
-    """Extract from modern Word documents, preserving table positions."""
+def _extract_docx(path: Path, extract_visuals: bool = True) -> str:
+    """Extract from modern Word documents, preserving table positions and inline images."""
     from docx import Document as DocxDocument
     
     document = DocxDocument(str(path))
+    
+    # Extract images first (so we know their positions)
+    images_by_position = {}
+    if extract_visuals:
+        try:
+            images = _extract_images_from_docx(document, extract_visuals=True)
+            # Map position -> image description
+            for img in images:
+                pos = img["position"]
+                if pos not in images_by_position:
+                    images_by_position[pos] = []
+                images_by_position[pos].append(img)
+            if images:
+                LOGGER.info("Found %d images in DOCX: %s", len(images), path.name)
+        except Exception as exc:
+            LOGGER.warning("Image extraction failed for %s: %s", path.name, exc)
+    
     parts: List[str] = []
     
     # Header tables and paragraphs
@@ -726,14 +800,25 @@ def _extract_docx(path: Path) -> str:
             if para.text.strip():
                 parts.append(para.text)
     
-    # FIXED: Extract body elements in document order (paragraphs AND tables inline)
+    # Extract body elements in document order (paragraphs, tables, AND images inline)
+    para_counter = 0
     for element in document.element.body:
         # Paragraph
         if element.tag.endswith('p'):
             for para in document.paragraphs:
                 if para._element == element:
+                    # Add paragraph text
                     if para.text.strip():
                         parts.append(para.text)
+                    
+                    # Check if this paragraph has images
+                    if para_counter in images_by_position:
+                        for img in images_by_position[para_counter]:
+                            # Format image description with clear markers (same as PDF)
+                            img_block = f"[IMAGE - {img['context']}]\n{img['description']}\n[/IMAGE]"
+                            parts.append(img_block)
+                    
+                    para_counter += 1
                     break
         
         # Table (inline with paragraphs)
