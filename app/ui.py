@@ -1548,7 +1548,10 @@ def render_app(
             manager = app_state.ensure_session_upload_manager()
             new_records: List[Dict[str, Any]] = []
             feedback: List[Tuple[str, str]] = []
-            for uploaded in uploaded_files:
+            
+            total_files = len(uploaded_files)
+            
+            for idx, uploaded in enumerate(uploaded_files, 1):
                 file_bytes = uploaded.read()
                 if not file_bytes:
                     feedback.append(("warning", f"{uploaded.name} contained no data."))
@@ -1561,12 +1564,14 @@ def render_app(
                     LOGGER.info("Skipping %s - already processed", uploaded.name)
                     continue
             
-                result = manager.add_upload(
-                    session_id,
-                    uploaded.name,
-                    file_bytes,
-                    uploaded.type or "application/octet-stream",
-            )
+                # NEW: Per-file spinner with progress counter
+                with st.spinner(f"📎 Processing **{uploaded.name}** ({idx}/{total_files})..."):
+                    result = manager.add_upload(
+                        session_id,
+                        uploaded.name,
+                        file_bytes,
+                        uploaded.type or "application/octet-stream",
+                    )
             
                 status = result.get("status")
                 if status == "added":
