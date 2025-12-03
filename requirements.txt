@@ -21,6 +21,7 @@ pandas
 spire.doc
 aspose-words
 rapidfuzz
+Pillow
 
 #PDF processing libraries
 pymupdf

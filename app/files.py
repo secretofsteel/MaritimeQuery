@@ -104,6 +104,9 @@ def _extract_images_from_docx(document, extract_visuals: bool = True) -> List[Di
     """
     Extract embedded images from DOCX using python-docx.
     
+    Filters out small decorative images (logos, icons) using size thresholds
+    similar to PDF extraction logic.
+    
     Args:
         document: python-docx Document object
         extract_visuals: Whether to process images with Gemini Vision
@@ -115,8 +118,15 @@ def _extract_images_from_docx(document, extract_visuals: bool = True) -> List[Di
         return []
     
     from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.shared import Inches
+    from PIL import Image
     
     images = []
+    
+    # Size thresholds (matching PDF logic)
+    # DOCX uses EMUs (English Metric Units): 914,400 EMUs = 1 inch = 72 points
+    MIN_DIMENSION_INCHES = 1.4  # ~100 points (100/72 inches)
+    MIN_AREA_INCHES_SQ = 2.0    # Roughly 5% of a typical page
     
     # Track which paragraph each image is in
     for para_idx, paragraph in enumerate(document.paragraphs):
@@ -136,6 +146,36 @@ def _extract_images_from_docx(document, extract_visuals: bool = True) -> List[Di
                     # Get the image part from the relationship
                     image_part = document.part.related_parts[rId]
                     image_bytes = image_part.blob
+                    
+                    # Get image dimensions to filter small images
+                    try:
+                        img = Image.open(io.BytesIO(image_bytes))
+                        width_px, height_px = img.size
+                        
+                        # Estimate rendered size (assume 96 DPI typical screen resolution)
+                        # This is approximate - actual rendered size depends on document zoom
+                        DPI = 96
+                        width_inches = width_px / DPI
+                        height_inches = height_px / DPI
+                        area_inches_sq = width_inches * height_inches
+                        
+                        # Skip small images (icons, logos, decorative elements)
+                        if width_inches < MIN_DIMENSION_INCHES or height_inches < MIN_DIMENSION_INCHES:
+                            LOGGER.debug("Skipping small image in paragraph %d: %.1f×%.1f inches",
+                                       para_idx + 1, width_inches, height_inches)
+                            continue
+                        
+                        if area_inches_sq < MIN_AREA_INCHES_SQ:
+                            LOGGER.debug("Skipping small area image in paragraph %d: %.1f sq inches",
+                                       para_idx + 1, area_inches_sq)
+                            continue
+                        
+                        LOGGER.debug("Processing image in paragraph %d: %.1f×%.1f inches (%dx%d px)",
+                                   para_idx + 1, width_inches, height_inches, width_px, height_px)
+                        
+                    except Exception as size_exc:
+                        # If we can't get dimensions, process it anyway (better safe than sorry)
+                        LOGGER.debug("Could not determine image size, processing anyway: %s", size_exc)
                     
                     # Get description from Gemini Vision
                     context = f"Paragraph {para_idx + 1}"
