@@ -15,7 +15,239 @@ import pandas as pd
 
 from .logger import LOGGER
 
-
+class DOCXNumberingParser:
+    """
+    Parse Word's numbering.xml to extract list formatting.
+    
+    Handles:
+    - Bullet lists
+    - Numbered lists (decimal, letter, roman)
+    - Multi-level lists
+    - List counters
+    """
+    
+    def __init__(self, document):
+        """
+        Initialize parser with a python-docx Document.
+        
+        Args:
+            document: python-docx Document object
+        """
+        self.document = document
+        self.numbering_defs = {}  # numId -> numbering definition
+        self.counters = {}  # (numId, level) -> current count
+        self._parse_numbering()
+    
+    def _parse_numbering(self):
+        """Parse word/numbering.xml from the DOCX package."""
+        try:
+            # Access the numbering part
+            numbering_part = None
+            for rel in self.document.part.rels.values():
+                if "numbering" in rel.target_ref:
+                    numbering_part = rel.target_part
+                    break
+            
+            if not numbering_part:
+                LOGGER.debug("No numbering part found in DOCX")
+                return
+            
+            # Parse the numbering XML
+            from lxml import etree
+            numbering_xml = numbering_part.blob
+            root = etree.fromstring(numbering_xml)
+            
+            # Namespace for Word XML
+            ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+            
+            # Parse abstract numbering definitions (templates)
+            abstract_nums = {}
+            for abstract_num in root.xpath('.//w:abstractNum', namespaces=ns):
+                abstract_num_id = abstract_num.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}abstractNumId')
+                if not abstract_num_id:
+                    continue
+                
+                levels = {}
+                for lvl in abstract_num.xpath('.//w:lvl', namespaces=ns):
+                    ilvl = lvl.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ilvl')
+                    if ilvl is None:
+                        continue
+                    
+                    # Get number format
+                    num_fmt = lvl.xpath('.//w:numFmt', namespaces=ns)
+                    fmt = num_fmt[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if num_fmt else 'decimal'
+                    
+                    # Get level text (template like "%1.")
+                    lvl_text = lvl.xpath('.//w:lvlText', namespaces=ns)
+                    text_template = lvl_text[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if lvl_text else '%1'
+                    
+                    # Get start value
+                    start = lvl.xpath('.//w:start', namespaces=ns)
+                    start_val = int(start[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '1')) if start else 1
+                    
+                    levels[int(ilvl)] = {
+                        'format': fmt,
+                        'template': text_template,
+                        'start': start_val
+                    }
+                
+                abstract_nums[abstract_num_id] = levels
+            
+            # Parse concrete numbering instances (link to abstract)
+            for num in root.xpath('.//w:num', namespaces=ns):
+                num_id = num.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numId')
+                if not num_id:
+                    continue
+                
+                # Get abstract num reference
+                abstract_num_id_elem = num.xpath('.//w:abstractNumId', namespaces=ns)
+                if not abstract_num_id_elem:
+                    continue
+                
+                abstract_num_id = abstract_num_id_elem[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+                
+                if abstract_num_id in abstract_nums:
+                    self.numbering_defs[num_id] = abstract_nums[abstract_num_id]
+                    
+                    # Initialize counters for this numbering instance
+                    for level in abstract_nums[abstract_num_id].keys():
+                        counter_key = (num_id, level)
+                        self.counters[counter_key] = abstract_nums[abstract_num_id][level]['start']
+            
+            LOGGER.debug("Parsed %d numbering definitions from DOCX", len(self.numbering_defs))
+            
+        except Exception as exc:
+            LOGGER.warning("Failed to parse numbering.xml: %s", exc)
+    
+    def _format_number(self, count: int, num_format: str) -> str:
+        """
+        Format a count according to Word's numbering format.
+        
+        Args:
+            count: Current counter value
+            num_format: Word format type (decimal, lowerLetter, upperRoman, etc.)
+        
+        Returns:
+            Formatted string
+        """
+        if num_format == 'decimal':
+            return str(count)
+        elif num_format == 'lowerLetter':
+            # a, b, c, ..., z, aa, ab, ...
+            result = ''
+            count -= 1  # 0-indexed
+            while count >= 0:
+                result = chr(ord('a') + (count % 26)) + result
+                count = count // 26 - 1
+            return result
+        elif num_format == 'upperLetter':
+            # A, B, C, ..., Z, AA, AB, ...
+            result = ''
+            count -= 1
+            while count >= 0:
+                result = chr(ord('A') + (count % 26)) + result
+                count = count // 26 - 1
+            return result
+        elif num_format == 'lowerRoman':
+            # i, ii, iii, iv, v, ...
+            return self._to_roman(count).lower()
+        elif num_format == 'upperRoman':
+            # I, II, III, IV, V, ...
+            return self._to_roman(count)
+        elif num_format == 'bullet':
+            return '•'
+        else:
+            # Unknown format, use decimal
+            return str(count)
+    
+    def _to_roman(self, num: int) -> str:
+        """Convert integer to Roman numeral."""
+        values = [
+            (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
+            (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
+            (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I')
+        ]
+        result = ''
+        for value, letter in values:
+            while num >= value:
+                result += letter
+                num -= value
+        return result
+    
+    def get_paragraph_number(self, para) -> str:
+        """
+        Get the formatted number/bullet for a paragraph.
+        
+        Args:
+            para: python-docx Paragraph object
+        
+        Returns:
+            Formatted string like "1. ", "a) ", "• ", etc.
+        """
+        try:
+            # Check if paragraph has numbering
+            numPr = para._element.xpath('./w:pPr/w:numPr')
+            if not numPr:
+                return ""
+            
+            # Get numbering level
+            ilvl_elements = para._element.xpath('./w:pPr/w:numPr/w:ilvl')
+            level = int(ilvl_elements[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '0')) if ilvl_elements else 0
+            
+            # Get numbering ID
+            numId_elements = para._element.xpath('./w:pPr/w:numPr/w:numId')
+            if not numId_elements:
+                return ""
+            
+            num_id = numId_elements[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+            
+            # Get numbering definition
+            if num_id not in self.numbering_defs:
+                return "• "  # Fallback to bullet
+            
+            level_def = self.numbering_defs[num_id].get(level)
+            if not level_def:
+                return "• "  # Fallback
+            
+            # Get current counter
+            counter_key = (num_id, level)
+            current_count = self.counters.get(counter_key, level_def['start'])
+            
+            # Format the number
+            num_format = level_def['format']
+            
+            if num_format == 'bullet':
+                formatted = '•'
+            else:
+                formatted = self._format_number(current_count, num_format)
+            
+            # Apply template (like "%1." or "%1)")
+            template = level_def['template']
+            result = template.replace(f'%{level + 1}', formatted)
+            
+            # Increment counter for next use
+            self.counters[counter_key] = current_count + 1
+            
+            # Add indentation based on level
+            indent = "  " * level
+            
+            # Add space after numbering if not already present
+            if not result.endswith(' '):
+                result += ' '
+            
+            return f"{indent}{result}"
+            
+        except Exception as exc:
+            LOGGER.debug("Failed to get paragraph number: %s", exc)
+            return ""
+    
+    def reset_counter(self, num_id: str, level: int):
+        """Reset counter for a specific numbering and level."""
+        counter_key = (num_id, level)
+        if counter_key in self.counters and num_id in self.numbering_defs:
+            level_def = self.numbering_defs[num_id].get(level)
+            if level_def:
+                self.counters[counter_key] = level_def['start']
 
 
 def _df_to_markdown(df, max_rows: int = 100, max_cols: int = 12) -> str:
@@ -800,10 +1032,13 @@ def _extract_txt(path: Path) -> str:
 
 
 def _extract_docx(path: Path, extract_visuals: bool = True) -> str:
-    """Extract from modern Word documents, preserving table positions and inline images."""
+    """Extract from modern Word documents, preserving table positions, images, and list numbering."""
     from docx import Document as DocxDocument
     
     document = DocxDocument(str(path))
+    
+    # Initialize numbering parser
+    numbering_parser = DOCXNumberingParser(document)
     
     # Extract images first (so we know their positions)
     images_by_position = {}
@@ -840,16 +1075,19 @@ def _extract_docx(path: Path, extract_visuals: bool = True) -> str:
             if para.text.strip():
                 parts.append(para.text)
     
-    # Extract body elements in document order (paragraphs, tables, AND images inline)
+    # Extract body elements in document order (paragraphs, tables, images, AND numbering)
     para_counter = 0
     for element in document.element.body:
         # Paragraph
         if element.tag.endswith('p'):
             for para in document.paragraphs:
                 if para._element == element:
-                    # Add paragraph text
-                    if para.text.strip():
-                        parts.append(para.text)
+                    # Add paragraph text with numbering/bullets
+                    text = para.text.strip()
+                    if text:
+                        # Get numbering prefix (e.g., "1. ", "a) ", "• ")
+                        numbering = numbering_parser.get_paragraph_number(para)
+                        parts.append(f"{numbering}{text}")
                     
                     # Check if this paragraph has images
                     if para_counter in images_by_position:
