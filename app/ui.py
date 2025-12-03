@@ -1299,16 +1299,16 @@ def render_app(
                 st.divider()
                 
                 # Rebuild section with checkbox
-                st.write("**Rebuild Index (Parallel)**")
+                if st.button("🔨 Rebuild index", use_container_width=True, key="rebuild_btn", type="primary"):
+                    rebuild_index_parallel_execute(app_state, clear_cache)
+
+                #st.write("**Rebuild Index (Parallel)**")
                 clear_cache = st.checkbox(
                     "🗑️ Clear Gemini cache (re-extract all files)",
                     value=False,
                     key="rebuild_clear_cache",
                     help="Enable to re-extract all files via Gemini. Leave unchecked to use cached extractions (faster)."
-                )
-                
-                if st.button("🔨 Rebuild index", use_container_width=True, key="rebuild_btn", type="primary"):
-                    rebuild_index_parallel_execute(app_state, clear_cache)
+                )           
                 
                 st.divider()
                 
