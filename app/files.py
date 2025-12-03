@@ -281,33 +281,39 @@ class DOCXNumberingParser:
             
             num_def = self.numbering_defs[self.heading_num_id]
             
-            # Reset counters for deeper levels (heading hierarchy)
-            # E.g., if we're at level 1, reset levels 2, 3, 4, etc.
-            for level in range(outline_level + 1, 10):
-                if level in num_def and level in self.outline_counters:
-                    self.outline_counters[level] = num_def[level]['start']
-            
-            # Build the multi-level number (e.g., "7.7.2.2.1")
             if outline_level not in num_def:
                 return ""
             
+            # Check if we're moving to a different level (reset deeper levels)
+            if hasattr(self, '_last_outline_level'):
+                last_level = self._last_outline_level
+                
+                # If we moved UP in hierarchy (e.g., from level 3 to level 2)
+                # OR stayed at same level
+                # Reset all DEEPER levels
+                if outline_level <= last_level:
+                    for level in range(outline_level + 1, 10):
+                        if level in num_def:
+                            self.outline_counters[level] = num_def[level]['start']
+            
+            # Store current level for next iteration
+            self._last_outline_level = outline_level
+            
+            # Build the multi-level number using CURRENT counters (don't increment yet!)
             level_def = num_def[outline_level]
             template = level_def['template']
             
-            # Get current counter for this level
-            current_count = self.outline_counters.get(outline_level, level_def['start'])
-            
-            # Replace all placeholders in template with actual numbers
-            # Template might be "%1.%2.%3." for multi-level numbering
             result = template
             for i in range(outline_level + 1):
                 if i in num_def:
+                    # Use CURRENT counter value (before incrementing)
                     level_count = self.outline_counters.get(i, num_def[i]['start'])
                     level_format = num_def[i]['format']
                     formatted = self._format_number(level_count, level_format)
                     result = result.replace(f'%{i + 1}', formatted)
             
-            # Increment counter for next heading at this level
+            # NOW increment counter for THIS level (for next heading at same level)
+            current_count = self.outline_counters.get(outline_level, level_def['start'])
             self.outline_counters[outline_level] = current_count + 1
             
             # Add space after number if not already present
