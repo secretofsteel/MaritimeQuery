@@ -17,13 +17,13 @@ from .logger import LOGGER
 
 class DOCXNumberingParser:
     """
-    Parse Word's numbering.xml to extract list formatting.
+    Parse Word's numbering.xml and styles.xml to extract list and heading formatting.
     
     Handles:
     - Bullet lists
     - Numbered lists (decimal, letter, roman)
     - Multi-level lists
-    - List counters
+    - Heading outline numbering (7.7.2.2.1 style)
     """
     
     def __init__(self, document):
@@ -36,7 +36,12 @@ class DOCXNumberingParser:
         self.document = document
         self.numbering_defs = {}  # numId -> numbering definition
         self.counters = {}  # (numId, level) -> current count
+        self.outline_counters = {}  # level -> current count for headings
+        self.heading_num_id = None  # numId used for outline numbering
+        self.heading_styles = {}  # style_name -> outline level
+        
         self._parse_numbering()
+        self._parse_styles()
     
     def _parse_numbering(self):
         """Parse word/numbering.xml from the DOCX package."""
@@ -77,7 +82,7 @@ class DOCXNumberingParser:
                     num_fmt = lvl.xpath('.//w:numFmt', namespaces=ns)
                     fmt = num_fmt[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if num_fmt else 'decimal'
                     
-                    # Get level text (template like "%1.")
+                    # Get level text (template like "%1.%2.%3")
                     lvl_text = lvl.xpath('.//w:lvlText', namespaces=ns)
                     text_template = lvl_text[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if lvl_text else '%1'
                     
@@ -119,6 +124,79 @@ class DOCXNumberingParser:
         except Exception as exc:
             LOGGER.warning("Failed to parse numbering.xml: %s", exc)
     
+    def _parse_styles(self):
+        """Parse word/styles.xml to find heading outline numbering."""
+        try:
+            # Access the styles part
+            styles_part = None
+            for rel in self.document.part.rels.values():
+                if "styles" in rel.target_ref:
+                    styles_part = rel.target_part
+                    break
+            
+            if not styles_part:
+                LOGGER.debug("No styles part found in DOCX")
+                return
+            
+            # Parse the styles XML
+            from lxml import etree
+            styles_xml = styles_part.blob
+            root = etree.fromstring(styles_xml)
+            
+            # Namespace for Word XML
+            ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+            
+            # Find heading styles linked to outline numbering
+            for style in root.xpath('.//w:style', namespaces=ns):
+                style_id = style.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId')
+                if not style_id:
+                    continue
+                
+                # Check if this style has numbering
+                num_pr = style.xpath('.//w:numPr', namespaces=ns)
+                if not num_pr:
+                    continue
+                
+                # Get the numId
+                num_id_elem = num_pr[0].xpath('.//w:numId', namespaces=ns)
+                if not num_id_elem:
+                    continue
+                
+                num_id = num_id_elem[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+                
+                # Get the outline level (ilvl)
+                ilvl_elem = num_pr[0].xpath('.//w:ilvl', namespaces=ns)
+                if ilvl_elem:
+                    ilvl = int(ilvl_elem[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '0'))
+                else:
+                    # Try to infer from heading number (Heading1 = level 0, Heading2 = level 1, etc.)
+                    if 'heading' in style_id.lower():
+                        # Extract number from style name (e.g., "Heading1" -> 0, "Heading2" -> 1)
+                        import re
+                        match = re.search(r'heading\s*(\d+)', style_id, re.IGNORECASE)
+                        if match:
+                            ilvl = int(match.group(1)) - 1  # Heading 1 = level 0
+                        else:
+                            ilvl = 0
+                    else:
+                        ilvl = 0
+                
+                # Store the mapping
+                self.heading_styles[style_id] = ilvl
+                
+                # Remember which numId is used for headings (assume first one found)
+                if self.heading_num_id is None:
+                    self.heading_num_id = num_id
+                    # Initialize outline counters
+                    if num_id in self.numbering_defs:
+                        for level in self.numbering_defs[num_id].keys():
+                            self.outline_counters[level] = self.numbering_defs[num_id][level]['start']
+            
+            LOGGER.debug("Found %d heading styles with outline numbering", len(self.heading_styles))
+            
+        except Exception as exc:
+            LOGGER.warning("Failed to parse styles.xml: %s", exc)
+    
     def _format_number(self, count: int, num_format: str) -> str:
         """
         Format a count according to Word's numbering format.
@@ -130,7 +208,7 @@ class DOCXNumberingParser:
         Returns:
             Formatted string
         """
-        if num_format == 'decimal':
+        if num_format == 'decimal' or num_format == 'decimalZero':
             return str(count)
         elif num_format == 'lowerLetter':
             # a, b, c, ..., z, aa, ab, ...
@@ -162,6 +240,8 @@ class DOCXNumberingParser:
     
     def _to_roman(self, num: int) -> str:
         """Convert integer to Roman numeral."""
+        if num <= 0:
+            return str(num)
         values = [
             (1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),
             (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),
@@ -174,9 +254,75 @@ class DOCXNumberingParser:
                 num -= value
         return result
     
+    def get_heading_number(self, para) -> str:
+        """
+        Get the formatted outline number for a heading paragraph.
+        
+        Handles multi-level heading numbering like 7.7.2.2.1
+        
+        Args:
+            para: python-docx Paragraph object
+        
+        Returns:
+            Formatted string like "7.7.2.2.1 " or empty string if not a numbered heading
+        """
+        try:
+            # Check if paragraph has a heading style
+            style_id = para.style.style_id if para.style else None
+            if not style_id or style_id not in self.heading_styles:
+                return ""
+            
+            # Get the outline level for this heading style
+            outline_level = self.heading_styles[style_id]
+            
+            # Get numbering definition for headings
+            if not self.heading_num_id or self.heading_num_id not in self.numbering_defs:
+                return ""
+            
+            num_def = self.numbering_defs[self.heading_num_id]
+            
+            # Reset counters for deeper levels (heading hierarchy)
+            # E.g., if we're at level 1, reset levels 2, 3, 4, etc.
+            for level in range(outline_level + 1, 10):
+                if level in num_def and level in self.outline_counters:
+                    self.outline_counters[level] = num_def[level]['start']
+            
+            # Build the multi-level number (e.g., "7.7.2.2.1")
+            if outline_level not in num_def:
+                return ""
+            
+            level_def = num_def[outline_level]
+            template = level_def['template']
+            
+            # Get current counter for this level
+            current_count = self.outline_counters.get(outline_level, level_def['start'])
+            
+            # Replace all placeholders in template with actual numbers
+            # Template might be "%1.%2.%3." for multi-level numbering
+            result = template
+            for i in range(outline_level + 1):
+                if i in num_def:
+                    level_count = self.outline_counters.get(i, num_def[i]['start'])
+                    level_format = num_def[i]['format']
+                    formatted = self._format_number(level_count, level_format)
+                    result = result.replace(f'%{i + 1}', formatted)
+            
+            # Increment counter for next heading at this level
+            self.outline_counters[outline_level] = current_count + 1
+            
+            # Add space after number if not already present
+            if result and not result.endswith(' '):
+                result += ' '
+            
+            return result
+            
+        except Exception as exc:
+            LOGGER.debug("Failed to get heading number: %s", exc)
+            return ""
+    
     def get_paragraph_number(self, para) -> str:
         """
-        Get the formatted number/bullet for a paragraph.
+        Get the formatted number/bullet for a list paragraph (not headings).
         
         Args:
             para: python-docx Paragraph object
@@ -185,7 +331,7 @@ class DOCXNumberingParser:
             Formatted string like "1. ", "a) ", "• ", etc.
         """
         try:
-            # Check if paragraph has numbering
+            # Check if paragraph has numbering (list, not heading)
             numPr = para._element.xpath('./w:pPr/w:numPr')
             if not numPr:
                 return ""
@@ -200,6 +346,10 @@ class DOCXNumberingParser:
                 return ""
             
             num_id = numId_elements[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+            
+            # Skip if this is the heading numId (already handled by get_heading_number)
+            if num_id == self.heading_num_id:
+                return ""
             
             # Get numbering definition
             if num_id not in self.numbering_defs:
@@ -240,14 +390,6 @@ class DOCXNumberingParser:
         except Exception as exc:
             LOGGER.debug("Failed to get paragraph number: %s", exc)
             return ""
-    
-    def reset_counter(self, num_id: str, level: int):
-        """Reset counter for a specific numbering and level."""
-        counter_key = (num_id, level)
-        if counter_key in self.counters and num_id in self.numbering_defs:
-            level_def = self.numbering_defs[num_id].get(level)
-            if level_def:
-                self.counters[counter_key] = level_def['start']
 
 
 def _df_to_markdown(df, max_rows: int = 100, max_cols: int = 12) -> str:
@@ -1082,11 +1224,16 @@ def _extract_docx(path: Path, extract_visuals: bool = True) -> str:
         if element.tag.endswith('p'):
             for para in document.paragraphs:
                 if para._element == element:
-                    # Add paragraph text with numbering/bullets
+                    # Add paragraph text with numbering/bullets OR heading numbers
                     text = para.text.strip()
                     if text:
-                        # Get numbering prefix (e.g., "1. ", "a) ", "• ")
-                        numbering = numbering_parser.get_paragraph_number(para)
+                        # Try heading number first (for outline-numbered headings)
+                        numbering = numbering_parser.get_heading_number(para)
+                        
+                        # If no heading number, try list numbering
+                        if not numbering:
+                            numbering = numbering_parser.get_paragraph_number(para)
+                        
                         parts.append(f"{numbering}{text}")
                     
                     # Check if this paragraph has images
