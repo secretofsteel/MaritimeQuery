@@ -283,6 +283,7 @@ class DOCXNumberingParser:
             # Initialize
             if not hasattr(self, '_prev_level'):
                 self._prev_level = -1
+                self._seen_levels = set()
                 for lv in num_def.keys():
                     self.outline_counters[lv] = num_def[lv]['start']
             
@@ -292,12 +293,19 @@ class DOCXNumberingParser:
             if level == prev:
                 self.outline_counters[level] += 1
             
+            # If we're returning to a level we've seen before (but from deeper): increment it
+            elif level in self._seen_levels and level < prev:
+                self.outline_counters[level] += 1
+
             # If we're at shallower level: we came back up, reset deeper levels
             if level < prev:
                 for lv in range(level + 1, 10):
                     if lv in num_def:
                         self.outline_counters[lv] = num_def[lv]['start']
             
+            # Mark this level as seen
+            self._seen_levels.add(level)
+
             # Build number
             template = num_def[level]['template']
             result = template
