@@ -267,70 +267,48 @@ class DOCXNumberingParser:
             Formatted string like "7.7.2.2.1 " or empty string if not a numbered heading
         """
         try:
-            # Check if paragraph has a heading style
             style_id = para.style.style_id if para.style else None
             if not style_id or style_id not in self.heading_styles:
                 return ""
             
-            # Get the outline level for this heading style
-            outline_level = self.heading_styles[style_id]
+            level = self.heading_styles[style_id]
             
-            # Get numbering definition for headings
             if not self.heading_num_id or self.heading_num_id not in self.numbering_defs:
                 return ""
             
             num_def = self.numbering_defs[self.heading_num_id]
-            
-            if outline_level not in num_def:
+            if level not in num_def:
                 return ""
             
-            level_def = num_def[outline_level]
+            # Initialize
+            if not hasattr(self, '_prev_level'):
+                self._prev_level = -1
+                for lv in num_def.keys():
+                    self.outline_counters[lv] = num_def[lv]['start']
             
-            # Handle level transitions
-            if hasattr(self, '_last_outline_level'):
-                last_level = self._last_outline_level
-                
-                # If we're at SAME level or HIGHER level than before:
-                # This means we finished processing the previous heading's children
-                # So increment the PREVIOUS level's counter
-                if outline_level <= last_level:
-                    # Increment the counter for the level we just left
-                    if last_level in self.outline_counters:
-                        self.outline_counters[last_level] += 1
-                    
-                    # Reset all levels DEEPER than current level
-                    for level in range(outline_level + 1, 10):
-                        if level in num_def:
-                            self.outline_counters[level] = num_def[level]['start']
-            else:
-                # First heading - initialize all counters if not already done
-                for level in num_def.keys():
-                    if level not in self.outline_counters:
-                        self.outline_counters[level] = num_def[level]['start']
+            prev = self._prev_level
             
-            # Build the multi-level number using CURRENT counters
-            template = level_def['template']
+            # If we're at same level as previous: this is a sibling, increment
+            if level == prev:
+                self.outline_counters[level] += 1
+            
+            # If we're at shallower level: we came back up, reset deeper levels
+            if level < prev:
+                for lv in range(level + 1, 10):
+                    if lv in num_def:
+                        self.outline_counters[lv] = num_def[lv]['start']
+            
+            # Build number
+            template = num_def[level]['template']
             result = template
-            
-            for i in range(outline_level + 1):
+            for i in range(level + 1):
                 if i in num_def:
-                    # Use CURRENT counter value (no increment yet!)
-                    level_count = self.outline_counters.get(i, num_def[i]['start'])
-                    level_format = num_def[i]['format']
-                    formatted = self._format_number(level_count, level_format)
-                    result = result.replace(f'%{i + 1}', formatted)
+                    result = result.replace(f'%{i + 1}', self._format_number(self.outline_counters[i], num_def[i]['format']))
             
-            # Store current level for next iteration (don't increment yet!)
-            self._last_outline_level = outline_level
+            self._prev_level = level
+            return result + ' ' if result and not result.endswith(' ') else result
             
-            # Add space after number if not already present
-            if result and not result.endswith(' '):
-                result += ' '
-            
-            return result
-            
-        except Exception as exc:
-            LOGGER.debug("Failed to get heading number: %s", exc)
+        except:
             return ""
     
     def get_paragraph_number(self, para) -> str:
