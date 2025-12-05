@@ -234,8 +234,6 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     nodes = chunk_documents(documents)
     LOGGER.info("Created %s chunks", len(nodes))
 
-    cache_nodes(nodes, len(documents), paths.nodes_cache_path, paths.cache_info_path)
-
     chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
     collection = chroma_client.get_or_create_collection("maritime_docs")
     vector_store = ChromaVectorStore(chroma_collection=collection)
@@ -244,6 +242,11 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     LOGGER.info("Embedding %s chunks...", len(nodes))
     index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, show_progress=True)
     LOGGER.info("Embeddings created and stored.")
+    
+    # Cache nodes AFTER embedding so embeddings are preserved on reload
+    # Note: VectorStoreIndex attaches embeddings to nodes during construction
+    cache_nodes(nodes, len(documents), paths.nodes_cache_path, paths.cache_info_path)
+    LOGGER.info("Cached nodes with embeddings")
 
     manager = IncrementalIndexManager(paths.docs_path, paths.gemini_json_cache, paths.nodes_cache_path, paths.cache_info_path, paths.chroma_path)
     manager.sync_cache["files_hash"] = manager._get_files_hash(paths.docs_path)
@@ -457,8 +460,6 @@ def build_index_from_library_parallel(
         if filename in file_statuses:
             file_statuses[filename].chunks_created = count
     
-    cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
-    
     # Phase 3: Parallel embedding generation
     LOGGER.info("Phase 3: Parallel embedding generation...")
     
@@ -472,9 +473,15 @@ def build_index_from_library_parallel(
     LOGGER.info("Generated %d embeddings in %.2fs", 
                len(embedding_batch.embeddings), embedding_batch.duration_sec)
     
-    # Attach embeddings to nodes
+    # Attach embeddings to nodes BEFORE caching
     for node, embedding in zip(nodes, embedding_batch.embeddings):
         node.embedding = embedding
+    
+    LOGGER.info("Attached embeddings to %d nodes", len(nodes))
+    
+    # Cache nodes WITH embeddings attached (so they're available on reload)
+    cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
+    LOGGER.info("Cached nodes with embeddings")
     
     # Mark all files with chunks as having successful embedding
     for filename in chunks_per_file.keys():
@@ -662,6 +669,15 @@ class IncrementalIndexManager:
                     if index is not None:
                         index.insert_nodes(new_nodes)
                         LOGGER.info("Added %s chunks from %s", len(new_nodes), filename)
+                    
+                    # Ensure embeddings are attached to nodes for caching
+                    # (insert_nodes generates them but may not attach to objects)
+                    from llama_index.core import Settings as LlamaSettings
+                    embed_model = LlamaSettings.embed_model
+                    for node in new_nodes:
+                        if not getattr(node, 'embedding', None):
+                            node.embedding = embed_model.get_text_embedding(node.get_content())
+                    
                     self.nodes.extend(new_nodes)
             except Exception as exc:  # pragma: no cover - defensive path
                 LOGGER.error("Error processing %s: %s", filename, exc)
