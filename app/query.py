@@ -61,58 +61,63 @@ def _attach_embeddings_from_cache(
     Retrieved nodes come from ChromaDB without embeddings.
     Cached nodes (app_state.nodes) have embeddings from indexing.
     
-    Args:
-        retrieved_nodes: Nodes from retriever (missing embeddings)
-        cached_nodes: Nodes from app_state.nodes (have embeddings)
-    
-    Returns:
-        Retrieved nodes with embeddings attached
+    Uses content hash matching with source+section fallback.
     """
-    # Build lookup: node_id -> embedding (try multiple ID attributes)
+    import hashlib
+    
+    def text_hash(text: str) -> str:
+        """Create a hash of normalized text content."""
+        normalized = ' '.join(text[:500].split())
+        return hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    
+    # Build primary lookup by content hash
     embedding_lookup: Dict[str, List[float]] = {}
+    # Secondary lookup by source+section for fallback
+    source_section_lookup: Dict[Tuple[str, str], List[float]] = {}
     
     for node in cached_nodes:
         embedding = getattr(node, 'embedding', None)
         if embedding is None:
             continue
-            
-        # Try multiple ID attributes
-        for attr in ['node_id', 'id_', 'doc_id', 'hash']:
-            node_id = getattr(node, attr, None)
-            if node_id:
-                embedding_lookup[str(node_id)] = embedding
-    
-    if DEBUG_RAG:
-        LOGGER.info("DEBUG: Built embedding lookup with %d entries", len(embedding_lookup))
-        sample_keys = list(embedding_lookup.keys())[:3]
-        LOGGER.info("DEBUG: Sample cached node IDs: %s", sample_keys)
+        
+        text = node.text if hasattr(node, 'text') else node.get_content()
+        if text:
+            embedding_lookup[text_hash(text)] = embedding
+        
+        metadata = getattr(node, 'metadata', {}) or {}
+        source = metadata.get('source', '')
+        section = metadata.get('section', '')
+        if source and section:
+            key = (source, section)
+            if key not in source_section_lookup:
+                source_section_lookup[key] = embedding
     
     # Attach embeddings to retrieved nodes
     attached_count = 0
-    missing_ids = []
     
     for node_with_score in retrieved_nodes:
         node = node_with_score.node
+        metadata = getattr(node, 'metadata', {}) or {}
         
-        # Try multiple ID attributes on retrieved node
-        node_id = None
-        for attr in ['node_id', 'id_', 'doc_id', 'hash']:
-            node_id = getattr(node, attr, None)
-            if node_id and str(node_id) in embedding_lookup:
-                node.embedding = embedding_lookup[str(node_id)]
-                attached_count += 1
-                break
-        else:
-            # No matching ID found - collect for debugging
-            tried_ids = {attr: getattr(node, attr, None) for attr in ['node_id', 'id_', 'doc_id', 'hash']}
-            missing_ids.append(tried_ids)
+        text = node.text if hasattr(node, 'text') else node.get_content()
+        if not text:
+            continue
+        
+        # Try content hash first
+        if text_hash(text) in embedding_lookup:
+            node.embedding = embedding_lookup[text_hash(text)]
+            attached_count += 1
+            continue
+        
+        # Fallback to source+section
+        source = metadata.get('source', '')
+        section = metadata.get('section', '')
+        if (source, section) in source_section_lookup:
+            node.embedding = source_section_lookup[(source, section)]
+            attached_count += 1
     
     LOGGER.info("📎 Attached embeddings to %d/%d retrieved nodes from cache", 
                attached_count, len(retrieved_nodes))
-    
-    if missing_ids and DEBUG_RAG:
-        LOGGER.warning("DEBUG: %d nodes missing from cache. Sample IDs tried: %s", 
-                      len(missing_ids), missing_ids[:3])
     
     return retrieved_nodes
 
