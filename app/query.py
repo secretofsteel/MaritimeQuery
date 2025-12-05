@@ -12,6 +12,9 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.core import Settings as LlamaSettings
 from google.genai import types
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json as json_module
+
 from .config import AppConfig
 from .constants import (
     CONFIDENCE_HIGH_THRESHOLD,
@@ -45,6 +48,208 @@ if USE_RERANKER and cohere is not None:  # pragma: no cover - runtime configurat
             LOGGER.warning("Failed to initialise Cohere client: %s", exc)
             cohere_client = None
 
+# Thread pool for parallel retrieval (module-level singleton)
+_retrieval_executor = ThreadPoolExecutor(max_workers=2)
+
+def analyze_query_comprehensive(
+    query: str,
+    last_query: Optional[str] = None,
+    last_answer_preview: Optional[str] = None,
+    has_conversation_context: bool = False,
+) -> Dict[str, Any]:
+    """
+    Single consolidated LLM call for all pre-retrieval analysis.
+    
+    Replaces separate calls to:
+    - _classify_query_intent_llm()
+    - _extract_topic_keywords()
+    - _detect_topic_shift_with_gemini()
+    - classify_retrieval_strategy()
+    
+    Args:
+        query: Current user query
+        last_query: Previous query (for shift detection)
+        last_answer_preview: Previous answer preview (for shift detection)
+        has_conversation_context: Whether we're in a conversation context
+    
+    Returns:
+        Dict with keys: intent, topic, shift, retrieval_strategy, doc_type_hint
+    """
+    # Build context block if we have previous conversation
+    context_block = ""
+    shift_instruction = ""
+    
+    if has_conversation_context and last_query:
+        context_block = f"""
+PREVIOUS CONVERSATION:
+User asked: "{last_query}"
+Assistant answered: "{last_answer_preview}"
+
+"""
+        shift_instruction = """
+- "shift": Is this a DIRECT CONTINUATION of the previous topic ("FOLLOWUP") or a NEW TOPIC ("DIFFERENT")?
+  - FOLLOWUP: Asking for more details, clarification, next steps on SAME topic
+  - DIFFERENT: New operational area, different procedure/policy, jumping to new task"""
+    else:
+        shift_instruction = '- "shift": null (no previous context)'
+
+    prompt = f"""{context_block}CURRENT QUERY: "{query}"
+
+Analyze this maritime documentation query and return a JSON object.
+
+RESPONSE FORMAT (strict JSON, no markdown):
+{{
+    "intent": "<intent>",
+    "topic": "<topic or null>",
+    "shift": "<FOLLOWUP|DIFFERENT|null>",
+    "retrieval_strategy": "<strategy>",
+    "doc_type_hint": "<type or null>"
+}}
+
+FIELD DEFINITIONS:
+
+1. "intent" (required) - User's conversational intent:
+   - "greeting": Initial greeting (hi, hello, good morning)
+   - "goodbye": Farewell (bye, see you later)
+   - "thank_you": Gratitude/acknowledgment (thanks, got it, cool beans, perfect, roger that)
+   - "follow_up": Wants more on same topic (what else?, tell me more, anything else?)
+   - "clarification": Confused about previous answer (what do you mean?, can you explain?)
+   - "new_query": New question requiring document search
+   - "chitchat": Casual conversation not needing search
+
+2. "topic" - Broad operational context in 2-4 words:
+   - Extract the UMBRELLA topic, not specific subtasks
+   - Examples: "ice operations", "crew policies", "incident reporting", "safety equipment", "ballast operations"
+   - Return null if no clear maritime topic
+
+3. "shift" - Topic continuity (only if previous context provided):
+{shift_instruction}
+
+4. "retrieval_strategy" (required) - How to search:
+   - "chunk_level": Specific facts, discrete details, single data points
+     (e.g., "What is the discharge temperature limit?", "Who is responsible for X?")
+   - "section_level": Procedural queries needing complete instructions
+     (e.g., "What is the procedure for...", "How do I...", "What are the steps for...")
+   - "document_level": Needs full document overview (rare, e.g., "Summarize the safety manual")
+
+5. "doc_type_hint" - If user explicitly asks for specific document type:
+   - "Form", "Checklist", "Procedure", "Policy", "Manual", "Regulation"
+   - Return null if not explicitly requested
+
+RULES:
+- Return ONLY valid JSON, no markdown code blocks, no explanation
+- If greeting/goodbye/thank_you/chitchat, still include retrieval_strategy as "chunk_level"
+- "how to" / "procedure" / "steps" queries → retrieval_strategy = "section_level"
+- When in doubt for retrieval_strategy, default to "chunk_level"
+
+JSON Response:"""
+
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        
+        result = json_module.loads(response.text)
+        
+        # Validate and normalize fields
+        valid_intents = {"greeting", "goodbye", "thank_you", "follow_up", "clarification", "new_query", "chitchat"}
+        if result.get("intent") not in valid_intents:
+            result["intent"] = "new_query"
+        
+        valid_strategies = {"chunk_level", "section_level", "document_level"}
+        if result.get("retrieval_strategy") not in valid_strategies:
+            result["retrieval_strategy"] = "chunk_level"
+        
+        # Normalize shift
+        if result.get("shift"):
+            shift_upper = str(result["shift"]).upper()
+            if "FOLLOWUP" in shift_upper or "FOLLOW_UP" in shift_upper:
+                result["shift"] = "FOLLOWUP"
+            elif "DIFFERENT" in shift_upper:
+                result["shift"] = "DIFFERENT"
+            else:
+                result["shift"] = None
+        
+        LOGGER.info(
+            "Query analysis: intent=%s, topic=%s, shift=%s, strategy=%s, doc_type=%s",
+            result.get("intent"),
+            result.get("topic"),
+            result.get("shift"),
+            result.get("retrieval_strategy"),
+            result.get("doc_type_hint"),
+        )
+        
+        return result
+        
+    except Exception as exc:
+        LOGGER.warning("Consolidated query analysis failed: %s, using fallbacks", exc)
+        # Fallback to heuristic for intent, defaults for rest
+        return {
+            "intent": _classify_query_intent_heuristic(query),
+            "topic": None,
+            "shift": None,
+            "retrieval_strategy": "chunk_level",
+            "doc_type_hint": _detect_doc_type_preference(query),
+        }
+
+
+def parallel_hybrid_retrieval(
+    query: str,
+    vector_retriever: "VectorIndexRetriever",
+    bm25_retriever: "BM25Retriever",
+    k: int = 60,
+    top_k: int = 40,
+    ) -> List[NodeWithScore]:
+    """
+    Execute vector and BM25 search in parallel, then fuse results.
+    
+    Args:
+        query: Search query
+        vector_retriever: LlamaIndex vector retriever
+        bm25_retriever: LlamaIndex BM25 retriever
+        k: RRF constant (default 60)
+        top_k: Number of results to return after fusion
+    
+    Returns:
+        Fused list of NodeWithScore
+    """
+    def run_vector():
+        return list(vector_retriever.retrieve(query))
+    
+    def run_bm25():
+        return list(bm25_retriever.retrieve(query))
+    
+    vector_nodes = []
+    bm25_nodes = []
+    
+    try:
+        # Submit both tasks to thread pool
+        future_vector = _retrieval_executor.submit(run_vector)
+        future_bm25 = _retrieval_executor.submit(run_bm25)
+        
+        # Wait for both (they run concurrently)
+        vector_nodes = future_vector.result(timeout=10.0)
+        bm25_nodes = future_bm25.result(timeout=10.0)
+        
+        LOGGER.debug(
+            "Parallel retrieval complete: %d vector, %d BM25",
+            len(vector_nodes),
+            len(bm25_nodes),
+        )
+        
+    except Exception as exc:
+        LOGGER.warning("Parallel retrieval failed: %s, falling back to sequential", exc)
+        # Fallback to sequential if thread pool fails
+        vector_nodes = list(vector_retriever.retrieve(query))
+        bm25_nodes = list(bm25_retriever.retrieve(query))
+    
+    return reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=k, top_k=top_k)
 
 def calculate_confidence(nodes: Sequence[NodeWithScore]) -> Tuple[int, str, str]:
     if not nodes:
@@ -194,71 +399,6 @@ def _detect_scope(query: str) -> str:
     
     return "general"
 
-
-def _extract_topic_keywords(query: str) -> Optional[str]:
-    """
-    Extract the BROAD operational context from a query using Gemini Flash Lite.
-    Focus on umbrella topics, not specific subtasks.
-    
-    Returns:
-        Umbrella topic string (e.g., "ice operations", "safety equipment")
-        None if no clear topic detected
-    """
-    prompt = f"""Extract the MAIN OPERATIONAL CONTEXT from this query in 2-4 words.
-Think about the BROADER TOPIC or operational area, not specific subtasks.
-
-CRITICAL: Group related activities under the same umbrella topic.
-
-Examples of GOOD umbrella topics:
-"how should bridge watches be handled in ice waters?" → "ice operations"
-"vessel breaking ice without icebreaker" → "ice operations"
-"hull breach in ice" → "ice operations"
-"how to survive if stuck in ice?" → "ice operations"
-
-"what PPE for deck work?" → "safety equipment"
-"which PPE is mandatory?" → "safety equipment"
-"how to store PPE?" → "safety equipment"
-
-"how to report a spill?" → "incident reporting"
-"how to report an injury?" → "incident reporting"
-"what form for near-miss?" → "incident reporting"
-
-"what's the alcohol policy?" → "crew policies"
-"how to handle positive test?" → "crew policies"
-
-"ballast water procedure?" → "ballast operations"
-"ballast discharge limits?" → "ballast operations"
-
-BAD - too specific:
-"bridge watch procedures" → Should be broader operational area
-"hull breach response" → Should be part of "damage control" or parent operation
-
-Query: "{query}"
-
-Operational context (2-4 words, be broad):"""
-    
-    try:
-        config = AppConfig.get()
-        response = config.client.models.generate_content(
-            model="gemini-flash-lite-latest",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-            ),
-        )
-        topic = response.text.strip().strip('"').strip("'")
-        
-        if topic == "[NO TOPIC]" or not topic:
-            return None
-        
-        LOGGER.debug("Extracted topic: %s from query: %s", topic, query[:50])
-        return topic
-        
-    except Exception as exc:
-        LOGGER.warning("Topic extraction failed: %s", exc)
-        return None
-
-
 def _detect_doc_type_preference(query: str) -> Optional[str]:
     """
     Detect if user is asking for a specific document type.
@@ -312,14 +452,26 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
         
         query_embedding = embed_model.get_query_embedding(query)
         
+        # ============ DIAGNOSTIC: Track embedding hits/misses ============
+        embedding_hits = 0
+        embedding_misses = 0
+        sample_node_ids = []  # Collect a few node IDs for format inspection
+        
         # Re-score each node based on cosine similarity with new query
-        for node in cached_nodes:
+        for idx, node in enumerate(cached_nodes):
+            # Collect sample node IDs for diagnostic
+            if idx < 3:
+                node_id = getattr(node.node, 'node_id', None) or getattr(node.node, 'id_', None) or 'unknown'
+                sample_node_ids.append(node_id)
+            
             # Get node embedding (already exists in the node)
             if hasattr(node.node, 'embedding') and node.node.embedding:
                 node_embedding = node.node.embedding
+                embedding_hits += 1
             else:
                 # Fallback: get fresh embedding for node text
                 node_embedding = embed_model.get_text_embedding(node.node.text[:512])
+                embedding_misses += 1
             
             # Calculate cosine similarity
             import numpy as np
@@ -331,6 +483,22 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
             # 70% new relevance, 30% original quality score
             node.score = 0.7 * float(similarity) + 0.3 * node.score
         
+        # ============ DIAGNOSTIC OUTPUT ============
+        LOGGER.info(
+            "📊 Re-score embedding stats: %d hits (cached), %d misses (API calls) out of %d nodes",
+            embedding_hits,
+            embedding_misses,
+            len(cached_nodes),
+        )
+        if embedding_misses > 0:
+            LOGGER.warning(
+                "⚠️  %d embedding API calls during re-score! Consider implementing embedding fetch.",
+                embedding_misses,
+            )
+        if sample_node_ids:
+            LOGGER.info("📋 Sample node IDs (for ChromaDB verification): %s", sample_node_ids[:3])
+        # ============ END DIAGNOSTIC ============
+        
         # Re-sort by new scores
         rescored = sorted(cached_nodes, key=lambda n: n.score, reverse=True)
         LOGGER.info("✅ Re-scored %d cached chunks against new query", len(rescored))
@@ -340,85 +508,73 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
         LOGGER.warning("Re-scoring failed, using original chunks: %s", exc)
         return cached_nodes
 
-
-def _detect_topic_shift_with_gemini(query: str, last_query: str, last_answer_preview: str) -> bool:
+def diagnose_chroma_embedding_format(app_state: "AppState") -> Dict[str, Any]:
     """
-    Use Gemini Flash Lite to detect if the current query represents a topic shift.
-    Uses STRICT criteria - only followups that are direct continuations.
+    Diagnostic utility to check ChromaDB ID format and embedding availability.
+    Run this once to verify if embeddings can be fetched from ChromaDB.
     
-    Returns:
-        True if topic shifted (should reset context)
-        False if direct followup/continuation
+    Usage:
+        from app.query import diagnose_chroma_embedding_format
+        result = diagnose_chroma_embedding_format(app_state)
+        print(result)
     """
-    # Ask Gemini with STRICT criteria
-    prompt = f"""Previous question: "{last_query}"
-Previous answer preview: "{last_answer_preview}"
-
-New question: "{query}"
-
-CRITICAL: Is the new question a DIRECT CONTINUATION of the previous task/topic?
-
-A FOLLOWUP means:
-- Asking for more details about the same specific topic
-- Asking "what about X?" where X is directly related to previous answer
-- Refining/narrowing the previous question
-- Asking next steps in the same procedure
-
-DIFFERENT means:
-- Completely new topic (even if vaguely related to maritime)
-- New operational area
-- Different procedure/policy/regulation
-- Jumping to a new task
-
-Examples:
-Previous: "What is the ballast water procedure?"
-New: "What about the discharge limits?" → FOLLOWUP (same procedure, drilling down)
-New: "What are the PPE requirements?" → DIFFERENT (completely different topic)
-
-Previous: "How do I handle ice navigation?"
-New: "What if the hull gets breached in ice?" → FOLLOWUP (same operational context: ice)
-New: "What about fire drills?" → DIFFERENT (different operational area)
-
-Previous: "What's the alcohol policy?"
-New: "How do I report a positive test?" → FOLLOWUP (same policy context)
-New: "What PPE is required?" → DIFFERENT (different topic)
-
-Previous: "What PPE for deck work?"
-New: "Which PPE items are mandatory?" → FOLLOWUP (same topic: PPE requirements)
-New: "How to report an injury?" → DIFFERENT (different topic: incident reporting)
-
-Reply with ONLY ONE WORD (exactly as shown, all caps):
-- FOLLOWUP (direct continuation of same task/topic)
-- DIFFERENT (new topic/operational area)
-
-Reply:"""
+    result = {
+        "success": False,
+        "chroma_sample_ids": [],
+        "llamaindex_sample_ids": [],
+        "ids_match": None,
+        "embeddings_available": False,
+        "error": None,
+    }
     
     try:
-        config = AppConfig.get()
-        response = config.client.models.generate_content(
-            model="gemini-flash-lite-latest",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-            ),
-        )
-        classification = response.text.strip().upper()
+        # Get sample node IDs from LlamaIndex
+        if app_state.nodes:
+            for node in app_state.nodes[:3]:
+                node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None) or getattr(node, 'doc_id', None)
+                if node_id:
+                    result["llamaindex_sample_ids"].append(node_id)
         
-        # Strict parsing: only accept exact matches
-        if "FOLLOWUP" in classification:
-            LOGGER.info("Topic classification: FOLLOWUP (direct continuation)")
-            return False
-        elif "DIFFERENT" in classification:
-            LOGGER.info("Topic classification: DIFFERENT (topic shift)")
-            return True
+        # Try to access ChromaDB collection
+        if app_state.index and hasattr(app_state.index, '_vector_store'):
+            vector_store = app_state.index._vector_store
+            if hasattr(vector_store, '_collection'):
+                collection = vector_store._collection
+                
+                # Get sample from ChromaDB
+                sample = collection.get(limit=3, include=["embeddings"])
+                result["chroma_sample_ids"] = sample.get("ids", [])
+                result["embeddings_available"] = bool(sample.get("embeddings") and sample["embeddings"][0])
+                
+                # Check if IDs match
+                if result["llamaindex_sample_ids"] and result["chroma_sample_ids"]:
+                    # Check if any LlamaIndex IDs exist in ChromaDB
+                    chroma_set = set(result["chroma_sample_ids"])
+                    llama_set = set(result["llamaindex_sample_ids"])
+                    result["ids_match"] = bool(chroma_set & llama_set)
+                
+                result["success"] = True
+            else:
+                result["error"] = "ChromaDB collection not accessible via _collection"
         else:
-            # Any other output = assume different (conservative)
-            LOGGER.warning("Ambiguous classification: '%s', treating as DIFFERENT", classification)
-            return True
-        
+            result["error"] = "Vector store not accessible via _vector_store"
+            
     except Exception as exc:
-        LOGGER.warning("Topic detection failed: %s, assuming DIFFERENT", exc)
-        return True  # Conservative: assume shift on errors
+        result["error"] = str(exc)
+    
+    # Log results
+    LOGGER.info("=" * 60)
+    LOGGER.info("🔍 EMBEDDING DIAGNOSTIC RESULTS")
+    LOGGER.info("  Success: %s", result["success"])
+    LOGGER.info("  LlamaIndex node IDs: %s", result["llamaindex_sample_ids"])
+    LOGGER.info("  ChromaDB IDs: %s", result["chroma_sample_ids"])
+    LOGGER.info("  IDs match: %s", result["ids_match"])
+    LOGGER.info("  Embeddings available in ChromaDB: %s", result["embeddings_available"])
+    if result["error"]:
+        LOGGER.warning("  Error: %s", result["error"])
+    LOGGER.info("=" * 60)
+    
+    return result
 
 
 def _build_conversation_history_context(app_state: AppState) -> str:
@@ -462,182 +618,6 @@ def _apply_doc_type_boost(nodes: List[NodeWithScore], preferred_doc_type: Option
     
     # Re-sort after boosting
     return sorted(nodes, key=lambda n: n.score, reverse=True)
-
-
-def _classify_query_intent_llm(query: str, app_state: Optional[AppState] = None) -> str:
-    """
-    Classify query intent using LLM for more robust understanding.
-
-    Args:
-        query: User's input message
-        app_state: Optional app state for conversation context
-
-    Returns:
-        "greeting" - Initial greeting (hi, hello)
-        "goodbye" - Farewell (bye, see you)
-        "thank_you" - Gratitude/acknowledgment (thanks, cool beans)
-        "follow_up" - Follow-up question (what else?, tell me more)
-        "clarification" - Asking about previous answer (what do you mean?)
-        "new_query" - New question needing document search
-        "chitchat" - Casual conversation not needing search
-    """
-    # Build context from recent conversation if available
-    context_info = ""
-    if app_state and app_state.query_history:
-        last_entry = app_state.query_history[-1]
-        last_query = last_entry.get("query", "")
-        last_answer = last_entry.get("answer", "")[:150]
-        context_info = f"""
-PREVIOUS CONVERSATION:
-User: {last_query}
-Assistant: {last_answer}...
-
-"""
-
-    prompt = f"""{context_info}CURRENT USER MESSAGE: "{query}"
-
-You are a query router for a maritime documentation assistant. Your job is to classify the user's intent.
-
-CATEGORY DEFINITIONS:
-
-1. **greeting** - Initial greeting or checking in
-   Examples: "hi", "hello", "hey there", "good morning", "how are you"
-
-2. **goodbye** - Ending conversation
-   Examples: "bye", "goodbye", "see you later", "take care", "peace out"
-
-3. **thank_you** - Expressing gratitude or acknowledgment (can be conventional or unconventional)
-   Examples: "thanks", "thank you", "cool beans dude, good to know", "appreciate it", "perfect", "got it", "roger that"
-
-4. **follow_up** - Wants more information about the same topic
-   Examples: "what else?", "tell me more", "anything else?", "can you elaborate?", "what about other options?"
-
-5. **clarification** - Confused about previous answer, asking for explanation
-   Examples: "what do you mean?", "I don't understand", "can you explain that?", "unclear"
-
-6. **new_query** - New question requiring document search (maritime procedures, forms, regulations, etc.)
-   Examples: "what is the ballast procedure?", "which form for drug testing?", "how to handle ice navigation?"
-
-7. **chitchat** - Casual conversation not requiring document search
-   Examples: "how's the weather?", "what can you do?", "tell me a joke"
-
-INSTRUCTIONS:
-- If there's previous conversation, use it to detect follow-ups and clarifications
-- "what else?" after a previous answer = **follow_up**, NOT greeting
-- Unconventional acknowledgments like "cool beans" = **thank_you**, NOT new_query
-- Questions about maritime topics = **new_query**
-- Short messages can still be follow-ups if context suggests continuation
-
-Classify this message into ONE category (lowercase): greeting, goodbye, thank_you, follow_up, clarification, new_query, or chitchat
-
-Reply with ONLY the category name, nothing else."""
-
-    try:
-        config = AppConfig.get()
-        response = config.client.models.generate_content(
-            model="gemini-flash-lite-latest",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-            ),
-        )
-
-        classification = response.text.strip().lower()
-
-        # Validate classification
-        valid_intents = {"greeting", "goodbye", "thank_you", "follow_up", "clarification", "new_query", "chitchat"}
-
-        # Extract the intent if it's in the response
-        for intent in valid_intents:
-            if intent in classification:
-                LOGGER.info("LLM Query Router: %s -> %s", query[:50], intent)
-                return intent
-
-        # Fallback: if no valid intent found, default to new_query (conservative)
-        LOGGER.warning("LLM router returned invalid classification '%s', defaulting to new_query", classification)
-        return "new_query"
-
-    except Exception as exc:
-        LOGGER.warning("LLM intent classification failed: %s, falling back to heuristic", exc)
-        # Fallback to simple heuristic
-        return _classify_query_intent_heuristic(query)
-
-
-def classify_retrieval_strategy(query: str) -> str:
-    """
-    Classify query to determine retrieval strategy.
-
-    Uses Gemini Flash Lite to detect procedural queries that benefit from section-level retrieval.
-
-    Args:
-        query: User query text
-
-    Returns:
-        "chunk_level" - Specific facts, details (existing behavior)
-        "section_level" - Procedural queries, how-to, procedures, steps
-        "document_level" - Full document context needed (not implemented yet)
-    """
-    prompt = f"""Classify this maritime query into ONE retrieval strategy:
-
-Query: "{query}"
-
-STRATEGIES:
-
-1. **chunk_level** - Specific facts, discrete details, single data points
-   Examples:
-   - "What is the discharge temperature limit?"
-   - "What's the max ballast capacity?"
-   - "Who is responsible for safety equipment?"
-   - "What PPE is required for deck work?"
-
-2. **section_level** - Procedural queries needing complete instructions/context
-   Examples:
-   - "What is the ballast discharge procedure?"
-   - "How do I handle ice navigation?"
-   - "What are the steps for drug testing?"
-   - "What is the procedure for reporting incidents?"
-   - "How to conduct fire drills?"
-
-3. **document_level** - Needs full document overview (rare)
-   Examples:
-   - "Summarize the safety manual"
-   - "What's covered in the ISM code?"
-
-RULES:
-- If query asks "how to", "procedure", "steps", "process" → section_level
-- If query asks "what is [specific fact]" → chunk_level
-- If query asks for summary/overview → document_level
-- When in doubt, default to chunk_level
-
-Reply with ONLY ONE WORD: chunk_level, section_level, or document_level"""
-
-    try:
-        config = AppConfig.get()
-        response = config.client.models.generate_content(
-            model="gemini-flash-lite-latest",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-            ),
-        )
-
-        classification = response.text.strip().lower()
-
-        # Validate and extract
-        if "section_level" in classification or "section-level" in classification:
-            LOGGER.info("Query strategy: section_level (procedural)")
-            return "section_level"
-        elif "document_level" in classification or "document-level" in classification:
-            LOGGER.info("Query strategy: document_level (overview)")
-            return "document_level"
-        else:
-            # Default to chunk_level
-            LOGGER.info("Query strategy: chunk_level (specific facts)")
-            return "chunk_level"
-
-    except Exception as exc:
-        LOGGER.warning("Strategy classification failed: %s, defaulting to chunk_level", exc)
-        return "chunk_level"
 
 
 def _collect_section_recursively(
@@ -713,10 +693,14 @@ def retrieve_hierarchical(
         LOGGER.error("Retrievers not initialized")
         return []
 
-    # Step 1: Use hybrid search to find top relevant chunks
-    vector_results = vector_retriever.retrieve(query)
-    bm25_results = bm25_retriever.retrieve(query)
-    hybrid_results = reciprocal_rank_fusion(vector_results, bm25_results, k=60, top_k=10)
+    # Step 1: Use parallel hybrid search to find top relevant chunks
+    hybrid_results = parallel_hybrid_retrieval(
+        query,
+        vector_retriever,
+        bm25_retriever,
+        k=60,
+        top_k=10,
+    )
 
     if not hybrid_results:
         LOGGER.warning("No hybrid results found")
@@ -977,8 +961,33 @@ def query_with_confidence(
     use_conversation_context: bool = False,
     enable_hierarchical: bool = True,
 ) -> Dict[str, Any]:
-    # ============ INTENT CLASSIFICATION ============
-    intent = _classify_query_intent_llm(query_text, app_state)
+    # ============ CONSOLIDATED QUERY ANALYSIS ============
+    # Single LLM call replaces: intent classification, topic extraction, 
+    # shift detection, and retrieval strategy classification
+    
+    # Prepare context for shift detection
+    last_query_for_analysis = None
+    last_answer_for_analysis = None
+    
+    if use_conversation_context and app_state.query_history:
+        last_entry = app_state.query_history[-1]
+        last_query_for_analysis = last_entry.get("query", "")
+        last_answer_for_analysis = last_entry.get("answer", "")[:200]
+    
+    # Single consolidated LLM call
+    query_analysis = analyze_query_comprehensive(
+        query=query_text,
+        last_query=last_query_for_analysis,
+        last_answer_preview=last_answer_for_analysis,
+        has_conversation_context=(use_conversation_context and app_state.context_turn_count > 0),
+    )
+    
+    intent = query_analysis.get("intent", "new_query")
+    current_topic = query_analysis.get("topic")
+    doc_type_preference = query_analysis.get("doc_type_hint") or _detect_doc_type_preference(query_text)
+    retrieval_strategy_hint = query_analysis.get("retrieval_strategy", "chunk_level")
+    shift_result = query_analysis.get("shift")  # "FOLLOWUP", "DIFFERENT", or None
+    
     LOGGER.info("Query intent: %s", intent)
 
     # Non-search intents: greeting, goodbye, thank_you, chitchat
@@ -989,7 +998,7 @@ def query_with_confidence(
         # Response templates by intent
         responses = {
             "greeting": "Hello! I'm here to help you with maritime documentation and procedures. What would you like to know?",
-            "goodbye": "Safe sailing! Feel free to return anytime you need assistance.",
+            "goodbye": "Take care! Feel free to return anytime you need assistance.",
             "thank_you": "You're welcome! Let me know if you need anything else.",
             "chitchat": "I'm your maritime documentation assistant. Feel free to ask me about ship procedures, safety protocols, forms, or regulations!"
         }
@@ -1088,27 +1097,21 @@ def query_with_confidence(
             LOGGER.info("Added %d session upload chunks to retrieval", added)
         return deduped
 
-    # STEP 1: Extract semantic topic (broader umbrella concept)
-    current_topic = _extract_topic_keywords(query_text)
-    if DEBUG_RAG:
-        LOGGER.info("DEBUG: Extracted topic: %s", current_topic)
-    
-    # STEP 2: Topic inheritance - if no clear topic, inherit from last query
+    # Topic inheritance - if no clear topic from analysis, inherit from last query
     if not current_topic and use_conversation_context and app_state.last_topic:
         current_topic = app_state.last_topic
         LOGGER.info("No topic detected, inheriting: %s", current_topic)
     
-    # STEP 3: Detect document type preference
-    doc_type_preference = _detect_doc_type_preference(query_text)
     if DEBUG_RAG:
+        LOGGER.info("DEBUG: Topic from analysis: %s", current_topic)
         LOGGER.info("DEBUG: Doc type preference: %s", doc_type_preference)
     
-    # STEP 4: Detect scope (NEW - third cache dimension)
+    # Detect scope (local keywords - fast)
     current_scope = _detect_scope(query_text)
     if DEBUG_RAG:
         LOGGER.info("DEBUG: Detected scope: %s", current_scope)
     
-    # STEP 5: Build cache key (now includes scope)
+    # Build cache key (includes scope)
     cache_key = (current_topic, doc_type_preference, current_scope)
     last_cache_key = (
         app_state.last_topic,
@@ -1118,7 +1121,7 @@ def query_with_confidence(
     
     LOGGER.info("Cache keys - current: %s, last: %s", cache_key, last_cache_key)
     
-    # STEP 6: Intent-aware cache decision (LLM router + topic shift detection)
+    # ============ CACHE DECISION (using consolidated shift result) ============
     topic_shift_detected = False
     context_reset_note = None
     should_reuse_cache = False
@@ -1128,6 +1131,7 @@ def query_with_confidence(
         LOGGER.info("  - use_conversation_context: %s", use_conversation_context)
         LOGGER.info("  - context_turn_count > 0: %s", app_state.context_turn_count > 0)
         LOGGER.info("  - query_history exists: %s", bool(app_state.query_history))
+        LOGGER.info("  - shift_result from analysis: %s", shift_result)
 
     # Priority 1: Clarifications ALWAYS use cache (never search again)
     if intent == "clarification" and app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
@@ -1136,64 +1140,53 @@ def query_with_confidence(
         if DEBUG_RAG:
             LOGGER.info("DEBUG: Forcing cache reuse for clarification")
 
-    # Priority 2: Follow-ups prefer cache, but check for topic shift
+    # Priority 2: Follow-ups prefer cache
+    elif intent == "follow_up" and app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
+        should_reuse_cache = True
+        LOGGER.info("🔍 Follow-up detected - using cached context")
+        if DEBUG_RAG:
+            LOGGER.info("DEBUG: Forcing cache reuse for follow_up intent")
+
+    # Priority 3: Check shift detection result from consolidated analysis
     elif use_conversation_context and app_state.context_turn_count > 0 and app_state.query_history:
         if DEBUG_RAG:
-            LOGGER.info("DEBUG: Running shift detection...")
+            LOGGER.info("DEBUG: Using shift result from consolidated analysis: %s", shift_result)
 
-        # Get last Q&A for shift detection
-        last_entry = app_state.query_history[-1]
-        last_query = last_entry.get("query", "")
-        last_answer = last_entry.get("answer", "")[:200]
+        if shift_result == "DIFFERENT":
+            # Topic shift - clear everything
+            topic_shift_detected = True
+            LOGGER.info("🔄 Topic shift detected, clearing context")
+            if DEBUG_RAG:
+                LOGGER.info("DEBUG: Clearing sticky_chunks (was: %d)", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
+            app_state.sticky_chunks.clear()
+            app_state.context_turn_count = 0
+            context_reset_note = "🔄 Detected topic change (starting fresh search)"
+            should_reuse_cache = False
+            if DEBUG_RAG:
+                LOGGER.info("DEBUG: After clear - sticky_chunks length: %d", len(app_state.sticky_chunks))
+        elif shift_result == "FOLLOWUP":
+            # No shift detected - reuse cache if available
+            if DEBUG_RAG:
+                LOGGER.info("DEBUG: FOLLOWUP - checking cache availability...")
+                LOGGER.info("  - sticky_chunks exists: %s", bool(app_state.sticky_chunks))
+                LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
 
-        # For follow_ups, prefer cache but still check shift detection as backup
-        if intent == "follow_up":
-            LOGGER.info("🔍 Follow-up detected - preferring cached context")
-            # For explicit follow-ups, skip topic shift detection and use cache if available
             if app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
                 should_reuse_cache = True
-                LOGGER.info("✅ Follow-up intent - reusing cache")
+                LOGGER.info("✅ No shift detected - reusing cache")
             else:
                 should_reuse_cache = False
                 if DEBUG_RAG:
-                    LOGGER.warning("⚠️ Follow-up but no cached chunks available!")
+                    LOGGER.warning("⚠️ No shift but no cached chunks available!")
         else:
-            # For new_query, use the existing topic shift detection
-            topic_shift_detected = _detect_topic_shift_with_gemini(query_text, last_query, last_answer)
-
+            # shift_result is None (no previous context was provided to analysis)
+            should_reuse_cache = False
             if DEBUG_RAG:
-                LOGGER.info("DEBUG: Shift detected: %s", topic_shift_detected)
-
-            if topic_shift_detected:
-                # True topic shift - clear everything
-                LOGGER.info("🔄 Topic shift detected, clearing context")
-                if DEBUG_RAG:
-                    LOGGER.info("DEBUG: Clearing sticky_chunks (was: %d)", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
-                app_state.sticky_chunks.clear()
-                app_state.context_turn_count = 0
-                context_reset_note = "🔄 Detected topic change (starting fresh search)"
-                should_reuse_cache = False
-                if DEBUG_RAG:
-                    LOGGER.info("DEBUG: After clear - sticky_chunks length: %d", len(app_state.sticky_chunks))
-            else:
-                # No shift detected - reuse cache
-                if DEBUG_RAG:
-                    LOGGER.info("DEBUG: No shift - checking cache availability...")
-                    LOGGER.info("  - sticky_chunks exists: %s", bool(app_state.sticky_chunks))
-                    LOGGER.info("  - sticky_chunks length: %d", len(app_state.sticky_chunks) if app_state.sticky_chunks else 0)
-
-                # Even if cache keys don't match perfectly, reuse if we have chunks
-                if app_state.sticky_chunks and len(app_state.sticky_chunks) > 0:
-                    should_reuse_cache = True
-                    LOGGER.info("✅ No shift detected - reusing cache")
-                else:
-                    should_reuse_cache = False
-                    if DEBUG_RAG:
-                        LOGGER.warning("⚠️ No shift but no cached chunks available!")
+                LOGGER.info("DEBUG: No shift result, proceeding with fresh retrieval")
     else:
         if DEBUG_RAG:
             LOGGER.info("DEBUG: First query or context disabled - fresh retrieval")
-    
+
     # Check hard cap on turns
     if use_conversation_context and app_state.context_turn_count >= MAX_CONTEXT_TURNS:
         LOGGER.info("Context turn limit reached (%d), forcing fresh retrieval", MAX_CONTEXT_TURNS)
@@ -1285,14 +1278,12 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
                    current_topic, current_scope, use_conversation_context)
 
         # ============ HIERARCHICAL RETRIEVAL INTEGRATION ============
-        # Classify retrieval strategy for search intents
-        retrieval_strategy = "chunk_level"  # Default
+        # Use retrieval strategy from consolidated analysis
+        retrieval_strategy = retrieval_strategy_hint  # From analyze_query_comprehensive
         hierarchical_success = False
 
         if intent in ["new_query", "follow_up"]:
-            # Only classify strategy for actual search queries
-            retrieval_strategy = classify_retrieval_strategy(query_text)
-            LOGGER.info("📊 Retrieval strategy: %s", retrieval_strategy)
+            LOGGER.info("📊 Retrieval strategy (from analysis): %s", retrieval_strategy)
 
             # Route based on strategy
             if retrieval_strategy == "section_level" and app_state.hierarchical_enabled and enable_hierarchical:
@@ -1391,17 +1382,18 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
 
             while attempt <= max_attempts:
                 if retriever_type == "vector":
-                    vector_nodes = vector_retriever.retrieve(query_text)
-                    bm25_nodes: List[NodeWithScore] = []
-                    nodes = list(vector_nodes)
+                    nodes = list(vector_retriever.retrieve(query_text))
                 elif retriever_type == "bm25":
-                    bm25_nodes = bm25_retriever.retrieve(query_text)
-                    vector_nodes = []
-                    nodes = list(bm25_nodes)
+                    nodes = list(bm25_retriever.retrieve(query_text))
                 else:
-                    vector_nodes = vector_retriever.retrieve(query_text)
-                    bm25_nodes = bm25_retriever.retrieve(query_text)
-                    nodes = reciprocal_rank_fusion(vector_nodes, bm25_nodes, k=60, top_k=40)
+                    # Parallel hybrid retrieval
+                    nodes = parallel_hybrid_retrieval(
+                        query_text,
+                        vector_retriever,
+                        bm25_retriever,
+                        k=60,
+                        top_k=40,
+                    )
 
                 nodes = _apply_section_score_adjustments(nodes)
 
@@ -1695,8 +1687,332 @@ Please provide a clear, concise answer with proper citations."""
 __all__ = [
     "calculate_confidence",
     "reciprocal_rank_fusion",
+    "parallel_hybrid_retrieval",  # NEW
+    "analyze_query_comprehensive",  # NEW
     "query_with_confidence",
-    "classify_retrieval_strategy",
+    "classify_retrieval_strategy",  # Keep for now (deprecated)
     "retrieve_hierarchical",
     "format_hierarchical_context",
+    "diagnose_chroma_embedding_format",  # NEW - diagnostic utility
 ]
+
+# ==============================================================================
+# DEPRECATED FUNCTIONS - Kept for fallback/rollback
+# These have been replaced by analyze_query_comprehensive()
+# ==============================================================================
+
+def _extract_topic_keywords(query: str) -> Optional[str]:
+    """
+    Extract the BROAD operational context from a query using Gemini Flash Lite.
+    Focus on umbrella topics, not specific subtasks.
+    
+    Returns:
+        Umbrella topic string (e.g., "ice operations", "safety equipment")
+        None if no clear topic detected
+    """
+    prompt = f"""Extract the MAIN OPERATIONAL CONTEXT from this query in 2-4 words.
+Think about the BROADER TOPIC or operational area, not specific subtasks.
+
+CRITICAL: Group related activities under the same umbrella topic.
+
+Examples of GOOD umbrella topics:
+"how should bridge watches be handled in ice waters?" → "ice operations"
+"vessel breaking ice without icebreaker" → "ice operations"
+"hull breach in ice" → "ice operations"
+"how to survive if stuck in ice?" → "ice operations"
+
+"what PPE for deck work?" → "safety equipment"
+"which PPE is mandatory?" → "safety equipment"
+"how to store PPE?" → "safety equipment"
+
+"how to report a spill?" → "incident reporting"
+"how to report an injury?" → "incident reporting"
+"what form for near-miss?" → "incident reporting"
+
+"what's the alcohol policy?" → "crew policies"
+"how to handle positive test?" → "crew policies"
+
+"ballast water procedure?" → "ballast operations"
+"ballast discharge limits?" → "ballast operations"
+
+BAD - too specific:
+"bridge watch procedures" → Should be broader operational area
+"hull breach response" → Should be part of "damage control" or parent operation
+
+Query: "{query}"
+
+Operational context (2-4 words, be broad):"""
+    
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+            ),
+        )
+        topic = response.text.strip().strip('"').strip("'")
+        
+        if topic == "[NO TOPIC]" or not topic:
+            return None
+        
+        LOGGER.debug("Extracted topic: %s from query: %s", topic, query[:50])
+        return topic
+        
+    except Exception as exc:
+        LOGGER.warning("Topic extraction failed: %s", exc)
+        return None
+    
+def _detect_topic_shift_with_gemini(query: str, last_query: str, last_answer_preview: str) -> bool:
+    """
+    Use Gemini Flash Lite to detect if the current query represents a topic shift.
+    Uses STRICT criteria - only followups that are direct continuations.
+    
+    Returns:
+        True if topic shifted (should reset context)
+        False if direct followup/continuation
+    """
+    # Ask Gemini with STRICT criteria
+    prompt = f"""Previous question: "{last_query}"
+Previous answer preview: "{last_answer_preview}"
+
+New question: "{query}"
+
+CRITICAL: Is the new question a DIRECT CONTINUATION of the previous task/topic?
+
+A FOLLOWUP means:
+- Asking for more details about the same specific topic
+- Asking "what about X?" where X is directly related to previous answer
+- Refining/narrowing the previous question
+- Asking next steps in the same procedure
+
+DIFFERENT means:
+- Completely new topic (even if vaguely related to maritime)
+- New operational area
+- Different procedure/policy/regulation
+- Jumping to a new task
+
+Examples:
+Previous: "What is the ballast water procedure?"
+New: "What about the discharge limits?" → FOLLOWUP (same procedure, drilling down)
+New: "What are the PPE requirements?" → DIFFERENT (completely different topic)
+
+Previous: "How do I handle ice navigation?"
+New: "What if the hull gets breached in ice?" → FOLLOWUP (same operational context: ice)
+New: "What about fire drills?" → DIFFERENT (different operational area)
+
+Previous: "What's the alcohol policy?"
+New: "How do I report a positive test?" → FOLLOWUP (same policy context)
+New: "What PPE is required?" → DIFFERENT (different topic)
+
+Previous: "What PPE for deck work?"
+New: "Which PPE items are mandatory?" → FOLLOWUP (same topic: PPE requirements)
+New: "How to report an injury?" → DIFFERENT (different topic: incident reporting)
+
+Reply with ONLY ONE WORD (exactly as shown, all caps):
+- FOLLOWUP (direct continuation of same task/topic)
+- DIFFERENT (new topic/operational area)
+
+Reply:"""
+    
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+            ),
+        )
+        classification = response.text.strip().upper()
+        
+        # Strict parsing: only accept exact matches
+        if "FOLLOWUP" in classification:
+            LOGGER.info("Topic classification: FOLLOWUP (direct continuation)")
+            return False
+        elif "DIFFERENT" in classification:
+            LOGGER.info("Topic classification: DIFFERENT (topic shift)")
+            return True
+        else:
+            # Any other output = assume different (conservative)
+            LOGGER.warning("Ambiguous classification: '%s', treating as DIFFERENT", classification)
+            return True
+        
+    except Exception as exc:
+        LOGGER.warning("Topic detection failed: %s, assuming DIFFERENT", exc)
+        return True  # Conservative: assume shift on errors
+
+def _classify_query_intent_llm(query: str, app_state: Optional[AppState] = None) -> str:
+    """
+    Classify query intent using LLM for more robust understanding.
+
+    Args:
+        query: User's input message
+        app_state: Optional app state for conversation context
+
+    Returns:
+        "greeting" - Initial greeting (hi, hello)
+        "goodbye" - Farewell (bye, see you)
+        "thank_you" - Gratitude/acknowledgment (thanks, cool beans)
+        "follow_up" - Follow-up question (what else?, tell me more)
+        "clarification" - Asking about previous answer (what do you mean?)
+        "new_query" - New question needing document search
+        "chitchat" - Casual conversation not needing search
+    """
+    # Build context from recent conversation if available
+    context_info = ""
+    if app_state and app_state.query_history:
+        last_entry = app_state.query_history[-1]
+        last_query = last_entry.get("query", "")
+        last_answer = last_entry.get("answer", "")[:150]
+        context_info = f"""
+PREVIOUS CONVERSATION:
+User: {last_query}
+Assistant: {last_answer}...
+
+"""
+
+    prompt = f"""{context_info}CURRENT USER MESSAGE: "{query}"
+
+You are a query router for a maritime documentation assistant. Your job is to classify the user's intent.
+
+CATEGORY DEFINITIONS:
+
+1. **greeting** - Initial greeting or checking in
+   Examples: "hi", "hello", "hey there", "good morning", "how are you"
+
+2. **goodbye** - Ending conversation
+   Examples: "bye", "goodbye", "see you later", "take care", "peace out"
+
+3. **thank_you** - Expressing gratitude or acknowledgment (can be conventional or unconventional)
+   Examples: "thanks", "thank you", "cool beans dude, good to know", "appreciate it", "perfect", "got it", "roger that"
+
+4. **follow_up** - Wants more information about the same topic
+   Examples: "what else?", "tell me more", "anything else?", "can you elaborate?", "what about other options?"
+
+5. **clarification** - Confused about previous answer, asking for explanation
+   Examples: "what do you mean?", "I don't understand", "can you explain that?", "unclear"
+
+6. **new_query** - New question requiring document search (maritime procedures, forms, regulations, etc.)
+   Examples: "what is the ballast procedure?", "which form for drug testing?", "how to handle ice navigation?"
+
+7. **chitchat** - Casual conversation not requiring document search
+   Examples: "how's the weather?", "what can you do?", "tell me a joke"
+
+INSTRUCTIONS:
+- If there's previous conversation, use it to detect follow-ups and clarifications
+- "what else?" after a previous answer = **follow_up**, NOT greeting
+- Unconventional acknowledgments like "cool beans" = **thank_you**, NOT new_query
+- Questions about maritime topics = **new_query**
+- Short messages can still be follow-ups if context suggests continuation
+
+Classify this message into ONE category (lowercase): greeting, goodbye, thank_you, follow_up, clarification, new_query, or chitchat
+
+Reply with ONLY the category name, nothing else."""
+
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+            ),
+        )
+
+        classification = response.text.strip().lower()
+
+        # Validate classification
+        valid_intents = {"greeting", "goodbye", "thank_you", "follow_up", "clarification", "new_query", "chitchat"}
+
+        # Extract the intent if it's in the response
+        for intent in valid_intents:
+            if intent in classification:
+                LOGGER.info("LLM Query Router: %s -> %s", query[:50], intent)
+                return intent
+
+        # Fallback: if no valid intent found, default to new_query (conservative)
+        LOGGER.warning("LLM router returned invalid classification '%s', defaulting to new_query", classification)
+        return "new_query"
+
+    except Exception as exc:
+        LOGGER.warning("LLM intent classification failed: %s, falling back to heuristic", exc)
+        # Fallback to simple heuristic
+        return _classify_query_intent_heuristic(query)
+
+def classify_retrieval_strategy(query: str) -> str:
+    """
+    Classify query to determine retrieval strategy.
+
+    Uses Gemini Flash Lite to detect procedural queries that benefit from section-level retrieval.
+
+    Args:
+        query: User query text
+
+    Returns:
+        "chunk_level" - Specific facts, details (existing behavior)
+        "section_level" - Procedural queries, how-to, procedures, steps
+        "document_level" - Full document context needed (not implemented yet)
+    """
+    prompt = f"""Classify this maritime query into ONE retrieval strategy:
+
+Query: "{query}"
+
+STRATEGIES:
+
+1. **chunk_level** - Specific facts, discrete details, single data points
+   Examples:
+   - "What is the discharge temperature limit?"
+   - "What's the max ballast capacity?"
+   - "Who is responsible for safety equipment?"
+   - "What PPE is required for deck work?"
+
+2. **section_level** - Procedural queries needing complete instructions/context
+   Examples:
+   - "What is the ballast discharge procedure?"
+   - "How do I handle ice navigation?"
+   - "What are the steps for drug testing?"
+   - "What is the procedure for reporting incidents?"
+   - "How to conduct fire drills?"
+
+3. **document_level** - Needs full document overview (rare)
+   Examples:
+   - "Summarize the safety manual"
+   - "What's covered in the ISM code?"
+
+RULES:
+- If query asks "how to", "procedure", "steps", "process" → section_level
+- If query asks "what is [specific fact]" → chunk_level
+- If query asks for summary/overview → document_level
+- When in doubt, default to chunk_level
+
+Reply with ONLY ONE WORD: chunk_level, section_level, or document_level"""
+
+    try:
+        config = AppConfig.get()
+        response = config.client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+            ),
+        )
+
+        classification = response.text.strip().lower()
+
+        # Validate and extract
+        if "section_level" in classification or "section-level" in classification:
+            LOGGER.info("Query strategy: section_level (procedural)")
+            return "section_level"
+        elif "document_level" in classification or "document-level" in classification:
+            LOGGER.info("Query strategy: document_level (overview)")
+            return "document_level"
+        else:
+            # Default to chunk_level
+            LOGGER.info("Query strategy: chunk_level (specific facts)")
+            return "chunk_level"
+
+    except Exception as exc:
+        LOGGER.warning("Strategy classification failed: %s, defaulting to chunk_level", exc)
+        return "chunk_level"
