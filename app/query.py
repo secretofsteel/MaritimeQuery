@@ -68,27 +68,51 @@ def _attach_embeddings_from_cache(
     Returns:
         Retrieved nodes with embeddings attached
     """
-    # Build lookup: node_id -> embedding
+    # Build lookup: node_id -> embedding (try multiple ID attributes)
     embedding_lookup: Dict[str, List[float]] = {}
     
     for node in cached_nodes:
-        node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None)
         embedding = getattr(node, 'embedding', None)
-        if node_id and embedding is not None:
-            embedding_lookup[node_id] = embedding
+        if embedding is None:
+            continue
+            
+        # Try multiple ID attributes
+        for attr in ['node_id', 'id_', 'doc_id', 'hash']:
+            node_id = getattr(node, attr, None)
+            if node_id:
+                embedding_lookup[str(node_id)] = embedding
+    
+    if DEBUG_RAG:
+        LOGGER.info("DEBUG: Built embedding lookup with %d entries", len(embedding_lookup))
+        sample_keys = list(embedding_lookup.keys())[:3]
+        LOGGER.info("DEBUG: Sample cached node IDs: %s", sample_keys)
     
     # Attach embeddings to retrieved nodes
     attached_count = 0
+    missing_ids = []
+    
     for node_with_score in retrieved_nodes:
         node = node_with_score.node
-        node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None)
         
-        if node_id and node_id in embedding_lookup:
-            node.embedding = embedding_lookup[node_id]
-            attached_count += 1
+        # Try multiple ID attributes on retrieved node
+        node_id = None
+        for attr in ['node_id', 'id_', 'doc_id', 'hash']:
+            node_id = getattr(node, attr, None)
+            if node_id and str(node_id) in embedding_lookup:
+                node.embedding = embedding_lookup[str(node_id)]
+                attached_count += 1
+                break
+        else:
+            # No matching ID found - collect for debugging
+            tried_ids = {attr: getattr(node, attr, None) for attr in ['node_id', 'id_', 'doc_id', 'hash']}
+            missing_ids.append(tried_ids)
     
     LOGGER.info("📎 Attached embeddings to %d/%d retrieved nodes from cache", 
                attached_count, len(retrieved_nodes))
+    
+    if missing_ids and DEBUG_RAG:
+        LOGGER.warning("DEBUG: %d nodes missing from cache. Sample IDs tried: %s", 
+                      len(missing_ids), missing_ids[:3])
     
     return retrieved_nodes
 
