@@ -51,6 +51,47 @@ if USE_RERANKER and cohere is not None:  # pragma: no cover - runtime configurat
 # Thread pool for parallel retrieval (module-level singleton)
 _retrieval_executor = ThreadPoolExecutor(max_workers=2)
 
+def _attach_embeddings_from_cache(
+    retrieved_nodes: List[NodeWithScore],
+    cached_nodes: List[Document],
+) -> List[NodeWithScore]:
+    """
+    Attach embeddings from cached nodes to retrieved nodes.
+    
+    Retrieved nodes come from ChromaDB without embeddings.
+    Cached nodes (app_state.nodes) have embeddings from indexing.
+    
+    Args:
+        retrieved_nodes: Nodes from retriever (missing embeddings)
+        cached_nodes: Nodes from app_state.nodes (have embeddings)
+    
+    Returns:
+        Retrieved nodes with embeddings attached
+    """
+    # Build lookup: node_id -> embedding
+    embedding_lookup: Dict[str, List[float]] = {}
+    
+    for node in cached_nodes:
+        node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None)
+        embedding = getattr(node, 'embedding', None)
+        if node_id and embedding is not None:
+            embedding_lookup[node_id] = embedding
+    
+    # Attach embeddings to retrieved nodes
+    attached_count = 0
+    for node_with_score in retrieved_nodes:
+        node = node_with_score.node
+        node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None)
+        
+        if node_id and node_id in embedding_lookup:
+            node.embedding = embedding_lookup[node_id]
+            attached_count += 1
+    
+    LOGGER.info("📎 Attached embeddings to %d/%d retrieved nodes from cache", 
+               attached_count, len(retrieved_nodes))
+    
+    return retrieved_nodes
+
 def analyze_query_comprehensive(
     query: str,
     last_query: Optional[str] = None,
@@ -1471,6 +1512,9 @@ Rephrase this question to better match maritime documentation language. Do not o
                 LOGGER.info("DEBUG: Storing chunks for future reuse...")
                 LOGGER.info("  - Storing %d nodes in sticky_chunks", len(nodes))
             
+            # Attach embeddings from cached nodes before storing
+            # (retrieved nodes come from ChromaDB without embeddings)
+            nodes = _attach_embeddings_from_cache(nodes, app_state.nodes)
             app_state.sticky_chunks = nodes
             
             # Only set to 1 if this is the very first query (count was 0)
