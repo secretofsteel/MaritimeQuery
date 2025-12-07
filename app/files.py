@@ -2,277 +2,39 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import pickle
 from hashlib import md5
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
+import yaml
+import mammoth
+import pymupdf4llm
+import fitz  # PyMuPDF
 
 from .logger import LOGGER
+from .config import AppConfig
 
-def _df_to_markdown(df, max_rows: int = 100, max_cols: int = 12) -> str:
-    """Convert DataFrame to markdown table for LLM consumption."""
-    if df is None or df.empty:
-        return ""
-    
-    df = df.iloc[:max_rows, :max_cols].copy()
-    
-    # Heuristic: if first row looks like headers, promote it
-    try:
-        first_row = df.iloc[0]
-        looks_like_headers = first_row.apply(
-            lambda x: isinstance(x, str) and len(str(x).strip()) > 0 and len(str(x)) < 40
-        ).mean() >= 0.6
-        
-        if looks_like_headers:
-            df.columns = first_row
-            df = df[1:].reset_index(drop=True)
-    except Exception:
-        pass
-    
-    df = df.fillna("")
-    headers = [str(col).strip() or f"Col{i}" for i, col in enumerate(df.columns)]
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "|" + "|".join([" --- "] * len(headers)) + "|",
-    ]
-    
-    for _, row in df.iterrows():
-        cells = [str(val).strip().replace("\n", " ") for val in row.values]
-        lines.append("| " + " | ".join(cells) + " |")
-    
-    return "\n".join(lines)
-
-def extract_with_pymupdf4llm(path: Path) -> Optional[str]:
-    """
-    Try high-level extraction via PyMuPDF Layout + PyMuPDF4LLM.
-
-    Returns:
-        Markdown string on success, or None on any failure.
-    """
-    try:
-        import fitz  # PyMuPDF
-        import pymupdf.layout  # enable layout engine
-        import pymupdf4llm
-    except ImportError:
-        return None
-
-    try:
-        # Use Document object so it also works with non-PDF formats that fitz.open supports.
-        doc = fitz.open(str(path))
-        try:
-            md = pymupdf4llm.to_markdown(
-                doc,
-                header=False,
-                footer=False,
-                table_strategy="lines_strict",
-                page_separators=False,
-            )
-        finally:
-            doc.close()
-
-        if isinstance(md, str):
-            text = md.strip()
-        elif isinstance(md, list):
-            # page_chunks mode etc. Join "text" fields if present.
-            parts = [
-                (chunk.get("text") or "").strip()
-                for chunk in md
-                if isinstance(chunk, dict)
-            ]
-            text = "\n\n".join(p for p in parts if p)
-        else:
-            return None
-
-        return text or None
-
-    except Exception as e:
-        LOGGER.warning(
-            "pymupdf4llm extraction failed for %s: %s", path.name, e
-        )
-        return None
-
-
-def _pymupdf_page_to_text(page) -> str:
-    """
-    Extract text from a PyMuPDF page with layout awareness + table preservation.
-
-    - Uses page.get_text("blocks") for normal text.
-    - Uses page.find_tables() for real tables.
-    - Converts tables to Markdown.
-    - Inserts tables in correct reading order based on geometry.
-    - Avoids duplicating table text from the block output.
-    """
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        # Fallback: should basically never happen in your env
-        return page.get_text("text") or ""
-
-    # 1. Get raw blocks
-    try:
-        blocks = page.get_text("blocks") or []
-    except Exception:
-        return page.get_text("text") or ""
-
-    # Normalize text blocks
-    text_items = []
-    for b in blocks:
-        if len(b) < 5:
-            continue
-        x0, y0, x1, y1, txt = b[0], b[1], b[2], b[3], b[4]
-        if not txt or not str(txt).strip():
-            continue
-        rect = fitz.Rect(x0, y0, x1, y1)
-        text_items.append(
-            {
-                "kind": "text",
-                "rect": rect,
-                "y0": float(rect.y0),
-                "x0": float(rect.x0),
-                "text": str(txt).strip(),
-            }
-        )
-
-    # 2. Detect tables (PyMuPDF >= table API)
-    table_items = []
-    table_rects = []
-
-    try:
-        tf = page.find_tables()
-        tables = list(getattr(tf, "tables", [])) if tf else []
-    except Exception:
-        tables = []
-
-    for idx, tbl in enumerate(tables, start=1):
-        # 2a. Convert table to Markdown
-        md = ""
-        try:
-            md = tbl.to_markdown(clean=False, fill_empty=True)
-        except Exception:
-            # Fallback if to_markdown not available / fails
-            try:
-                rows = tbl.extract()
-                md_lines = []
-                for r in rows:
-                    # r is list of cell values
-                    md_lines.append(" | ".join((c or "").strip() for c in r))
-                md = "\n".join(md_lines)
-            except Exception:
-                continue  # skip broken table gracefully
-
-        # 2b. Compute bounding box to place table in flow
-        rect = None
-        try:
-            cells = getattr(tbl, "cells", None)
-            if cells:
-                x0 = min(c.x0 for c in cells)
-                y0 = min(c.y0 for c in cells)
-                x1 = max(c.x1 for c in cells)
-                y1 = max(c.y1 for c in cells)
-                rect = fitz.Rect(x0, y0, x1, y1)
-            else:
-                bbox = getattr(tbl, "bbox", None)
-                if bbox is not None:
-                    rect = fitz.Rect(*bbox)
-        except Exception:
-            rect = None
-
-        if rect is None:
-            # If we have no geometry, append after last text as a last resort
-            y0 = max((ti["y0"] for ti in text_items), default=0.0) + 1.0
-            rect = fitz.Rect(0, y0, page.rect.x1, y0 + 1.0)
-
-        table_rects.append(rect)
-        table_items.append(
-            {
-                "kind": "table",
-                "rect": rect,
-                "y0": float(rect.y0),
-                "x0": float(rect.x0),
-                # Wrapped in blank lines so it's clearly separated for the LLM
-                "text": md.strip(),
-            }
-        )
-
-    # 3. Remove text blocks that belong to tables (to avoid duplication)
-    def is_inside_table(block_rect: "fitz.Rect") -> bool:
-        if not table_rects:
-            return False
-        for tr in table_rects:
-            inter = tr & block_rect
-            if inter.is_empty:
-                continue
-            # If most of the block is inside a table area, drop it
-            if inter.get_area() >= 0.6 * block_rect.get_area():
-                return True
-        return False
-
-    filtered_items = []
-    for item in text_items:
-        if not is_inside_table(item["rect"]):
-            filtered_items.append(item)
-
-    # 4. Merge text + tables in reading order
-    all_items = filtered_items + table_items
-    if not all_items:
-        return ""
-
-    all_items.sort(key=lambda i: (round(i["y0"], 1), i["x0"]))
-
-    # 5. Build final markdown-ish text
-    output_parts: List[str] = []
-    for item in all_items:
-        if item["kind"] == "text":
-            output_parts.append(item["text"])
-        else:  # table
-            # Tables already markdown; wrap with spacing for clarity.
-            output_parts.append(item["text"])
-
-    return "\n\n".join(part.strip() for part in output_parts if part.strip())
-
-
-
-def is_scanned_pdf(path: Path) -> bool:
-    """Detect if PDF is scanned (needs OCR) vs born-digital."""
-    try:
-        import fitz
-    except ImportError:
-        return False
-    
-    try:
-        with fitz.open(str(path)) as doc:
-            pages_to_check = min(3, len(doc))
-            text_chars_total = 0
-            
-            for page_num in range(pages_to_check):
-                page = doc[page_num]
-                text = page.get_text("text") or ""
-                text_chars_total += len(text.strip())
-            
-            return text_chars_total < 100
-    except Exception as exc:
-        LOGGER.warning("Failed to detect if %s is scanned: %s", path.name, exc)
-        return False
+# ==============================================================================
+#  HELPER FUNCTIONS
+# ==============================================================================
 
 def file_fingerprint(path: Path) -> Dict[str, Any]:
     """Return a simple fingerprint for change detection."""
     stat = path.stat()
     return {"name": path.name, "size": stat.st_size, "mtime": stat.st_mtime}
 
-
 def iter_library_files(root: Path) -> Iterable[Path]:
     """Yield supported document paths from the library root."""
     for ext in ("*.docx", "*.doc", "*.xlsx", "*.xls", "*.pdf", "*.txt"):
         yield from root.glob(ext)
 
-
 def current_files_index(root: Path) -> Dict[str, Dict[str, Any]]:
     """Build an index of current files keyed by filename."""
     return {p.name: file_fingerprint(p) for p in iter_library_files(root)}
-
 
 def load_jsonl(path: Path) -> Dict[str, Any]:
     """Read a JSONL cache file into a dict keyed by filename."""
@@ -288,13 +50,11 @@ def load_jsonl(path: Path) -> Dict[str, Any]:
                 continue
     return data
 
-
 def write_jsonl(path: Path, records: Iterable[Dict[str, Any]]) -> None:
     """Overwrite a JSONL file with records."""
     with path.open("w", encoding="utf-8") as file:
         for record in records:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
 
 def upsert_jsonl_record(path: Path, record: Dict[str, Any]) -> None:
     """Update or append a record in a JSONL cache."""
@@ -302,28 +62,13 @@ def upsert_jsonl_record(path: Path, record: Dict[str, Any]) -> None:
     data[record["filename"]] = record
     write_jsonl(path, data.values())
 
-
-def collapse_repeated_lines(text: str, max_repeats: int = 3) -> str:
-    """Collapse repeated lines to avoid redundant table headers."""
-    lines = text.splitlines()
-    cleaned: List[str] = []
-    index = 0
-    while index < len(lines):
-        current = lines[index]
-        repeat_count = 1
-        while (
-            index + repeat_count < len(lines)
-            and lines[index + repeat_count].strip() == current.strip()
-            and repeat_count < max_repeats
-        ):
-            repeat_count += 1
-        cleaned.extend(lines[index : index + min(repeat_count, max_repeats)])
-        if repeat_count > max_repeats:
-            index += repeat_count
-        else:
-            index += repeat_count
-    return "\n".join(cleaned)
-
+def _get_text_cache_path(file_path: Path, cache_dir: Path) -> Path:
+    """Generate cache path using filename + hash."""
+    file_stat = file_path.stat()
+    cache_key = f"{file_stat.st_mtime}_{file_stat.st_size}"
+    cache_hash = md5(cache_key.encode()).hexdigest()[:8]
+    safe_name = re.sub(r'[^\w\-]', '_', file_path.stem)
+    return cache_dir / f"{safe_name}_{cache_hash}.pkl"
 
 def clean_text_for_llm(text: str) -> str:
     """Normalize text for LLMs without breaking basic Markdown structures."""
@@ -369,11 +114,54 @@ def clean_text_for_llm(text: str) -> str:
 
     return text.strip()
 
-def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
-    """Extract text from various document formats."""
-    ext = path.suffix.lower()
+def is_scanned_pdf(path: Path) -> bool:
+    """Detect if PDF is scanned (needs OCR) vs born-digital."""
+    try:
+        import fitz
+    except ImportError:
+        return False
     
-    # Dispatch to format-specific handler
+    try:
+        with fitz.open(str(path)) as doc:
+            pages_to_check = min(3, len(doc))
+            text_chars_total = 0
+            
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                text = page.get_text("text") or ""
+                text_chars_total += len(text.strip())
+            
+            return text_chars_total < 100
+    except Exception as exc:
+        LOGGER.warning("Failed to detect if %s is scanned: %s", path.name, exc)
+        return False
+
+# ==============================================================================
+#  MAIN EXTRACTION LOGIC
+# ==============================================================================
+
+def read_doc_for_llm(path: Path, max_chars: Optional[int] = None, use_cache: bool = True) -> str:
+    """
+    Extract text from various document formats using Markdown-first approach.
+    Uses modern libraries (Mammoth, PyMuPDF4LLM) with intelligent fallbacks.
+    """
+    if use_cache:
+        config = AppConfig.get()
+        cache_dir = config.paths.cache_dir / "text_extracts"
+        cache_dir.mkdir(exist_ok=True)
+        cache_path = _get_text_cache_path(path, cache_dir)
+        
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached_text = pickle.load(f)
+                if max_chars and len(cached_text) > max_chars:
+                    return cached_text[:max_chars]
+                return cached_text
+            except Exception as exc:
+                LOGGER.warning("Failed to load text cache for %s: %s", path.name, exc)
+
+    ext = path.suffix.lower()
     handlers = {
         '.txt': _extract_txt,
         '.docx': _extract_docx,
@@ -384,102 +172,599 @@ def read_doc_for_llm(path: Path, max_chars: Optional[int] = None) -> str:
     }
     
     handler = handlers.get(ext)
-    if not handler:
-        LOGGER.warning("Unsupported file type: %s", ext)
-        return ""
-    
     try:
-        text = handler(path)
+        if handler:
+            text = handler(path)
+        else:
+            LOGGER.warning("Unsupported file type: %s", ext)
+            text = ""
     except Exception as exc:
         LOGGER.error("Failed to extract %s: %s", path.name, exc)
         text = f"[READ_ERROR] {exc}"
-    
+
+    # Cache result
+    if use_cache and text and not text.startswith("[READ_ERROR]"):
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(text, f)
+        except Exception:
+            pass
+
     if max_chars and len(text) > max_chars:
         text = text[:max_chars]
-    
     return text
 
-
 def _extract_txt(path: Path) -> str:
-    """Extract from plain text files."""
+    """Plain text extraction."""
     return path.read_text(encoding="utf-8", errors="ignore")
 
+# ==============================================================================
+#  DOCX EXTRACTION (Mammoth + Visual Extraction)
+# ==============================================================================
 
 def _extract_docx(path: Path) -> str:
-    """Extract from modern Word documents, preserving table positions."""
-    from docx import Document as DocxDocument
-    
-    document = DocxDocument(str(path))
-    parts: List[str] = []
-    
-    # Header tables and paragraphs
-    for section in document.sections:
-        header = section.header
-        for table in header.tables:
-            for row in table.rows:
-                row_parts = []
-                for cell in row.cells:
-                    cell_text = cell.text.strip()
-                    if cell_text and cell_text not in row_parts:
-                        row_parts.append(cell_text)
-                if row_parts:
-                    parts.append(' | '.join(row_parts))
-        
-        for para in header.paragraphs:
-            if para.text.strip():
-                parts.append(para.text)
-    
-    # FIXED: Extract body elements in document order (paragraphs AND tables inline)
-    for element in document.element.body:
-        # Paragraph
-        if element.tag.endswith('p'):
-            for para in document.paragraphs:
-                if para._element == element:
-                    if para.text.strip():
-                        parts.append(para.text)
-                    break
-        
-        # Table (inline with paragraphs)
-        elif element.tag.endswith('tbl'):
-            for table in document.tables:
-                if table._element == element:
-                    table_text_parts = []
-                    for row in table.rows:
-                        row_text_parts = []
-                        for cell in row.cells:
-                            cell_text = cell.text.strip()
-                            if cell_text:
-                                row_text_parts.append(cell_text)
-                        if row_text_parts:
-                            table_text_parts.append(" | ".join(row_text_parts))
-                    
-                    if table_text_parts:
-                        table_full_text = "\n".join(table_text_parts)
-                        max_table_chars = 10000
-                        if len(table_full_text) > max_table_chars:
-                            parts.append(table_full_text[:max_table_chars])
-                        else:
-                            parts.append(table_full_text)
-                    break
-    
-    return collapse_repeated_lines("\n".join(parts))
+    """
+    Extract from DOCX using Mammoth for structure preservation.
+    Includes optional visual extraction of images and diagrams.
+    """
+    # 1. Structural extraction via Mammoth
+    markdown_text = ""
+    try:
+        with path.open("rb") as docx_file:
+            result = mammoth.convert_to_markdown(docx_file)
+            markdown_text = result.value
+            
+            if result.messages:
+                # Log warnings but don't fail
+                for msg in result.messages:
+                    if msg.get('type') == 'warning':
+                        LOGGER.debug("Mammoth warning for %s: %s", path.name, msg.get('message'))
+    except Exception as exc:
+        LOGGER.warning("Mammoth extraction failed for %s, trying fallback: %s", path.name, exc)
+        # Fallback to basic python-docx extraction
+        try:
+            from docx import Document
+            doc = Document(str(path))
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            markdown_text = "\n\n".join(paragraphs)
+        except Exception as fallback_exc:
+            LOGGER.error("DOCX fallback also failed for %s: %s", path.name, fallback_exc)
+            return f"[DOCX_EXTRACTION_FAILED] {exc}"
 
+    # 2. Visual extraction (Images/Diagrams) - Optional
+    config = AppConfig.get()
+    visuals_text = ""
+    
+    if getattr(config, 'visual_extraction_enabled', True):  # Default to True
+        try:
+            from docx import Document
+            doc = Document(str(path))
+            images = _extract_images_from_docx(doc)
+            
+            if images:
+                visual_blocks = []
+                for img in images:
+                    block = f"\n\n> **[IMAGE: {img['context']}]**\n> {img['description']}\n"
+                    visual_blocks.append(block)
+                visuals_text = "\n".join(visual_blocks)
+                LOGGER.info("Extracted %d visual descriptions from %s", len(images), path.name)
+        except Exception as exc:
+            LOGGER.warning("Visual extraction failed for %s: %s", path.name, exc)
+
+    return markdown_text + visuals_text
+
+def _extract_images_from_docx(document) -> List[Dict[str, Any]]:
+    """
+    Extract embedded images from DOCX with context and descriptions.
+    Filters out decorative elements (icons, logos) based on size.
+    """
+    from docx.oxml.ns import qn
+    from PIL import Image
+    
+    images = []
+    
+    # Size thresholds to filter decorative elements
+    MIN_WIDTH_PX = 100
+    MIN_HEIGHT_PX = 100
+    MIN_AREA_PX = 15000  # ~122x122 or larger
+    
+    for rel_id, rel in document.part.rels.items():
+        if "image" not in rel.target_ref:
+            continue
+            
+        try:
+            image_part = rel.target_part
+            image_bytes = image_part.blob
+            
+            # Check image dimensions to filter decorative elements
+            with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                width, height = pil_img.size
+                area = width * height
+                
+                # Skip small images (logos, icons, decorative elements)
+                if width < MIN_WIDTH_PX or height < MIN_HEIGHT_PX or area < MIN_AREA_PX:
+                    LOGGER.debug("Skipping small image: %dx%d (area=%d)", width, height, area)
+                    continue
+            
+            # Extract context from surrounding text
+            context = _extract_image_context_docx(document, rel_id)
+            
+            # Get AI description of the image
+            description = _describe_visual_with_gemini(image_bytes, context)
+            
+            if description:
+                images.append({
+                    'type': 'IMAGE',
+                    'context': context or f"Image {len(images)+1}",
+                    'description': description,
+                    'size': f"{width}x{height}"
+                })
+                
+        except Exception as exc:
+            LOGGER.debug("Failed to process image in DOCX: %s", exc)
+            continue
+    
+    return images
+
+def _extract_image_context_docx(document, rel_id: str) -> str:
+    """Extract text context around an image in DOCX."""
+    from docx.oxml.ns import qn
+    
+    # Find paragraphs containing this image
+    context_parts = []
+    
+    for i, paragraph in enumerate(document.paragraphs):
+        # Check if paragraph contains the image
+        for run in paragraph.runs:
+            if run._element.xpath(f'.//a:blip[@r:embed="{rel_id}"]'):
+                # Found the paragraph with the image
+                # Collect surrounding context
+                start_idx = max(0, i - 2)
+                end_idx = min(len(document.paragraphs), i + 3)
+                
+                for ctx_para in document.paragraphs[start_idx:end_idx]:
+                    text = ctx_para.text.strip()
+                    if text and len(text) > 10:  # Skip empty or very short lines
+                        context_parts.append(text)
+                
+                break
+    
+    # Also check for captions or titles in nearby text
+    context = " | ".join(context_parts) 
+    return context if context else ""  
+
+# ==============================================================================
+#  PDF EXTRACTION (PyMuPDF4LLM + Fallback + Visual Extraction)
+# ==============================================================================
+
+def _extract_pdf(path: Path) -> str:
+    """
+    Extract from PDF using PyMuPDF4LLM (layout-aware Markdown conversion).
+    Falls back to custom extraction if PyMuPDF4LLM produces poor output.
+    Includes optional visual extraction of diagrams and images.
+    """
+    # 1. Primary: PyMuPDF4LLM for layout-aware Markdown
+    markdown_text = ""
+    extraction_method = "pymupdf4llm"
+    
+    try:
+        markdown_text = pymupdf4llm.to_markdown(str(path))
+        
+        # Quality check: if output is suspiciously short or garbled, trigger fallback
+        expected_min_length = path.stat().st_size // 100  # Rough heuristic
+        if len(markdown_text) < expected_min_length or len(markdown_text) < 500:
+            LOGGER.warning("PyMuPDF4LLM output suspiciously short for %s (%d chars), trying fallback", 
+                          path.name, len(markdown_text))
+            raise ValueError("Output too short")
+            
+    except Exception as exc:
+        LOGGER.warning("PyMuPDF4LLM failed for %s: %s, using custom fallback", path.name, exc)
+        extraction_method = "custom_fallback"
+        
+        # Fallback: Custom extraction with layout awareness
+        try:
+            markdown_text = _extract_pdf_with_layout_fallback(path)
+        except Exception as fallback_exc:
+            LOGGER.error("PDF fallback extraction also failed for %s: %s", path.name, fallback_exc)
+            # Last resort: plain text extraction
+            try:
+                with fitz.open(str(path)) as doc:
+                    markdown_text = "\n\n".join([page.get_text() for page in doc])
+                extraction_method = "plain_text"
+            except Exception:
+                return f"[PDF_EXTRACTION_FAILED] {exc}"
+
+    # 2. Visual extraction (Diagrams/Images) - Optional
+    config = AppConfig.get()
+    visuals_text = ""
+    
+    if getattr(config, 'visual_extraction_enabled', True):
+        try:
+            visual_items = []
+            with fitz.open(str(path)) as doc:
+                for page_num, page in enumerate(doc):
+                    items = _extract_visual_content_from_page(page, page_num)
+                    visual_items.extend(items)
+            
+            if visual_items:
+                visual_blocks = []
+                for item in visual_items:
+                    v_type = item.get('type', 'VISUAL').upper()
+                    block = f"\n\n> **[{v_type}: {item['context']}]**\n> {item['description']}\n"
+                    visual_blocks.append(block)
+                
+                visuals_text = "\n".join(visual_blocks)
+                LOGGER.info("Extracted %d visual descriptions from %s", len(visual_items), path.name)
+                
+        except Exception as exc:
+            LOGGER.warning("Visual extraction failed for %s: %s", path.name, exc)
+
+    LOGGER.info("PDF %s extracted via %s", path.name, extraction_method)
+    return markdown_text + visuals_text
+
+def _extract_pdf_with_layout_fallback(path: Path) -> str:
+    """
+    Custom PDF extraction with layout awareness for multi-column documents.
+    Used as fallback when PyMuPDF4LLM fails or produces poor output.
+    """
+    with fitz.open(str(path)) as doc:
+        all_text = []
+        
+        for page_num, page in enumerate(doc):
+            # Use dict mode for better structure
+            page_dict = page.get_text("dict")
+            blocks = page_dict.get("blocks", [])
+            
+            # Sort blocks by position (Y then X) to handle columns
+            text_blocks = [b for b in blocks if b.get("type") == 0]  # Type 0 = text
+            
+            # Detect columns by clustering X positions
+            if text_blocks:
+                sorted_blocks = _sort_blocks_with_column_detection(text_blocks, page.rect.width)
+                
+                page_text = []
+                for block in sorted_blocks:
+                    for line in block.get("lines", []):
+                        line_text = ""
+                        for span in line.get("spans", []):
+                            line_text += span.get("text", "")
+                        if line_text.strip():
+                            page_text.append(line_text)
+                
+                all_text.append("\n".join(page_text))
+        
+        return "\n\n".join(all_text)
+
+def _sort_blocks_with_column_detection(blocks: List[Dict], page_width: float) -> List[Dict]:
+    """
+    Sort text blocks considering multi-column layouts.
+    Detects column breaks and reads top-to-bottom within each column.
+    """
+    if not blocks:
+        return blocks
+    
+    # Extract X positions of all blocks
+    x_positions = [b["bbox"][0] for b in blocks]
+    
+    # Simple column detection: if there's a significant gap in X positions
+    x_positions_sorted = sorted(set(x_positions))
+    
+    # Detect column break (gap > 20% of page width)
+    column_threshold = page_width * 0.2
+    columns = []
+    current_column = [x_positions_sorted[0]]
+    
+    for x in x_positions_sorted[1:]:
+        if x - current_column[-1] > column_threshold:
+            columns.append(current_column)
+            current_column = [x]
+        else:
+            current_column.append(x)
+    columns.append(current_column)
+    
+    # If multi-column detected, sort within columns
+    if len(columns) > 1:
+        sorted_blocks = []
+        for col_x_range in columns:
+            col_min = min(col_x_range)
+            col_max = max(col_x_range) + column_threshold
+            
+            # Get blocks in this column
+            col_blocks = [b for b in blocks if col_min <= b["bbox"][0] < col_max]
+            # Sort by Y position within column
+            col_blocks.sort(key=lambda b: b["bbox"][1])
+            sorted_blocks.extend(col_blocks)
+        
+        return sorted_blocks
+    else:
+        # Single column: simple Y-then-X sort
+        blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+        return blocks
+
+def _extract_image_context_pdf_by_bbox(page, page_num: int, img_bbox: fitz.Rect) -> str:
+    """Extract text context around an image using its bounding box."""
+    blocks = page.get_text("dict")["blocks"]
+    text_blocks = [b for b in blocks if b.get("type") == 0]
+    
+    context_parts = []
+    for block in text_blocks:
+        block_rect = fitz.Rect(block["bbox"])
+        
+        # Check if block is near the image (within 50 points)
+        if block_rect.y1 < img_bbox.y0 - 50:  # Too far above
+            continue
+        if block_rect.y0 > img_bbox.y1 + 50:  # Too far below
+            continue
+        
+        # Extract text from block
+        block_text = ""
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                block_text += span.get("text", "")
+        
+        if block_text.strip() and len(block_text.strip()) > 10:
+            context_parts.append(block_text.strip())
+    
+    context = " | ".join(context_parts[:2])
+    return context if context else f"Page {page_num+1}"
+
+def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any]]:
+    """Extract significant visual elements from PDF page."""
+    visual_items = []
+    
+    # Size thresholds (in page points, not pixels)
+    MIN_WIDTH_PT = 100
+    MIN_HEIGHT_PT = 100
+    MIN_AREA_PT = 15000
+    
+    # 1. Extract images with bbox and xref in one call
+    image_infos = page.get_image_info(xrefs=True)
+    
+    for img_index, info in enumerate(image_infos):
+        xref = info['xref']
+        bbox = fitz.Rect(info['bbox'])
+        
+        # Filter by RENDERED size on page (catches scaled-down high-res images)
+        if bbox.width < MIN_WIDTH_PT or bbox.height < MIN_HEIGHT_PT:
+            continue
+        
+        if bbox.width * bbox.height < MIN_AREA_PT:
+            continue
+        
+        try:
+            base_image = page.parent.extract_image(xref)
+            image_bytes = base_image["image"]
+            
+            # Validate actual pixel dimensions too (double-check)
+            from PIL import Image
+            with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                width, height = pil_img.size
+                # If pixel size is tiny, skip (even if rendered large)
+                if width < 100 or height < 100:
+                    continue
+            
+            # Extract context using the bbox we already have
+            context = _extract_image_context_pdf_by_bbox(page, page_num, bbox)
+            
+            description = _describe_visual_with_gemini(image_bytes, context)
+            
+            if description:
+                visual_items.append({
+                    'type': 'IMAGE',
+                    'context': context or f"Page {page_num+1}, Image {img_index+1}",
+                    'description': description,
+                    'size': f"{width}x{height}px, rendered {int(bbox.width)}x{int(bbox.height)}pt"
+                })
+                
+        except Exception as exc:
+            LOGGER.debug("Failed to extract image from page %d: %s", page_num, exc)
+            continue
+    
+    # 2. Extract vector drawings (diagrams, charts)
+    try:
+        drawings = page.cluster_drawings()
+        for drawing_idx, drawing_cluster in enumerate(drawings):
+            if not drawing_cluster:
+                continue
+            
+            # Calculate bounding box of the drawing cluster
+            bbox = fitz.Rect()
+            for item in drawing_cluster:
+                if hasattr(item, 'rect'):
+                    bbox |= item.rect
+            
+            width = bbox.width
+            height = bbox.height
+            area = width * height
+            
+            # Filter small drawings (decorative lines, bullets, etc.)
+            if width < MIN_WIDTH or height < MIN_HEIGHT or area < MIN_AREA:
+                continue
+            
+            # Render the drawing area as image
+            try:
+                mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
+                pix = page.get_pixmap(matrix=mat, clip=bbox)
+                image_bytes = pix.tobytes("png")
+                
+                # Extract context
+                context = _extract_drawing_context_pdf(page, page_num, bbox)
+                
+                # Get AI description
+                description = _describe_visual_with_gemini(image_bytes, context)
+                
+                if description:
+                    visual_items.append({
+                        'type': 'DIAGRAM',
+                        'context': context or f"Page {page_num+1}, Diagram {drawing_idx+1}",
+                        'description': description,
+                        'size': f"{int(width)}x{int(height)}"
+                    })
+                    
+            except Exception as exc:
+                LOGGER.debug("Failed to render drawing from page %d: %s", page_num, exc)
+                continue
+                
+    except Exception as exc:
+        LOGGER.debug("Failed to cluster drawings on page %d: %s", page_num, exc)
+    
+    return visual_items
+
+def _extract_image_context_pdf(page, page_num: int, img_index: int) -> str:
+    """Extract text context around an image in PDF."""
+    # Get all text blocks on the page
+    blocks = page.get_text("dict")["blocks"]
+    text_blocks = [b for b in blocks if b.get("type") == 0]
+    
+    # Get image rectangles
+    img_list = page.get_image_info()
+    if img_index >= len(img_list):
+        return f"Page {page_num+1}"
+    
+    img_rect = fitz.Rect(img_list[img_index]["bbox"])
+    
+    # Find text blocks near the image (within 50 points)
+    context_parts = []
+    for block in text_blocks:
+        block_rect = fitz.Rect(block["bbox"])
+        # Check if block is above, below, or beside the image
+        if block_rect.y1 < img_rect.y0 - 50:  # Above
+            continue
+        if block_rect.y0 > img_rect.y1 + 50:  # Below
+            continue
+        
+        # Extract text from block
+        block_text = ""
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                block_text += span.get("text", "")
+        
+        if block_text.strip() and len(block_text.strip()) > 10:
+            context_parts.append(block_text.strip())
+    
+    context = " | ".join(context_parts)
+    return context if context else f"Page {page_num+1}"
+
+def _extract_drawing_context_pdf(page, page_num: int, bbox: fitz.Rect) -> str:
+    """Extract text context around a drawing in PDF."""
+    blocks = page.get_text("dict")["blocks"]
+    text_blocks = [b for b in blocks if b.get("type") == 0]
+    
+    context_parts = []
+    for block in text_blocks:
+        block_rect = fitz.Rect(block["bbox"])
+        
+        # Check proximity to drawing
+        if block_rect.y1 < bbox.y0 - 50 or block_rect.y0 > bbox.y1 + 50:
+            continue
+        
+        # Extract text
+        block_text = ""
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                block_text += span.get("text", "")
+        
+        if block_text.strip() and len(block_text.strip()) > 10:
+            context_parts.append(block_text.strip())
+    
+    context = " | ".join(context_parts)
+    return context if context else f"Page {page_num+1}"
+
+# ==============================================================================
+#  EXCEL EXTRACTION (Smart YAML/Markdown switching)
+# ==============================================================================
+
+def _extract_excel(path: Path) -> str:
+    """
+    Extract from Excel with smart format selection:
+    - Wide tables (>5 columns) → YAML for better LLM comprehension
+    - Narrow tables (≤5 columns) → Markdown for readability
+    """
+    try:
+        excel = pd.ExcelFile(str(path))
+    except Exception as exc:
+        LOGGER.error("Failed to open Excel file %s: %s", path.name, exc)
+        return f"[EXCEL_READ_ERROR] {exc}"
+    
+    chunks: List[str] = []
+    
+    for sheet_name in excel.sheet_names[:5]:  # Limit to first 5 sheets
+        try:
+            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
+            
+            # Clean up empty rows/columns
+            df.dropna(axis=1, how="all", inplace=True)
+            df.dropna(thresh=2, inplace=True)
+            
+            if df.empty:
+                continue
+            
+            # Heuristic: Detect headers (first row likely contains column names)
+            try:
+                df.columns = df.iloc[0]
+                df = df[1:].reset_index(drop=True)
+            except Exception:
+                pass
+            
+            # Strategy selection based on table width
+            num_columns = len(df.columns)
+            
+            if num_columns > 5:
+                # WIDE TABLE: Convert to YAML for better key-value preservation
+                records = df.to_dict(orient='records')
+                
+                # Clean nulls for readable YAML
+                clean_records = []
+                for record in records[:50]:  # Limit rows to prevent token bloat
+                    clean_record = {k: v for k, v in record.items() if pd.notna(v)}
+                    if clean_record:  # Only include non-empty records
+                        clean_records.append(clean_record)
+                
+                if clean_records:
+                    yaml_text = yaml.dump(clean_records, sort_keys=False, 
+                                         default_flow_style=False, allow_unicode=True)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n```yaml\n{yaml_text}\n```")
+                    LOGGER.debug("Sheet '%s' in %s: wide table (%d cols) → YAML", 
+                               sheet_name, path.name, num_columns)
+            else:
+                # NARROW TABLE: Markdown is fine and more readable
+                try:
+                    md = df.to_markdown(index=False)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n{md}")
+                    LOGGER.debug("Sheet '%s' in %s: narrow table (%d cols) → Markdown", 
+                               sheet_name, path.name, num_columns)
+                except Exception:
+                    # Fallback if markdown conversion fails
+                    csv_text = df.to_csv(index=False)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n```csv\n{csv_text}\n```")
+        
+        except Exception as exc:
+            LOGGER.warning("Failed to extract sheet '%s' from %s: %s", 
+                          sheet_name, path.name, exc)
+            continue
+    
+    if not chunks:
+        return "[EXCEL_NO_CONTENT]"
+    
+    return "\n\n".join(chunks)
+
+# ==============================================================================
+#  LEGACY DOC SUPPORT
+# ==============================================================================
 
 def _extract_legacy_doc(path: Path) -> str:
     """
-    Extract from legacy .doc files by converting to PDF then using PDF extraction.
-    
-    IMPORTANT: Cleans up the temporary converted PDF after extraction.
+    Legacy .doc support via conversion to PDF then re-extraction.
+    Requires Spire.Doc or Aspose.Words for conversion.
     """
-    LOGGER.info("Legacy .doc detected: %s - attempting local conversion", path.name)
+    LOGGER.info("Processing legacy .doc file: %s", path.name)
     
-    # Use a temp file in system temp dir, NOT in the library
     import tempfile
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
         converted_path = Path(tmp.name)
     
     try:
-        # Try Spire.Doc first
+        # Try Spire.Doc first (free tier available)
         try:
             from spire.doc import Document, FileFormat
             doc = Document()
@@ -488,111 +773,99 @@ def _extract_legacy_doc(path: Path) -> str:
             doc.Close()
             LOGGER.info("Converted %s to PDF via Spire.Doc", path.name)
         except ImportError:
-            # Fall back to Aspose
+            # Fallback to Aspose if available
             try:
                 import aspose.words as aw
                 doc = aw.Document(str(path))
                 doc.save(str(converted_path))
                 LOGGER.info("Converted %s to PDF via Aspose.Words", path.name)
-            except Exception as exc:
-                LOGGER.warning("Aspose conversion failed for %s: %s", path.name, exc)
-                raise  # Re-raise to trigger outer except
+            except ImportError:
+                LOGGER.error("No .doc conversion library available (need Spire.Doc or Aspose.Words)")
+                return "[ERROR: Legacy .doc conversion libraries not found]"
         
-        if not converted_path.exists():
-            raise FileNotFoundError("Conversion produced no output file")
+        # Extract from the converted PDF
+        return _extract_pdf(converted_path)
         
-        # Now extract from the converted PDF using the standard PDF handler
-        text = _extract_pdf(converted_path)
-        LOGGER.info("Extracted text from converted PDF: %s", path.name)
-        return text
-        
+    except Exception as exc:
+        LOGGER.error("Failed to convert legacy .doc %s: %s", path.name, exc)
+        return f"[DOC_CONVERSION_FAILED] {exc}"
     finally:
-        # CRITICAL: Always clean up the temporary PDF
+        # Clean up temporary PDF
         if converted_path.exists():
             try:
                 converted_path.unlink()
-                LOGGER.debug("Cleaned up temporary PDF: %s", converted_path.name)
-            except Exception as exc:
-                LOGGER.warning("Failed to delete temporary PDF %s: %s", converted_path.name, exc)
+            except Exception:
+                pass
 
+# ==============================================================================
+#  VISUAL EXTRACTION HELPERS
+# ==============================================================================
 
-def _extract_pdf(path: Path) -> str:
+def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optional[str]:
     """
-    Extract from PDF using markdown-first approach.
-    
-    Tries pymupdf4llm first (best for LLMs), falls back to custom parser.
+    Send visual element to Gemini for description.
+    Uses Flash Lite for cost-effectiveness on diagrams/images.
     """
-    
-    # Try high-level markdown extraction first
-    #text = extract_with_pymupdf4llm(path)
-    #if text:
-    #    return text
-    
-    # Fallback to custom extraction
     try:
-        import fitz
+        from google.genai import types
+        from PIL import Image
         
-        with fitz.open(str(path)) as doc:
-            page_texts: List[str] = []
-            for page in doc:
-                page_text = _pymupdf_page_to_text(page)
-                if page_text.strip():
-                    page_texts.append(page_text)
-            
-            text = "\n\n".join(page_texts)
-            
-            if len(text.strip()) < 100 and len(doc) > 0:
-                LOGGER.warning("PDF %s yielded minimal text - may be scanned", path.name)
-            
-            return text
-    
-    except ImportError:
-        LOGGER.debug("PyMuPDF not available, using PyPDF2 for %s", path.name)
-        return _extract_pdf_pypdf2(path)
-    
-    except Exception as exc:
-        LOGGER.warning("PyMuPDF failed for %s: %s", path.name, exc)
-        return _extract_pdf_pypdf2(path)
-
-
-def _extract_pdf_pypdf2(path: Path) -> str:
-    """Fallback PDF extraction using PyPDF2."""
-    try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(str(path))
-        pages = []
-        for page in reader.pages:
-            extracted = page.extract_text() or ""
-            if extracted.strip():
-                pages.append(extracted)
-        return "\n".join(pages)
-    except Exception:
-        return ""
-
-
-def _extract_excel(path: Path) -> str:
-    """Extract from Excel files (both .xlsx and .xls)."""
-    excel = pd.ExcelFile(str(path))
-    chunks: List[str] = []
-    
-    for sheet_name in excel.sheet_names[:5]:
+        config = AppConfig.get()
+        
+        # Verify image is valid before sending
         try:
-            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
-            df.dropna(axis=1, how="all", inplace=True)
-            df.dropna(thresh=2, inplace=True)
-            df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
-            
-            if not df.empty:
-                md = _df_to_markdown(df)
-                if md:
-                    chunks.append(f"[Sheet: {sheet_name}]\n{md}")
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                # Convert to RGB if needed (some PDFs have CMYK)
+                if img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+                
+                # Re-encode to ensure clean PNG
+                output = io.BytesIO()
+                img.save(output, format='PNG')
+                image_bytes = output.getvalue()
+        except Exception as img_exc:
+            LOGGER.debug("Failed to validate/convert image: %s", img_exc)
+            return None
         
-        except Exception as exc:
-            LOGGER.warning("Could not read sheet '%s' from %s: %s", sheet_name, path.name, exc)
-            continue
-    
-    return "\n\n".join(chunks)
-
+        # Build prompt
+        prompt = (
+            "Describe this technical diagram/chart/drawing/table/image in detail. "
+            "Focus on: labels, measurements, flow/connections, components, visual relationships,"
+            "units, and key operational information. "
+            "Be specific and technical. Use bullet point and/or table structure if required."
+            "Ensure to keep it to the point, including all relevant details. Avoid flowery language."
+        )
+        if context:
+            prompt += f"\n\nContext from document: {context}"
+        
+        response = config.client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=[
+                types.Part(text=prompt),
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type="image/png",
+                        data=image_bytes
+                    )
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.2,  # Lower temp for technical descriptions
+                max_output_tokens=400  # Cap to prevent bloat
+            )
+        )
+        
+        description = response.text.strip() if response.text else None
+        
+        if description:
+            LOGGER.debug("Generated visual description (%d chars)", len(description))
+            return description
+        
+        return None
+        
+    except Exception as exc:
+        LOGGER.warning("Gemini vision description failed: %s", exc)
+        return None
 
 __all__ = [
     "file_fingerprint",
@@ -601,7 +874,6 @@ __all__ = [
     "load_jsonl",
     "write_jsonl",
     "upsert_jsonl_record",
-    "collapse_repeated_lines",
     "clean_text_for_llm",
     "read_doc_for_llm",
     "is_scanned_pdf",
