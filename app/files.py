@@ -6,10 +6,13 @@ import io
 import json
 import re
 import pickle
+import subprocess
+import tempfile
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
+from markdownify import markdownify as md
 import yaml
 import mammoth
 import pymupdf4llm
@@ -136,6 +139,95 @@ def is_scanned_pdf(path: Path) -> bool:
         LOGGER.warning("Failed to detect if %s is scanned: %s", path.name, exc)
         return False
 
+
+# ==============================================================================
+#  LIBREOFFICE CONVERSION
+# ==============================================================================
+
+def convert_to_pdf_with_libreoffice(input_path: Path, output_dir: Optional[Path] = None) -> Optional[Path]:
+    """
+    Convert DOCX/DOC to PDF using LibreOffice headless.
+    Works on both Linux and Windows.
+    
+    Args:
+        input_path: Path to input DOCX/DOC file
+        output_dir: Optional output directory (uses temp if None)
+        
+    Returns:
+        Path to converted PDF, or None if conversion failed
+    """
+    import sys
+    
+    if output_dir is None:
+        output_dir = Path(tempfile.mkdtemp())
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine LibreOffice command based on platform
+    if sys.platform == "win32":
+        # Windows: Try common installation paths
+        possible_paths = [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+            "soffice.exe",  # If in PATH
+        ]
+        libreoffice_cmd = None
+        for path in possible_paths:
+            if Path(path).exists() or path == "soffice.exe":
+                libreoffice_cmd = path
+                break
+        
+        if libreoffice_cmd is None:
+            LOGGER.error("LibreOffice not found on Windows. Install from: https://www.libreoffice.org/download/")
+            return None
+    else:
+        # Linux/Mac
+        libreoffice_cmd = "libreoffice"
+    
+    try:
+        # LibreOffice headless conversion
+        result = subprocess.run(
+            [
+                libreoffice_cmd,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", str(output_dir),
+                str(input_path)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60  # 60 second timeout for large files
+        )
+        
+        if result.returncode != 0:
+            LOGGER.error("LibreOffice conversion failed for %s: %s", input_path.name, result.stderr)
+            return None
+        
+        # Find the converted PDF
+        pdf_name = input_path.stem + ".pdf"
+        pdf_path = output_dir / pdf_name
+        
+        if pdf_path.exists():
+            LOGGER.info("Successfully converted %s to PDF via LibreOffice", input_path.name)
+            return pdf_path
+        else:
+            LOGGER.error("LibreOffice conversion succeeded but PDF not found: %s", pdf_path)
+            return None
+            
+    except subprocess.TimeoutExpired:
+        LOGGER.error("LibreOffice conversion timeout for %s (>60s)", input_path.name)
+        return None
+    except FileNotFoundError:
+        if sys.platform == "win32":
+            LOGGER.error("LibreOffice not found. Download from: https://www.libreoffice.org/download/")
+        else:
+            LOGGER.error("LibreOffice not found - install with: apt-get install libreoffice")
+        return None
+    except Exception as exc:
+        LOGGER.error("LibreOffice conversion failed for %s: %s", input_path.name, exc)
+        return None
+
+
 # ==============================================================================
 #  MAIN EXTRACTION LOGIC
 # ==============================================================================
@@ -202,40 +294,97 @@ def _extract_txt(path: Path) -> str:
 #  DOCX EXTRACTION (Mammoth + Visual Extraction)
 # ==============================================================================
 
+def estimate_docx_pages(path: Path) -> int:
+    """
+    Estimate page count of a DOCX file.
+    Uses heuristics: paragraphs + tables.
+    
+    Returns:
+        Estimated page count (minimum 1)
+    """
+    try:
+        doc = Document(str(path))
+        
+        # Count content elements
+        paragraph_count = len([p for p in doc.paragraphs if p.text.strip()])
+        table_count = len(doc.tables)
+        
+        # Heuristic: ~40 paragraphs per page, each table = 0.5 page
+        estimated_pages = max(1, int(paragraph_count / 40 + table_count * 0.5))
+        
+        return estimated_pages
+        
+    except Exception as exc:
+        LOGGER.warning("Failed to estimate pages for %s: %s", path.name, exc)
+        return 10  # Default to "large" if we can't estimate
+
+
 def _extract_docx(path: Path) -> str:
     """
-    Extract from DOCX using Mammoth for structure preservation.
-    Includes optional visual extraction of images and diagrams.
+    Smart DOCX extraction with intelligent routing:
+    - Small files (<5 pages): Mammoth → Markdown (better for forms/checklists)
+    - Large files (≥5 pages): LibreOffice → PDF → PyMuPDF4LLM (preserves numbers)
+    - Fallback: python-docx if Mammoth fails
     """
-    # 1. Structural extraction via Mammoth
+    config = AppConfig.get()
+    
+    # Estimate page count
+    page_count = estimate_docx_pages(path)
+    LOGGER.info("Estimated %d pages for %s", page_count, path.name)
+    
+    # Route based on size
+    if page_count < 5:
+        # Small file - use Mammoth (better for forms/checklists)
+        LOGGER.info("Using Mammoth for small file: %s", path.name)
+        return _extract_docx_with_mammoth(path)
+    else:
+        # Large file - use LibreOffice conversion
+        LOGGER.info("Using LibreOffice conversion for large file: %s", path.name)
+        return _extract_docx_via_libreoffice(path)
+
+def _extract_docx_with_mammoth(path: Path) -> str:
+    """
+    Extract small DOCX files with Mammoth (good for forms/checklists).
+    """
     markdown_text = ""
+    
     try:
         with path.open("rb") as docx_file:
-            result = mammoth.convert_to_markdown(docx_file)
-            markdown_text = result.value
+            # Skip images - we handle them separately
+            def ignore_image(image):
+                return {}
+            
+            result = mammoth.convert_to_html(
+                docx_file,
+                convert_image=mammoth.images.img_element(ignore_image)
+            )
+            html_text = result.value
             
             if result.messages:
-                # Log warnings but don't fail
                 for msg in result.messages:
-                    if msg.get('type') == 'warning':
-                        LOGGER.debug("Mammoth warning for %s: %s", path.name, msg.get('message'))
+                    if hasattr(msg, 'type') and msg.type == 'warning':
+                        LOGGER.debug("Mammoth warning for %s: %s", path.name, msg.message)
+            
+            # Convert HTML to Markdown
+            markdown_text = md(html_text, heading_style="ATX")
+            
+            if not markdown_text or len(markdown_text.strip()) < 50:
+                LOGGER.warning("Mammoth output too short for %s, trying fallback", path.name)
+                raise ValueError("Mammoth output too short")
+                
     except Exception as exc:
-        LOGGER.warning("Mammoth extraction failed for %s, trying fallback: %s", path.name, exc)
-        # Fallback to basic python-docx extraction
+        LOGGER.warning("Mammoth extraction failed for %s: %s, trying fallback", path.name, exc)
         try:
-            from docx import Document
-            doc = Document(str(path))
-            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-            markdown_text = "\n\n".join(paragraphs)
+            markdown_text = _extract_docx_fallback(path)
         except Exception as fallback_exc:
             LOGGER.error("DOCX fallback also failed for %s: %s", path.name, fallback_exc)
             return f"[DOCX_EXTRACTION_FAILED] {exc}"
-
-    # 2. Visual extraction (Images/Diagrams) - Optional
-    config = AppConfig.get()
-    visuals_text = ""
     
-    if getattr(config, 'visual_extraction_enabled', True):  # Default to True
+    # Visual extraction
+    visuals_text = ""
+    config = AppConfig.get()
+    
+    if getattr(config, 'visual_extraction_enabled', True):
         try:
             from docx import Document
             doc = Document(str(path))
@@ -244,14 +393,119 @@ def _extract_docx(path: Path) -> str:
             if images:
                 visual_blocks = []
                 for img in images:
-                    block = f"\n\n> **[IMAGE: {img['context']}]**\n> {img['description']}\n"
+                    block = f"\n\n[IMAGE - {img['context']}]\n{img['description']}\n[/IMAGE]\n"
                     visual_blocks.append(block)
                 visuals_text = "\n".join(visual_blocks)
                 LOGGER.info("Extracted %d visual descriptions from %s", len(images), path.name)
         except Exception as exc:
             LOGGER.warning("Visual extraction failed for %s: %s", path.name, exc)
-
+    
     return markdown_text + visuals_text
+
+
+def _extract_docx_via_libreoffice(path: Path) -> str:
+    """
+    Extract large DOCX files via LibreOffice → PDF → PyMuPDF4LLM.
+    This preserves section numbering and complex formatting.
+    """
+    temp_dir = Path(tempfile.mkdtemp())
+    
+    try:
+        # Convert to PDF
+        pdf_path = convert_to_pdf_with_libreoffice(path, temp_dir)
+        
+        if pdf_path is None or not pdf_path.exists():
+            LOGGER.error("LibreOffice conversion failed for %s, using fallback", path.name)
+            return _extract_docx_fallback(path)
+        
+        # Extract from PDF
+        markdown_text = _extract_pdf(pdf_path)
+        
+        # Clean up temp PDF
+        try:
+            pdf_path.unlink()
+        except Exception:
+            pass
+        
+        return markdown_text
+        
+    except Exception as exc:
+        LOGGER.error("LibreOffice-based extraction failed for %s: %s", path.name, exc)
+        return _extract_docx_fallback(path)
+    finally:
+        # Clean up temp directory
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
+
+
+def _extract_docx_fallback(path: Path) -> str:
+    """
+    Fallback DOCX extraction using python-docx.
+    Handles paragraphs, tables, and basic structure.
+    """
+    from docx import Document
+    
+    doc = Document(str(path))
+    parts = []
+    
+    # Extract paragraphs with heading detection
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+            
+        style_name = para.style.name if para.style else ""
+        
+        if style_name.startswith('Heading'):
+            try:
+                level = int(style_name.replace('Heading', '').strip())
+                prefix = '#' * min(level, 6)
+                parts.append(f"\n{prefix} {text}\n")
+            except ValueError:
+                parts.append(f"\n## {text}\n")
+        elif style_name == 'Title':
+            parts.append(f"\n# {text}\n")
+        else:
+            parts.append(text)
+    
+    # Extract tables
+    for table in doc.tables:
+        table_md = _convert_docx_table_to_markdown(table)
+        if table_md:
+            parts.append(f"\n\n{table_md}\n")
+    
+    return "\n\n".join(parts)
+
+
+def _convert_docx_table_to_markdown(table) -> str:
+    """Convert a python-docx table to Markdown format."""
+    if not table.rows:
+        return ""
+    
+    try:
+        rows_text = []
+        
+        for row_idx, row in enumerate(table.rows):
+            cells_text = []
+            for cell in row.cells:
+                cell_text = cell.text.strip().replace('\n', ' ').replace('|', '\\|')
+                cells_text.append(cell_text)
+            
+            if cells_text:
+                rows_text.append("| " + " | ".join(cells_text) + " |")
+            
+            # Add separator after first row (header)
+            if row_idx == 0 and len(cells_text) > 0:
+                separator = "|" + "|".join([" --- "] * len(cells_text)) + "|"
+                rows_text.append(separator)
+        
+        return "\n".join(rows_text)
+        
+    except Exception as exc:
+        LOGGER.debug("Failed to convert table to markdown: %s", exc)
+        return ""
 
 def _extract_images_from_docx(document) -> List[Dict[str, Any]]:
     """
@@ -342,13 +596,27 @@ def _extract_pdf(path: Path) -> str:
     Extract from PDF using PyMuPDF4LLM (layout-aware Markdown conversion).
     Falls back to custom extraction if PyMuPDF4LLM produces poor output.
     Includes optional visual extraction of diagrams and images.
+    
+    Now includes:
+    - Better table detection (table_strategy="lines")
+    - Progress indicator for user feedback
+    - Header/footer exclusion for cleaner extraction
     """
     # 1. Primary: PyMuPDF4LLM for layout-aware Markdown
     markdown_text = ""
     extraction_method = "pymupdf4llm"
     
     try:
-        markdown_text = pymupdf4llm.to_markdown(str(path))
+        # Import pymupdf.layout to activate layout features
+        import pymupdf.layout
+        
+        markdown_text = pymupdf4llm.to_markdown(
+            str(path),
+            header=False,           # Exclude headers (intelligent detection)
+            footer=False,           # Exclude footers (intelligent detection)
+            table_strategy="lines", # More aggressive table detection
+            show_progress=True      # Show progress bar for user feedback
+        )
         
         # Quality check: if output is suspiciously short or garbled, trigger fallback
         expected_min_length = path.stat().st_size // 100  # Rough heuristic
@@ -754,48 +1022,10 @@ def _extract_excel(path: Path) -> str:
 
 def _extract_legacy_doc(path: Path) -> str:
     """
-    Legacy .doc support via conversion to PDF then re-extraction.
-    Requires Spire.Doc or Aspose.Words for conversion.
+    Extract from legacy .doc files via LibreOffice → PDF → PyMuPDF4LLM.
     """
-    LOGGER.info("Processing legacy .doc file: %s", path.name)
-    
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-        converted_path = Path(tmp.name)
-    
-    try:
-        # Try Spire.Doc first (free tier available)
-        try:
-            from spire.doc import Document, FileFormat
-            doc = Document()
-            doc.LoadFromFile(str(path))
-            doc.SaveToFile(str(converted_path), FileFormat.PDF)
-            doc.Close()
-            LOGGER.info("Converted %s to PDF via Spire.Doc", path.name)
-        except ImportError:
-            # Fallback to Aspose if available
-            try:
-                import aspose.words as aw
-                doc = aw.Document(str(path))
-                doc.save(str(converted_path))
-                LOGGER.info("Converted %s to PDF via Aspose.Words", path.name)
-            except ImportError:
-                LOGGER.error("No .doc conversion library available (need Spire.Doc or Aspose.Words)")
-                return "[ERROR: Legacy .doc conversion libraries not found]"
-        
-        # Extract from the converted PDF
-        return _extract_pdf(converted_path)
-        
-    except Exception as exc:
-        LOGGER.error("Failed to convert legacy .doc %s: %s", path.name, exc)
-        return f"[DOC_CONVERSION_FAILED] {exc}"
-    finally:
-        # Clean up temporary PDF
-        if converted_path.exists():
-            try:
-                converted_path.unlink()
-            except Exception:
-                pass
+    LOGGER.info("Processing legacy .doc file via LibreOffice: %s", path.name)
+    return _extract_docx_via_libreoffice(path)
 
 # ==============================================================================
 #  VISUAL EXTRACTION HELPERS
@@ -851,7 +1081,7 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
             ],
             config=types.GenerateContentConfig(
                 temperature=0.2,  # Lower temp for technical descriptions
-                max_output_tokens=400  # Cap to prevent bloat
+                #max_output_tokens=400  # Cap to prevent bloat
             )
         )
         
