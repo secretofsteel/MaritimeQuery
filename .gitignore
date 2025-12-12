@@ -1,3 +1,4 @@
 /.conda
 /Dockerfile
 /tests
+data/chroma_db/chroma.sqlite3

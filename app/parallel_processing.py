@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -150,19 +151,19 @@ class ParallelDocumentProcessor:
                 
                 tracker.increment(progress_callback, "extracting", path.name)
                 
-                # Log with filename visible in console
-                status = "✓ SUCCESS" if result.success else "✗ FAILED"
-                LOGGER.info("Extracted %s in %dms [%d/%d] %s",
-                           result.filename, result.duration_ms,
-                           tracker.current, tracker.total, status)
-                
+                # FIX FOR ISSUE #3: Reduce logging verbosity to prevent buffer blocking
+                # Only log every 10th file or failures
                 if not result.success:
-                    LOGGER.warning("  └─ Error: %s", result.error)
+                    LOGGER.warning("✗ FAILED: %s - %s", result.filename, result.error)
+                elif tracker.current % 10 == 0 or tracker.current == tracker.total:
+                    LOGGER.info("Extracted [%d/%d] files (last: %s)", 
+                               tracker.current, tracker.total, result.filename)
         
         total_duration = time.time() - start_time
         
         LOGGER.info("Parallel extraction complete: %d successful, %d failed in %.2fs",
                    len(successful), len(failed), total_duration)
+        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush after batch completion
         
         return ProcessingResult(
             successful=successful,
@@ -218,6 +219,8 @@ class ParallelEmbeddingGenerator:
                     
                     tracker.increment(progress_callback, "embedding", f"chunk {index+1}")
                     
+                    # FIX FOR ISSUE #3: Reduce logging frequency to prevent buffer blocking
+                    # Only log every 100th embedding or at completion
                     if tracker.current % 100 == 0 or tracker.current == tracker.total:
                         LOGGER.info("Generated embeddings [%d/%d]", tracker.current, tracker.total)
                         
@@ -231,6 +234,7 @@ class ParallelEmbeddingGenerator:
         
         LOGGER.info("Parallel embedding generation complete: %d embeddings in %.2fs (%.2f/sec)",
                    len(embeddings), duration, len(embeddings) / duration if duration > 0 else 0)
+        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush after batch completion
         
         return EmbeddingBatch(
             embeddings=embeddings,

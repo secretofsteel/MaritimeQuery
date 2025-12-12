@@ -9,8 +9,9 @@ from typing import Optional
 
 from google import genai
 from llama_index.core import Settings as LlamaSettings
-from llama_index.embeddings.gemini import GeminiEmbedding
-from llama_index.llms.gemini import Gemini as LlamaGemini
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+from llama_index.llms.google_genai import GoogleGenAI as LlamaGemini
+from google.genai.types import EmbedContentConfig, GenerateContentConfig, ThinkingConfig
 
 from .logger import LOGGER
 
@@ -69,13 +70,25 @@ def build_paths(base_dir: Optional[Path] = None) -> PathConfig:
 
 
 def configure_llama_settings(api_key: str) -> None:
+
+    generation_config = GenerateContentConfig(temperature=0.3, thinking_config=ThinkingConfig(thinking_budget=1024))
+
     """Set global LlamaIndex configuration."""
     LlamaSettings.llm = LlamaGemini(
-        model="models/gemini-flash-latest",
+        model="gemini-2.5-flash",
         api_key=api_key,
-        temperature=0.3,
+        generation_config=generation_config
     )
-    LlamaSettings.embed_model = GeminiEmbedding(model_name="models/text-embedding-004", api_key=api_key)
+
+    # Define the embedding configuration with the desired output dimension
+    embedding_config = EmbedContentConfig(output_dimensionality=768)
+
+    # Set up the embedding model in LlamaIndex settings
+    LlamaSettings.embed_model = GoogleGenAIEmbedding(
+        model_name="gemini-embedding-001",
+        api_key=api_key,
+        embedding_config=embedding_config
+    )
 
 
 class AppConfig:
@@ -92,12 +105,19 @@ class AppConfig:
         self.client = genai.Client(api_key=api_key)
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
         self.ocr_enabled = os.getenv("ENABLE_PDF_OCR", "true").lower() == "true"
+        self.visual_extraction_enabled = os.getenv("ENABLE_VISUAL_EXTRACTION", "true").lower() == "true"
 
         LOGGER.debug("Configuration initialised with base directory %s", self.paths.base_dir)
         if self.ocr_enabled:
             LOGGER.info("PDF OCR enabled")
         else:
             LOGGER.info("PDF OCR disabled")
+
+        if self.visual_extraction_enabled:
+            LOGGER.info("PDF visual extraction (images/drawings) enabled")
+        else:
+            LOGGER.info("PDF visual extraction (images/drawings) disabled")
+
 
     def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""

@@ -58,11 +58,13 @@ class AppState:
     session_upload_manager: Optional[SessionUploadManager] = None
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
+    _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
+    hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
 
     def ensure_index_loaded(self) -> bool:
         """
         Lazy-load the index if not already present.
-        
+
         Returns:
             True if index is ready (loaded or already present)
             False if index could not be loaded
@@ -74,29 +76,32 @@ class AppState:
             # Fallback for non-Streamlit contexts (testing, etc.)
             LOGGER.warning("Streamlit not available, using in-memory flag for index loading")
             st = None
-        
+
         # Already loaded and ready
         if self.nodes and self.index:
             LOGGER.debug("Index already loaded: %d nodes", len(self.nodes))
+            # Check hierarchical support if not already checked
+            if not self.hierarchical_enabled:
+                self._validate_hierarchical_support()
             return True
-        
+
         # Check session state flag (persistent across Streamlit reruns)
         if st is not None:
             if "index_load_attempted" not in st.session_state:
                 st.session_state["index_load_attempted"] = False
-            
+
             # Already tried and failed, don't spam attempts
             if st.session_state["index_load_attempted"] and not self.nodes:
                 LOGGER.debug("Index load previously failed, skipping retry")
                 return False
-            
+
             # Mark that we're attempting to load
             st.session_state["index_load_attempted"] = True
-        
+
         LOGGER.info("Attempting to load cached index...")
         try:
             nodes, index = load_cached_nodes_and_index()
-            
+
             if nodes and index:
                 self.nodes = nodes
                 self.index = index
@@ -104,17 +109,21 @@ class AppState:
                 self.vector_retriever = None
                 self.bm25_retriever = None
                 self.ensure_retrievers()
-                
+
                 # Update manager if it exists
                 if self.manager:
                     self.manager.nodes = nodes
-                
+
                 LOGGER.info("Successfully loaded %d cached nodes", len(nodes))
+
+                # Validate hierarchical support
+                self._validate_hierarchical_support()
+
                 return True
             else:
                 LOGGER.warning("No cached index found. User must build index first.")
                 return False
-                
+
         except Exception as exc:
             LOGGER.exception("Failed to load cached index: %s", exc)
             return False
@@ -182,7 +191,12 @@ class AppState:
         return session_id
 
     def switch_session(self, session_id: str) -> None:
-        """Switch the active chat session, loading messages if necessary."""
+        """
+        Switch the active chat session, loading messages if necessary.
+        
+        NEW: Automatically restores conversation context (topic, cached chunks, etc.)
+        from the last assistant message in the loaded session.
+        """
         manager = self.ensure_session_manager()
         if not manager.get_session(session_id):
             LOGGER.warning("Requested session does not exist: %s", session_id)
@@ -190,12 +204,168 @@ class AppState:
 
         if session_id != self.current_session_id:
             self.current_session_id = session_id
-            self.reset_session()
+            self.reset_session()  # Clear current context
 
         # Drop any cached messages so they reload fresh from disk
         self._session_messages_cache.pop(session_id, None)
         self.get_current_session_messages()
         self.refresh_session_upload_cache(session_id)
+        
+        # NEW: Restore context from session
+        self.restore_session_context()
+
+        # Rebuild query_history from messages
+        messages = self.get_current_session_messages()
+        self.query_history.clear()
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                query_result = {
+                    "query": msg.get("query", ""),
+                    "answer": msg.get("content", ""),
+                    "topic_extracted": msg.get("topic_extracted"),
+                    "confidence_pct": msg.get("confidence_pct", 0),
+                    "sources": msg.get("sources", []),
+                }
+                self.query_history.append(query_result)
+
+        LOGGER.info("Rebuilt query_history with %d entries", len(self.query_history))
+
+    def restore_session_context(self) -> None:
+        """
+        Restore conversation context from the currently loaded session.
+        
+        This method:
+        1. Finds the last assistant message with context_state
+        2. Restores topic, scope, doc_type preferences, and turn count
+        3. Retrieves cached chunks from ChromaDB using stored IDs
+        4. Re-indexes uploaded files from their JSONL extractions
+        
+        Called automatically after switch_session().
+        """
+        if not self.current_session_id:
+            LOGGER.debug("No active session to restore context from")
+            return
+        
+        messages = self.get_current_session_messages()
+        if not messages:
+            LOGGER.debug("No messages in session, nothing to restore")
+            return
+        
+        # Find LAST assistant message with context_state
+        last_context_state = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                context_state = msg.get("context_state")
+                if context_state:
+                    last_context_state = context_state
+                    break
+        
+        if not last_context_state:
+            LOGGER.info("No context state found in session, starting fresh")
+            return
+        
+        # Restore context fields
+        self.last_topic = last_context_state.get("topic")
+        self.last_doc_type_pref = last_context_state.get("doc_type_pref")
+        self.last_scope = last_context_state.get("scope")
+        self.context_turn_count = last_context_state.get("turn_count", 0)
+        
+        LOGGER.info("📂 Restored session context: topic='%s', scope='%s', turn=%d/6", 
+                self.last_topic, self.last_scope, self.context_turn_count)
+        
+        # Restore cached chunks by retrieving from ChromaDB using IDs
+        cached_chunk_ids = last_context_state.get("cached_chunk_ids", [])
+        if cached_chunk_ids and self.nodes:
+            # Build node map (id -> node) for fast lookup
+            LOGGER.debug("Building node map for chunk restoration...")
+            from llama_index.core.schema import NodeWithScore
+
+            node_map = {}
+            for node in self.nodes:
+                # Get the actual node ID
+                node_id = getattr(node, 'id_', getattr(node, 'node_id', None))
+                if node_id:
+                    node_map[node_id] = node
+
+            # Retrieve chunks and wrap as NodeWithScore
+            restored_chunks = []
+            missing_chunks = 0
+            for chunk_id in cached_chunk_ids:
+                if chunk_id in node_map:
+                    # Wrap in NodeWithScore (same format as sticky_chunks)
+                    node = node_map[chunk_id]
+                    restored_chunks.append(NodeWithScore(node=node, score=0.8))
+                else:
+                    missing_chunks += 1
+
+            if missing_chunks > 0:
+                LOGGER.warning("⚠️  %d/%d cached chunks not found in current index (may have been rebuilt)",
+                            missing_chunks, len(cached_chunk_ids))
+        
+        elif cached_chunk_ids:
+            LOGGER.warning("⚠️ Cannot restore chunks: index not loaded")
+        
+        # Re-index uploaded files if they exist
+        # Note: This is a placeholder - full implementation needed in session_uploads.py
+        self._restore_session_uploads()
+
+    def _restore_session_uploads(self) -> None:
+        """
+        Re-index uploaded files from JSONL extractions.
+        """
+        if not self.current_session_id:
+            return
+        
+        upload_manager = self.ensure_session_upload_manager()
+        
+        # Check if there are any extraction JSONLs to restore
+        from .config import AppConfig
+        config = AppConfig.get()
+        upload_dir = config.paths.cache_dir / "sessions" / self.current_session_id / "uploads"
+        
+        if not upload_dir.exists():
+            LOGGER.debug("No upload directory for session")
+            return
+        
+        # Count extraction files
+        extraction_files = list(upload_dir.glob("*.jsonl"))
+        if not extraction_files:
+            LOGGER.debug("No uploaded file extractions to restore")
+            return
+        
+        LOGGER.info("📎 Found %d uploaded files to re-index...", len(extraction_files))
+        
+        # NEW: Add spinner here ↓
+        import streamlit as st
+        
+        with st.spinner(f"📎 Re-indexing {len(extraction_files)} uploaded file{'s' if len(extraction_files) != 1 else ''}..."):
+            # Restore uploads from JSONLs
+            try:
+                result = upload_manager.restore_uploads_from_jsonl(self.current_session_id)
+                
+                status = result.get("status")
+                if status == "restored":
+                    restored = result.get("restored_count", 0)
+                    failed = result.get("failed_count", 0)
+                    total_chunks = result.get("total_chunks", 0)
+                    
+                    if restored > 0:
+                        LOGGER.info("✅ Restored %d uploaded files (%d chunks)", restored, total_chunks)
+                    if failed > 0:
+                        LOGGER.warning("⚠️  Failed to restore %d uploaded files", failed)
+                    
+                    # Refresh cache so UI shows restored files
+                    self.refresh_session_upload_cache(self.current_session_id)
+                elif status == "no_uploads":
+                    LOGGER.debug("No uploads to restore")
+                else:
+                    LOGGER.warning("Upload restoration failed: %s", result.get("reason", "Unknown error"))
+                    
+            except Exception as exc:
+                LOGGER.error("Failed to restore session uploads: %s", exc)
+                import traceback
+                traceback.print_exc()
 
     def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
         """Flatten a Message object into the format expected by the UI."""
@@ -231,14 +401,54 @@ class AppState:
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Persist and cache a new chat message for the active session."""
+        """
+        Persist and cache a new chat message for the active session.
+        
+        NEW: For assistant messages, automatically captures and saves context state
+        (topic, scope, cached chunks) for later restoration.
+        """
         session_id = self.current_session_id
         if not session_id:
             session_id = self.create_new_session()
 
+        # NEW: If this is an assistant message, capture context state
+        if role == "assistant" and metadata is not None:
+            # Build context state snapshot
+            context_state = {
+                "topic": self.last_topic,
+                "doc_type_pref": self.last_doc_type_pref,
+                "scope": self.last_scope,
+                "turn_count": self.context_turn_count,
+                "cached_chunk_ids": [],
+            }
+
+            # Capture cached chunk IDs (not full chunks - just references)
+            if self.sticky_chunks:
+                # sticky_chunks contains NodeWithScore objects with .node attribute
+                chunk_ids = []
+                for i, item in enumerate(self.sticky_chunks[:40]):
+                    # Handle both NodeWithScore and raw Document objects
+                    if hasattr(item, 'node'):
+                        # It's a NodeWithScore
+                        node = item.node
+                    else:
+                        # It's a raw Document
+                        node = item
+                    
+                    # Get ID from node
+                    node_id = getattr(node, 'id_', getattr(node, 'node_id', f"chunk_{i}"))
+                    chunk_ids.append(node_id)
+                
+                context_state["cached_chunk_ids"] = chunk_ids
+                LOGGER.debug("Captured %d cached chunk IDs for context restoration", len(chunk_ids))
+            
+            # Add to message metadata
+            metadata["context_state"] = context_state
+
         manager = self.ensure_session_manager()
         manager.add_message(session_id, role=role, content=content, metadata=metadata)
 
+        # Update cache
         cached_entry: Dict[str, Any] = {
             "role": role,
             "content": content,
@@ -372,6 +582,60 @@ class AppState:
             log_path.unlink()
         self.history_loaded = True
         LOGGER.info("History cleared")
+
+    def _validate_hierarchical_support(self) -> None:
+        """Validate that document trees exist for hierarchical retrieval."""
+        config = AppConfig.get()
+        trees_path = config.paths.cache_dir / "document_trees.json"
+
+        if not trees_path.exists():
+            LOGGER.warning("⚠️  Document trees not found at %s", trees_path)
+            LOGGER.warning("   Hierarchical retrieval is DISABLED")
+            LOGGER.warning("   To enable: Rebuild index via Admin → Full Rebuild")
+            self.hierarchical_enabled = False
+        else:
+            from .indexing import load_document_trees
+            trees = load_document_trees(trees_path)
+            if trees:
+                LOGGER.info("✅ Loaded %d document trees - hierarchical retrieval ENABLED", len(trees))
+                self.hierarchical_enabled = True
+            else:
+                LOGGER.warning("⚠️  Document trees file empty - hierarchical retrieval DISABLED")
+                self.hierarchical_enabled = False
+
+    def get_node_map(self) -> Dict[str, Any]:
+        """
+        Get or build cached node map for hierarchical retrieval.
+
+        Returns:
+            Dictionary mapping node_id -> NodeWithScore
+        """
+        if self._node_map_cache is None:
+            from llama_index.core.schema import NodeWithScore
+
+            node_map: Dict[str, Any] = {}
+            for item in self.nodes:
+                # Get node_id (handles multiple attribute names)
+                node_id = None
+                if hasattr(item, 'node_id'):
+                    node_id = item.node_id
+                elif hasattr(item, 'id_'):
+                    node_id = item.id_
+                elif hasattr(item, 'doc_id'):
+                    node_id = item.doc_id
+
+                if node_id:
+                    node_map[node_id] = NodeWithScore(node=item, score=0.5)
+
+            self._node_map_cache = node_map
+            LOGGER.info("Built node map cache with %d entries", len(node_map))
+
+        return self._node_map_cache
+
+    def invalidate_node_map_cache(self) -> None:
+        """Invalidate node map cache when index is rebuilt."""
+        self._node_map_cache = None
+        LOGGER.debug("Node map cache invalidated")
 
 
 __all__ = ["AppState"]

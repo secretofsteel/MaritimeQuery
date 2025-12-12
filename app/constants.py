@@ -6,6 +6,13 @@ import os
 CHUNK_SIZE = 1024
 CHUNK_OVERLAP = 200
 
+
+# Python slicing extraction configuration
+# Fuzzy matching threshold for finding section boundaries in raw text (0-1 scale)
+# Lower values = more lenient matching, higher values = stricter matching
+# Recommended range: 0.80-0.90 for maritime documents with formatting variations
+PYTHON_SLICING_FUZZY_THRESHOLD = 0.80
+
 # Debug mode toggle (can be controlled via environment variable or admin UI)
 DEBUG_RAG = os.getenv("DEBUG_RAG", "false").lower() == "true"
 
@@ -81,6 +88,7 @@ EXTRACT_SYSTEM_PROMPT = (
     "If the document is a Form or a Checklist ensure to start the title with the Form or Checklist code and number then follow with its title, (eg. 'C 004 - Briefing of Masters and Senior Offiers' or 'CBO 015 - Cargo Operation Checklist')"
     "Identify and list any explicit cross-references to other documents, forms, procedures, policies, regulations, reports, their chapters and/or sections mentioned in the text."
     "Use the 'references' object in the schema, listing full names/numbers (e.g., 'Form C 002b', 'Ballast Water Management Procedure', 'SOLAS Chapter V'). Be specific and include the complete name/number as it appears or is logically inferred."
+    "IMPORTANT: Any form, procedure,regulation, etc. that goes into the references should be included only ONCE!! DO NOT INSERT REPEATED ENTRIES!!!!"
     "Adhere strictly to the provided JSON schema, including all required properties and data types."
     "Do not include trailing commas after the last item in arrays or objects."
     "CRITICAL CONTENT RULES:"
@@ -109,12 +117,19 @@ EXTRACT_SYSTEM_PROMPT = (
     "For any document that is part of company's Management System, then label it 'Procedure'"
 )
 
+
 CONFIDENCE_HIGH_THRESHOLD = 75
 CONFIDENCE_MEDIUM_THRESHOLD = 55
 
 # Context-aware conversation settings
 MAX_CONTEXT_TURNS = 6  # Hard reset after this many exchanges
 CONTEXT_HISTORY_WINDOW = 5  # Number of recent Q&A pairs to include in prompt
+
+# Hierarchical Retrieval Configuration
+HIERARCHICAL_MAX_SECTIONS = 2  # Maximum sections to retrieve per query
+HIERARCHICAL_MAX_DEPTH = 3  # Maximum recursion depth in section tree
+HIERARCHICAL_MIN_CONTEXT_TOKENS = 500  # Fallback to chunks if less than this
+HIERARCHICAL_MAX_CONTEXT_TOKENS = 8000  # Token budget per query
 
 __all__ = [
     "CHUNK_SIZE",
@@ -127,4 +142,8 @@ __all__ = [
     "CONFIDENCE_MEDIUM_THRESHOLD",
     "MAX_CONTEXT_TURNS",
     "CONTEXT_HISTORY_WINDOW",
+    "HIERARCHICAL_MAX_SECTIONS",
+    "HIERARCHICAL_MAX_DEPTH",
+    "HIERARCHICAL_MIN_CONTEXT_TOKENS",
+    "HIERARCHICAL_MAX_CONTEXT_TOKENS",
 ]
