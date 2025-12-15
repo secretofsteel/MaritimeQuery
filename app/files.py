@@ -15,6 +15,7 @@ import pandas as pd
 from markdownify import markdownify as md
 import yaml
 import mammoth
+import pymupdf.layout
 import pymupdf4llm
 import fitz  # PyMuPDF
 
@@ -606,12 +607,11 @@ def _extract_pdf(path: Path) -> str:
     markdown_text = ""
     extraction_method = "pymupdf4llm"
     
-    try:
-        # Import pymupdf.layout to activate layout features
-        import pymupdf.layout
+    try:        
+        doc = pymupdf.open(str(path))
         
         markdown_text = pymupdf4llm.to_markdown(
-            str(path),
+            doc,
             header=False,           # Exclude headers (intelligent detection)
             footer=False,           # Exclude footers (intelligent detection)
             table_strategy="lines", # More aggressive table detection
