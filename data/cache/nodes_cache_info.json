@@ -1,7 +1,7 @@
 {
-  "timestamp": "2025-12-12T18:34:51.152008",
-  "num_nodes": 246,
-  "num_documents": 226,
+  "timestamp": "2025-12-15T11:53:30.822253",
+  "num_nodes": 381,
   "chunk_size": 1024,
-  "chunk_overlap": 200
+  "chunk_overlap": 200,
+  "last_sync": "2025-12-15T11:53:30.822253"
 }
