@@ -29,3 +29,12 @@ app/__pycache__/state.cpython-310.pyc
 app/__pycache__/state.cpython-311.pyc
 app/__pycache__/ui.cpython-310.pyc
 app/__pycache__/ui.cpython-311.pyc
+data/cache/gemini_extract_cache.jsonl
+data/cache/gemini_extract_cache.jsonl
+data/chroma_db/3608471d-36ac-4fa1-a168-ec8d367061ab/length.bin
+data/chroma_db/3608471d-36ac-4fa1-a168-ec8d367061ab/data_level0.bin
+data/chroma_db/chroma.sqlite3
+data/cache/sync_cache.json
+data/cache/nodes_cache.pkl
+data/cache/nodes_cache_info.json
+data/cache/gemini_extract_cache.jsonl
