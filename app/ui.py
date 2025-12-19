@@ -1622,10 +1622,10 @@ def render_app(
             with st.chat_message("assistant"):
                 try:
                     # Fancy status with updates
-                    status = st.status("🔍 Processing query...", expanded=True)
+                    status = st.status("🔍 Processing your query...", expanded=True)
                     
                     with status:
-                        st.write("🔍 Analyzing intent...")
+                        st.write("🔍 Analyzing query intent...")
                         result = query_with_confidence(
                             app_state,
                             trimmed,
@@ -1638,7 +1638,7 @@ def render_app(
                         )
                         
                         st.write("✅ Documents retrieved")
-                        status.update(label="✅ Search complete", state="complete", expanded=False)
+                        st.write("✍️ Generating answer...")  # NEW - bridges the gap
                     
                     # Stream the response with typewriter effect
                     answer_stream = result.get("answer_stream")
@@ -1648,6 +1648,9 @@ def render_app(
                     else:
                         full_answer = result.get("answer", "")
                         st.markdown(full_answer)
+                    
+                    # NOW close the status after streaming starts
+                    status.update(label="✅ Complete", state="complete", expanded=False)
                     
                     # CRITICAL: Remove generator from result before saving (can't serialize)
                     result.pop("answer_stream", None)
