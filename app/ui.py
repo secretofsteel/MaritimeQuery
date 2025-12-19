@@ -1619,65 +1619,74 @@ def render_app(
                 st.markdown(trimmed)
             
             # Process query with spinner
+            # Process query with streaming
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching documents..."):
-                    try:
-                        result = query_with_confidence(
-                            app_state,
-                            trimmed,
-                            retriever_type=retrieval_type,
-                            auto_refine=auto_refine_option,
-                            fortify=fortify_option,
-                            rerank=rerank_option,
-                            use_conversation_context=use_context,
-                            enable_hierarchical=use_hierarchical,
-                        )
+                try:
+                    result = query_with_confidence(
+                        app_state,
+                        trimmed,
+                        retriever_type=retrieval_type,
+                        auto_refine=auto_refine_option,
+                        fortify=fortify_option,
+                        rerank=rerank_option,
+                        use_conversation_context=use_context,
+                        enable_hierarchical=use_hierarchical,
+                    )
+                    
+                    # Stream the response with typewriter effect
+                    answer_stream = result.get("answer_stream")
+                    if answer_stream:
+                        full_answer = st.write_stream(answer_stream)
+                        result["answer"] = full_answer
+                    else:
+                        full_answer = result.get("answer", "")
+                        st.markdown(full_answer)
 
-                        # Add messages to session
-                        app_state.add_message_to_current_session("user", trimmed)
+                    # Add messages to session
+                    app_state.add_message_to_current_session("user", trimmed)
 
                         # Extract metadata for assistant message
-                        assistant_metadata = {
-                            "confidence_pct": result.get("confidence_pct"),
-                            "confidence_level": result.get("confidence_level"),
-                            "confidence_note": result.get("confidence_note"),
-                            "sources": result.get("sources"),
-                            "num_sources": result.get("num_sources"),
-                            "retriever_type": result.get("retriever_type"),
-                            "context_mode": result.get("context_mode"),
-                            "context_turn": result.get("context_turn"),
-                            "context_reset_note": result.get("context_reset_note"),
-                        }
+                    assistant_metadata = {
+                        "confidence_pct": result.get("confidence_pct"),
+                        "confidence_level": result.get("confidence_level"),
+                        "confidence_note": result.get("confidence_note"),
+                        "sources": result.get("sources"),
+                        "num_sources": result.get("num_sources"),
+                        "retriever_type": result.get("retriever_type"),
+                        "context_mode": result.get("context_mode"),
+                        "context_turn": result.get("context_turn"),
+                        "context_reset_note": result.get("context_reset_note"),
+                    }
 
-                        app_state.add_message_to_current_session(
-                            "assistant",
-                            result.get("answer", ""),
-                            assistant_metadata
-                        )
-                        
-                        # Auto-generate session title after first real search (skip greetings/chitchat)
-                        session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
-                        if session and session.title == "New Chat":
-                            # Check if this was a real query (not greeting/chitchat)
-                            retriever_type = result.get("retriever_type", "")
-                            if retriever_type != "none":  # Real search happened - generate title now
-                                app_state.ensure_session_manager().auto_generate_title(
-                                    app_state.current_session_id,
-                                    trimmed,
-                                    result.get("answer", "")[:200]
-                                )
+                    app_state.add_message_to_current_session(
+                        "assistant",
+                        result.get("answer", ""),
+                        assistant_metadata
+                    )
+                    
+                    # Auto-generate session title after first real search (skip greetings/chitchat)
+                    session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
+                    if session and session.title == "New Chat":
+                        # Check if this was a real query (not greeting/chitchat)
+                        retriever_type = result.get("retriever_type", "")
+                        if retriever_type != "none":  # Real search happened - generate title now
+                            app_state.ensure_session_manager().auto_generate_title(
+                                app_state.current_session_id,
+                                trimmed,
+                                result.get("answer", "")[:200]
+                            )
 
-                        # DEPRECATED: Keep for backwards compatibility during transition
-                        app_state.append_history(result)
+                    # DEPRECATED: Keep for backwards compatibility during transition
+                    app_state.append_history(result)
 
-                        LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
-                                result.get("confidence_pct", 0), result.get("num_sources", 0))
-                        _rerun_app()
-                        
-                    except Exception as exc:
-                        LOGGER.exception("Query failed: %s", exc)
-                        st.error(f"❌ **Search failed:** {exc}")
-                        st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
+                    LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
+                            result.get("confidence_pct", 0), result.get("num_sources", 0))
+                    _rerun_app()
+                    
+                except Exception as exc:
+                    LOGGER.exception("Query failed: %s", exc)
+                    st.error(f"❌ **Search failed:** {exc}")
+                    st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
 
 
 def render_viewer_app(app_state: AppState) -> None:
