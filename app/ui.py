@@ -1641,6 +1641,43 @@ def render_app(
                     else:
                         full_answer = result.get("answer", "")
                         st.markdown(full_answer)
+                    
+                    # CRITICAL: Remove generator from result before saving (can't serialize)
+                    result.pop("answer_stream", None)
+                    
+                    # Display sources and confidence after streaming
+                    conf_pct = result.get("confidence_pct", 0)
+                    conf_level = result.get("confidence_level", "N/A")
+                    num_sources = result.get("num_sources", 0)
+                    
+                    # Confidence badge
+                    badge_emoji = "🟢" if "HIGH" in conf_level else "🟡" if "MEDIUM" in conf_level else "🔴"
+                    conf_level_text = conf_level.replace("🟢", "").replace("🟡", "").replace("🔴", "").strip()
+                    
+                    caption_parts = [f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text})", f"**Sources:** {num_sources}"]
+                    
+                    if result.get("context_mode"):
+                        context_turn = result.get("context_turn", 0)
+                        caption_parts.append(f"💬 **Turn:** {context_turn}")
+                    
+                    if result.get("context_reset_note"):
+                        st.info(result["context_reset_note"])
+                    
+                    st.caption(" • ".join(caption_parts))
+                    
+                    # Sources expander
+                    sources = result.get("sources", [])
+                    if sources:
+                        with st.expander("📚 View sources", expanded=False):
+                            for idx, src in enumerate(sources[:5], 1):
+                                source_file = src.get("source", "Unknown")
+                                title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
+                                section = src.get("section", "Main document")
+                                st.markdown(f"**{idx}. {title}**")
+                                st.caption(f"└─ {section}")
+                    
+                    if result.get("confidence_note"):
+                        st.info(result["confidence_note"])
 
                     # Add messages to session
                     app_state.add_message_to_current_session("user", trimmed)
