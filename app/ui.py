@@ -1618,20 +1618,27 @@ def render_app(
             with st.chat_message("user"):
                 st.markdown(trimmed)
             
-            # Process query with spinner
             # Process query with streaming
             with st.chat_message("assistant"):
                 try:
-                    result = query_with_confidence(
-                        app_state,
-                        trimmed,
-                        retriever_type=retrieval_type,
-                        auto_refine=auto_refine_option,
-                        fortify=fortify_option,
-                        rerank=rerank_option,
-                        use_conversation_context=use_context,
-                        enable_hierarchical=use_hierarchical,
-                    )
+                    # Fancy status with updates
+                    status = st.status("🔍 Processing query...", expanded=True)
+                    
+                    with status:
+                        st.write("🔍 Analyzing intent...")
+                        result = query_with_confidence(
+                            app_state,
+                            trimmed,
+                            retriever_type=retrieval_type,
+                            auto_refine=auto_refine_option,
+                            fortify=fortify_option,
+                            rerank=rerank_option,
+                            use_conversation_context=use_context,
+                            enable_hierarchical=use_hierarchical,
+                        )
+                        
+                        st.write("✅ Documents retrieved")
+                        status.update(label="✅ Search complete", state="complete", expanded=False)
                     
                     # Stream the response with typewriter effect
                     answer_stream = result.get("answer_stream")
