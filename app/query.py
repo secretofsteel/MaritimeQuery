@@ -6,7 +6,7 @@ import os
 import re
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Iterator
 
 from llama_index.core.schema import NodeWithScore
 from llama_index.core import Settings as LlamaSettings
@@ -50,6 +50,20 @@ if USE_RERANKER and cohere is not None:  # pragma: no cover - runtime configurat
 
 # Thread pool for parallel retrieval (module-level singleton)
 _retrieval_executor = ThreadPoolExecutor(max_workers=2)
+
+def generate_answer_stream(prompt: str) -> Iterator[str]:
+    """
+    Stream LLM response for Streamlit display.
+    
+    Yields text chunks as they arrive from Gemini.
+    """
+    stream_response = LlamaSettings.llm.stream_complete(prompt)
+    
+    for chunk in stream_response:
+        if hasattr(chunk, 'delta') and chunk.delta:
+            yield chunk.delta
+        elif hasattr(chunk, 'text') and chunk.text:
+            yield chunk.text
 
 def _attach_embeddings_from_cache(
     retrieved_nodes: List[NodeWithScore],
@@ -1696,8 +1710,9 @@ QUESTION: {original_query}
 
 Please provide a clear, concise answer with proper citations."""
 
-    response = LlamaSettings.llm.complete(prompt)
-    answer_text = response.text
+    #response = LlamaSettings.llm.complete(prompt)
+    #answer_text = response.text
+    answer_stream = generate_answer_stream(prompt)
     
     # Update conversation state
     if DEBUG_RAG:
@@ -1731,7 +1746,9 @@ Please provide a clear, concise answer with proper citations."""
         "refinement_history": refinement_history if len(refinement_history) > 1 else None,
         "attempts": attempt,
         "best_attempt": best_result["attempt"],
-        "answer": answer_text,
+        #"answer": answer_text,
+        "answer_stream": answer_stream,
+        "answer": "",  # Placeholder for streaming
         "confidence_pct": confidence_pct,
         "confidence_level": confidence_level,
         "confidence_note": confidence_note,
