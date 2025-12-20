@@ -15,6 +15,7 @@ import chromadb
 from llama_index.core import Document, StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core.schema import Document
 
 from .config import AppConfig
 from .constants import CHUNK_OVERLAP, CHUNK_SIZE
@@ -554,9 +555,6 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
     return None, None
 
 
-# ... rest of file continues with IncrementalIndexManager class unchanged ...
-
-
 @dataclass
 class SyncResult:
     added: List[str]
@@ -684,175 +682,39 @@ class IncrementalIndexManager:
         if filenames:
             self._save_nodes_pickle()
 
-    def _add_or_update_documents_parallel(
+    def sync_library(
         self, 
-        filenames: Set[str], 
-        index: Optional[VectorStoreIndex]
-    ) -> Set[str]:
-        """
-        Parallel version with parallel extraction and embedding generation.
-        
-        FIX FOR ISSUE #1: Now returns Set[str] of successfully processed filenames.
-        FIX FOR ISSUE #3: Added explicit flush calls to prevent buffer blocking.
-        
-        Returns:
-            Set of filenames that were successfully processed and added to the index
-        """
-        if not filenames:
-            return set()
-        
-        LOGGER.info("Syncing %d files with parallel processing...", len(filenames))
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        # Track successfully processed files for accurate counting
-        successfully_processed: Set[str] = set()
-        
-        # Separate files that need extraction vs can use cache
-        files_needing_extraction: List[Path] = []
-        cached_documents: List[Document] = []
-        cached_filenames: Set[str] = set()
-        
-        for filename in filenames:
-            doc_path = self.docs_path / filename
-            
-            if filename in self.gemini_cache:
-                cached_record = self.gemini_cache[filename]
-                gemini_meta = cached_record.get("gemini", {})
-                
-                if "parse_error" not in gemini_meta and gemini_meta.get("sections"):
-                    # Use cached extraction
-                    LOGGER.info("%s (using cached extraction)", filename)
-                    try:
-                        docs = to_documents_from_gemini(doc_path, gemini_meta)
-                        cached_documents.extend(docs)
-                        cached_filenames.add(filename)
-                        successfully_processed.add(filename)  # FIX FOR ISSUE #1
-                    except Exception as exc:
-                        LOGGER.error("Error converting cached %s: %s", filename, exc)
-                else:
-                    # Cache invalid or has parse_error - re-extract
-                    files_needing_extraction.append(doc_path)
-            else:
-                # Not in cache - extract
-                files_needing_extraction.append(doc_path)
-        
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        # Phase 1: Parallel extraction for files that need it
-        all_documents = cached_documents.copy()
-        
-        if files_needing_extraction:
-            LOGGER.info("Extracting %d files in parallel...", len(files_needing_extraction))
-            sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-            
-            processor = ParallelDocumentProcessor(max_workers=10)
-            extraction_results = processor.extract_batch(files_needing_extraction)
-            
-            # Update JSONL cache with results
-            files_index = current_files_index(self.docs_path)
-            for result in extraction_results.successful + extraction_results.failed:
-                filename = result.filename
-                if filename in files_index:
-                    fingerprint = files_index[filename]
-                    
-                    if result.record:
-                        upsert_jsonl_record(
-                            self.gemini_cache_path,
-                            {
-                                "filename": filename,
-                                "mtime": fingerprint["mtime"],
-                                "size": fingerprint["size"],
-                                "gemini": result.record,
-                            },
-                        )
-            
-            # Reload cache after updates
-            self.gemini_cache = load_jsonl(self.gemini_cache_path)
-            
-            # Convert successful extractions to documents
-            for result in extraction_results.successful:
-                doc_path = self.docs_path / result.filename
-                try:
-                    docs = to_documents_from_gemini(doc_path, result.record)
-                    all_documents.extend(docs)
-                    successfully_processed.add(result.filename)  # FIX FOR ISSUE #1
-                except Exception as exc:
-                    LOGGER.exception("Failed to convert %s to documents", result.filename)
-            
-            sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        if not all_documents:
-            LOGGER.info("No documents to add")
-            return successfully_processed  # FIX FOR ISSUE #1: Return empty set
-        
-        # Phase 2: Chunk all documents
-        LOGGER.info("Chunking %d documents...", len(all_documents))
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        new_nodes = chunk_documents(all_documents)
-        LOGGER.info("Created %d chunks", len(new_nodes))
-        
-        # Phase 3: Parallel embedding generation
-        LOGGER.info("Generating embeddings in parallel...")
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        chunk_texts = [node.get_content() for node in new_nodes]
-        
-        embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
-        embedding_batch = embedding_gen.generate_batch(chunk_texts)
-        
-        LOGGER.info("Generated %d embeddings in %.2fs", 
-                   len(embedding_batch.embeddings), embedding_batch.duration_sec)
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        # Attach embeddings to nodes
-        for node, embedding in zip(new_nodes, embedding_batch.embeddings):
-            node.embedding = embedding
-        
-        # Phase 4: Add to index sequentially (embeddings pre-computed)
-        if index is not None:
-            LOGGER.info("Adding %d chunks to index...", len(new_nodes))
-            sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-            
-            for node in new_nodes:
-                # Use insert_nodes with embeddings already attached
-                index.insert_nodes([node])
-            LOGGER.info("✓ Added all chunks to index")
-        
-        # Update in-memory nodes list
-        self.nodes.extend(new_nodes)
-        
-        # Save nodes pickle
-        self._save_nodes_pickle()
-        
-        LOGGER.info("✓ Sync complete for %d files", len(successfully_processed))
-        sys.stdout.flush()  # FIX FOR ISSUE #3: Explicit flush
-        
-        return successfully_processed  # FIX FOR ISSUE #1: Return actual success list
-
-    def sync_library(self, index: Optional[VectorStoreIndex], force_retry_errors: bool = True) -> SyncResult:
+        index: Optional[VectorStoreIndex], 
+        force_retry_errors: bool = True,
+        progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+    ) -> Tuple[SyncResult, Optional[ProcessingReport]]:
         """
         Sync library with parallel extraction and embedding generation.
         
-        FIX FOR ISSUE #1: Now returns accurate counts of successfully processed files.
+        NEW: Now supports progress callbacks and returns processing report!
         
         Args:
             index: VectorStoreIndex to update
             force_retry_errors: If True, retry files with parse_error even if unchanged
+            progress_callback: Optional callback(phase, current, total, item_desc)
         
         Returns:
-            SyncResult with added, modified, and deleted file counts
+            Tuple of (SyncResult, ProcessingReport)
         """
+        start_time = time.time()
+        
+        # Reload cache
         self.gemini_cache = load_jsonl(self.gemini_cache_path)
         LOGGER.info("Reloaded Gemini cache from disk: %d entries", len(self.gemini_cache))
-    
+
+        # Detect changes
         current_files = self._get_files_hash(self.docs_path)
         cached_files = self.sync_cache.get("files_hash", {})
 
         new_files = set(current_files) - set(cached_files)
         deleted_files = set(cached_files) - set(current_files)
         modified_files = {fname for fname in (set(current_files) & set(cached_files)) 
-                          if current_files[fname] != cached_files[fname]}
+                        if current_files[fname] != cached_files[fname]}
         
         # Include files with parse_error for retry
         if force_retry_errors:
@@ -863,6 +725,21 @@ class IncrementalIndexManager:
                         modified_files.add(filename)
                         LOGGER.info("Will retry %s (has parse_error in cache)", filename)
 
+        # Create processing report
+        total_files_to_process = len(new_files) + len(modified_files)
+        report = ProcessingReport(
+            timestamp=datetime.now().isoformat(),
+            total_files=total_files_to_process,
+        )
+        
+        # Initialize file statuses for files being processed
+        file_statuses: Dict[str, DocumentProcessingStatus] = {}
+        for filename in (new_files | modified_files):
+            file_statuses[filename] = DocumentProcessingStatus(
+                filename=filename,
+                file_size_bytes=current_files[filename]["size"],
+            )
+
         # Process deletions
         if deleted_files:
             self._remove_documents(deleted_files)
@@ -871,26 +748,290 @@ class IncrementalIndexManager:
         if modified_files:
             self._remove_documents(modified_files)
         
-        # FIX FOR ISSUE #1: Track actually successful additions/modifications
+        # Process additions/modifications WITH progress callback
         successfully_added_or_modified: Set[str] = set()
         if new_files or modified_files:
-            successfully_added_or_modified = self._add_or_update_documents_parallel(
-                new_files | modified_files, index
+            successfully_added_or_modified, processing_statuses = self._add_or_update_documents_parallel(
+                new_files | modified_files, 
+                index,
+                progress_callback  # NEW: Pass callback through!
             )
+            
+            # Merge processing statuses into report
+            file_statuses.update(processing_statuses)
         
         # Update sync cache
         self.sync_cache["files_hash"] = current_files
         self._save_sync_cache()
 
-        # FIX FOR ISSUE #1: Separate successful additions from modifications for accurate reporting
+        # Separate successful additions from modifications
         successful_additions = successfully_added_or_modified & new_files
         successful_modifications = successfully_added_or_modified & modified_files
         
-        return SyncResult(
-            list(successful_additions),      # FIX FOR ISSUE #1: Only successfully added
-            list(successful_modifications),  # FIX FOR ISSUE #1: Only successfully modified
+        # Finalize report
+        elapsed_time = time.time() - start_time
+        report.total_duration_sec = elapsed_time
+        
+        # Add all file statuses to report
+        for status in file_statuses.values():
+            report.add_status(status)
+        
+        # Save report (same pattern as parallel build)
+        from .config import AppConfig
+        config = AppConfig.get()
+        report_path = config.paths.cache_dir / "last_sync_report.json"
+        from .processing_status import save_processing_report
+        save_processing_report(report, report_path)
+        LOGGER.info("Sync processing report saved to %s", report_path)
+        
+        LOGGER.info("=== Sync Complete ===")
+        LOGGER.info("Total time: %.2f seconds", elapsed_time)
+        LOGGER.info("Results: %d successful, %d warnings, %d failed",
+                report.successful, report.warnings, report.failed)
+        
+        sync_result = SyncResult(
+            list(successful_additions),
+            list(successful_modifications),
             list(deleted_files)
         )
+        
+        return sync_result, report
+
+    def _add_or_update_documents_parallel(
+        self, 
+        filenames: Set[str], 
+        index: Optional[VectorStoreIndex],
+        progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+    ) -> Tuple[Set[str], Dict[str, DocumentProcessingStatus]]:
+        """
+        Parallel version with parallel extraction and embedding generation.
+        
+        Args:
+            filenames: Files to process
+            index: VectorStoreIndex to update
+            progress_callback: Optional callback(phase, current, total, item_desc)
+        
+        Returns:
+            Tuple of (successfully_processed_filenames, file_statuses)
+        """
+        from .parallel_processing import ParallelDocumentProcessor, ParallelEmbeddingGenerator
+        from .processing_status import DocumentProcessingStatus, StageResult, StageStatus
+        from .config import AppConfig
+        
+        config = AppConfig.get()
+        paths = config.paths
+        
+        successfully_processed: Set[str] = set()
+        all_documents: List[Document] = []
+        
+        # Track processing status for each file
+        file_statuses: Dict[str, DocumentProcessingStatus] = {}
+        for filename in filenames:
+            file_statuses[filename] = DocumentProcessingStatus(
+                filename=filename,
+                file_size_bytes=0,
+            )
+        
+        # Phase 1: Check cache and determine what needs extraction
+        docs_to_extract: List[Path] = []
+        
+        for filename in filenames:
+            doc_path = self.docs_path / filename
+            status = file_statuses[filename]
+            
+            # Mark parsing as success (file exists)
+            status.parsing = StageResult(StageStatus.SUCCESS, "File parsed successfully")
+            
+            # Check cache
+            if filename in self.gemini_cache:
+                cached_record = self.gemini_cache[filename]
+                gemini_meta = cached_record.get("gemini", {})
+                
+                if "parse_error" not in gemini_meta and gemini_meta.get("sections"):
+                    # Use cached extraction
+                    LOGGER.info("%s (using cached extraction)", filename)
+                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
+                    status.used_cache = True
+                    
+                    # FIX: Set validation status from cached metadata
+                    if "validation_error" in gemini_meta:
+                        validation_data = gemini_meta.get("validation", {})
+                        coverage = validation_data.get("ngram_coverage", 0)
+                        status.validation = StageResult(
+                            StageStatus.WARNING,
+                            f"Low quality extraction (coverage: {coverage:.1%})",
+                            details=validation_data
+                        )
+                    else:
+                        validation_data = gemini_meta.get("validation", {})
+                        if validation_data:
+                            coverage = validation_data.get("ngram_coverage", 0)
+                            status.validation = StageResult(
+                                StageStatus.SUCCESS,
+                                f"Validation passed (coverage: {coverage:.1%})",
+                                details=validation_data
+                            )
+                        else:
+                            status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
+                    
+                    try:
+                        docs = to_documents_from_gemini(doc_path, gemini_meta)
+                        all_documents.extend(docs)
+                        successfully_processed.add(filename)
+                    except Exception as exc:
+                        LOGGER.exception("Failed to convert cached extraction for %s", filename)
+                        status.extraction = StageResult(StageStatus.FAILED, f"Conversion error: {exc}")
+                    continue
+            
+            # Need to extract
+            docs_to_extract.append(doc_path)
+        
+        # Extract new/modified files in parallel
+        if docs_to_extract:
+            LOGGER.info("Extracting %d files in parallel...", len(docs_to_extract))
+            sys.stdout.flush()
+            
+            processor = ParallelDocumentProcessor(max_workers=10)
+            extraction_results = processor.extract_batch(docs_to_extract, progress_callback)
+            
+            # Update cache and process results
+            for result in extraction_results.successful + extraction_results.failed:
+                filename = result.filename
+                status = file_statuses[filename]
+                
+                # Update Gemini cache
+                files_hash = self._get_files_hash(self.docs_path)
+                fingerprint = files_hash.get(filename, {})
+                
+                upsert_jsonl_record(
+                    self.gemini_cache_path,
+                    {
+                        "filename": filename,
+                        "mtime": fingerprint.get("mtime", 0),
+                        "size": fingerprint.get("size", 0),
+                        "gemini": result.record,
+                    },
+                )
+            
+            # Reload cache after updates
+            self.gemini_cache = load_jsonl(self.gemini_cache_path)
+            
+            # Convert successful extractions to documents
+            for result in extraction_results.successful:
+                filename = result.filename
+                status = file_statuses[filename]
+                doc_path = self.docs_path / filename
+                
+                try:
+                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded")
+                    
+                    # FIX: Set validation status from extraction result
+                    gemini_meta = result.record
+                    if "validation_error" in gemini_meta:
+                        validation_data = gemini_meta.get("validation", {})
+                        coverage = validation_data.get("ngram_coverage", 0)
+                        status.validation = StageResult(
+                            StageStatus.WARNING,
+                            f"Low quality extraction (coverage: {coverage:.1%})",
+                            details=validation_data
+                        )
+                    else:
+                        validation_data = gemini_meta.get("validation", {})
+                        if validation_data:
+                            coverage = validation_data.get("ngram_coverage", 0)
+                            status.validation = StageResult(
+                                StageStatus.SUCCESS,
+                                f"Validation passed (coverage: {coverage:.1%})",
+                                details=validation_data
+                            )
+                        else:
+                            status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
+                    
+                    docs = to_documents_from_gemini(doc_path, result.record)
+                    all_documents.extend(docs)
+                    successfully_processed.add(filename)
+                except Exception as exc:
+                    LOGGER.exception("Failed to convert %s to documents", filename)
+                    status.extraction = StageResult(StageStatus.FAILED, f"Conversion error: {exc}")
+            
+            # Mark failures
+            for result in extraction_results.failed:
+                filename = result.filename
+                status = file_statuses[filename]
+                status.extraction = StageResult(StageStatus.FAILED, f"Extraction error: {result.error}")
+                status.validation = StageResult(StageStatus.FAILED, "Extraction failed")
+            
+            sys.stdout.flush()
+        
+        if not all_documents:
+            LOGGER.info("No documents to add")
+            return successfully_processed, file_statuses
+        
+        # Phase 2: Chunking
+        LOGGER.info("Chunking %d documents...", len(all_documents))
+        sys.stdout.flush()
+        
+        new_nodes = chunk_documents(all_documents)
+        LOGGER.info("Created %d chunks", len(new_nodes))
+        
+        # Track chunks per file
+        chunks_per_file: Dict[str, int] = {}
+        for node in new_nodes:
+            source = node.metadata.get("source", "")
+            if source:
+                filename = Path(source).name
+                chunks_per_file[filename] = chunks_per_file.get(filename, 0) + 1
+        
+        # Update chunk counts
+        for filename, count in chunks_per_file.items():
+            if filename in file_statuses:
+                file_statuses[filename].chunks_created = count
+        
+        # Phase 3: Parallel embedding generation
+        LOGGER.info("Generating embeddings in parallel...")
+        sys.stdout.flush()
+        
+        chunk_texts = [node.get_content() for node in new_nodes]
+        
+        embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
+        embedding_batch = embedding_gen.generate_batch(chunk_texts, progress_callback)
+        
+        LOGGER.info("Generated %d embeddings in %.2fs", 
+                len(embedding_batch.embeddings), embedding_batch.duration_sec)
+        sys.stdout.flush()
+        
+        # Attach embeddings to nodes
+        for node, embedding in zip(new_nodes, embedding_batch.embeddings):
+            node.embedding = embedding
+        
+        # Mark embedding success
+        for filename in chunks_per_file.keys():
+            if filename in file_statuses:
+                file_statuses[filename].embedding = StageResult(
+                    StageStatus.SUCCESS,
+                    f"Embedded {chunks_per_file[filename]} chunks"
+                )
+        
+        # Phase 4: Add to index sequentially
+        if index is not None:
+            LOGGER.info("Adding %d chunks to index...", len(new_nodes))
+            sys.stdout.flush()
+            
+            for node in new_nodes:
+                index.insert_nodes([node])
+            
+            LOGGER.info("✓ Added all chunks to index")
+        
+        # Update in-memory nodes list
+        self.nodes.extend(new_nodes)
+        
+        # Save nodes pickle
+        self._save_nodes_pickle()
+        
+        LOGGER.info("✓ Sync complete for %d files", len(successfully_processed))
+        sys.stdout.flush()
+        
+        return successfully_processed, file_statuses
 
 
 __all__ = [
