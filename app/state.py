@@ -503,10 +503,19 @@ class AppState:
             metadata = node.metadata
             doc_type = str(metadata.get("doc_type", "UNCATEGORIZED")).upper()
             title = metadata.get("title") or metadata.get("source") or "Untitled"
+            # Handle FORM documents - avoid double form numbers
             if doc_type == "FORM":
                 form_number = metadata.get("form_number")
                 if form_number:
-                    title = f"{form_number} - {title}"
+                    # FIX: Check if title already starts with form number
+                    # Normalize for comparison (remove spaces, case-insensitive)
+                    form_normalized = form_number.replace(" ", "").upper()
+                    title_start = title.split("-")[0].strip().replace(" ", "").upper()
+                    
+                    # Only prepend if title doesn't already start with form number
+                    if not title_start.startswith(form_normalized):
+                        title = f"{form_number} - {title}"
+                    # Else: title already has form number, use as-is
             grouped[doc_type].add(title)
         return {doc_type: sorted(list(titles)) for doc_type, titles in grouped.items()}
 
