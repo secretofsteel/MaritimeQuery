@@ -622,16 +622,19 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
         LOGGER.warning("Gemini vision API failed: %s", exc)
         return None
 
-def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any]]:
+def _extract_visual_content_from_page(page, page_num: int, table_rects: List = None) -> List[Dict[str, Any]]:
     """
     Extract images and significant drawings from a PDF page.
     
     Uses PyMuPDF's cluster_drawings() to intelligently group nearby vector paths
     into coherent diagrams, avoiding scattered decorative elements.
+    
+    Excludes areas already covered by table detection to avoid duplicate processing.
 
     Args:
         page: PyMuPDF page object
         page_num: Page number for reference
+        table_rects: List of fitz.Rect objects representing detected tables (to exclude)
 
     Returns:
         List of visual items with rect, type, and description
@@ -643,6 +646,10 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
 
     visual_items = []
     page_area = page.rect.width * page.rect.height
+    
+    # Initialize table_rects if not provided
+    if table_rects is None:
+        table_rects = []
     
     # Separate thresholds for images vs drawings
     # Images: more permissive - catch smaller but meaningful content
@@ -712,7 +719,7 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
     # 2. Extract significant vector graphics clusters
     try:
         # Use PyMuPDF's intelligent clustering to group nearby drawings
-        # tolerance=5 means drawings within 5 points are considered part of same cluster
+        # tolerance=10 means drawings within 10 points are considered part of same cluster
         drawing_clusters = page.cluster_drawings(x_tolerance=10, y_tolerance=10)
 
         if drawing_clusters is None:
@@ -736,6 +743,25 @@ def _extract_visual_content_from_page(page, page_num: int) -> List[Dict[str, Any
                 if cluster_area < drawing_min_area_threshold:
                     LOGGER.debug("Skipping cluster %d on page %d: area %.1f%% of page", 
                                 cluster_idx, page_num + 1, (cluster_area / page_area) * 100)
+                    continue
+                
+                # NEW: Skip clusters that overlap with detected tables
+                # Tables are already extracted as markdown - don't send them to Gemini
+                is_table_area = False
+                for table_rect in table_rects:
+                    intersection = cluster_rect & table_rect
+                    if not intersection.is_empty:
+                        # If >60% of cluster overlaps with a table, it's probably table borders
+                        overlap_ratio = intersection.get_area() / cluster_area
+                        if overlap_ratio >= 0.6:
+                            LOGGER.debug(
+                                "Skipping cluster %d on page %d: %.1f%% overlaps with table", 
+                                cluster_idx, page_num + 1, overlap_ratio * 100
+                            )
+                            is_table_area = True
+                            break
+                
+                if is_table_area:
                     continue
                 
                 # This is a significant diagram - render and describe it
@@ -904,7 +930,7 @@ def _pymupdf_page_to_text(page, page_num: int = 0, extract_visuals: bool = False
     visual_items = []
     if extract_visuals:
         try:
-            visual_items = _extract_visual_content_from_page(page, page_num)
+            visual_items = _extract_visual_content_from_page(page, page_num, table_rects)
             LOGGER.debug("Extracted %d visual items from page %d", len(visual_items), page_num + 1)
         except Exception as exc:
             LOGGER.warning("Visual extraction failed for page %d: %s", page_num + 1, exc)
