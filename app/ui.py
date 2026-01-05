@@ -6,24 +6,28 @@ import datetime
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Set
 import html
 from markdown import markdown as md
 import streamlit as st
+import shutil
 
+from .constants import (
+    load_form_categories, 
+    save_form_categories, 
+    get_form_categories_path,
+    MAX_CONTEXT_TURNS
+)
 from .config import AppConfig
 from .indexing import build_index_from_library, build_index_from_library_parallel, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
 from .logger import LOGGER
-from .constants import MAX_CONTEXT_TURNS  # Import for context display
 from .session_uploads import MAX_UPLOADS_PER_SESSION
 from .processing_status import ProcessingReport, DocumentProcessingStatus, StageStatus
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
-
-
 
 def _stage_icon(status: StageStatus) -> str:
     """Get icon for stage status."""
@@ -698,21 +702,124 @@ def rebuild_index_parallel(app_state: AppState) -> None:
     """Compatibility wrapper - calls rebuild_index_parallel_execute with default settings."""
     rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
+def sync_library_with_ui(app_state: AppState) -> None:
+    """
+    Execute sync_library with progress tracking UI.
+    
+    Matches the UI pattern from rebuild_index_parallel_execute.
+    """
+    
+    # Create progress containers
+    st.write("#### 🔄 Syncing...")
+    
+    phase1_container = st.container()
+    phase2_container = st.container()
+    
+    with phase1_container:
+        st.write("**Phase 1:** Extracting modified documents (Gemini)")
+        phase1_progress = st.progress(0.0)
+        phase1_status = st.empty()
+    
+    with phase2_container:
+        st.write("**Phase 2:** Generating embeddings")
+        phase2_progress = st.progress(0.0)
+        phase2_status = st.empty()
+    
+    overall_status = st.empty()
+    
+    # Progress callback
+    def progress_callback(phase: str, current: int, total: int, item: str) -> None:
+        """Update progress bars based on current phase."""
+        progress_pct = current / total if total > 0 else 0.0
+        
+        if phase == "extracting":
+            phase1_progress.progress(progress_pct)
+            phase1_status.text(f"Extracting: {current}/{total} - {item}")
+        
+        elif phase == "embedding":
+            phase2_progress.progress(progress_pct)
+            phase2_status.text(f"Embedding: {current}/{total}")
+    
+    try:
+        overall_status.info("⏳ Starting incremental sync...")
+        
+        # Run sync with progress callback
+        manager = app_state.ensure_manager()
+        manager.nodes = app_state.nodes
+        
+        sync_result, report = manager.sync_library(
+            app_state.index,
+            force_retry_errors=True,
+            progress_callback=progress_callback  # Pass callback!
+        )
+        
+        # Store report in session state
+        st.session_state["last_processing_report"] = report
+        
+        # Update app state
+        app_state.nodes = manager.nodes
+        app_state.invalidate_node_map_cache()
+        app_state.vector_retriever = None
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers()
+        
+        # Success message
+        overall_status.success(
+            f"✅ Sync complete! Added {len(sync_result.added)}, "
+            f"modified {len(sync_result.modified)}, deleted {len(sync_result.deleted)}."
+        )
+        LOGGER.info("Library synced: +%d, ~%d, -%d", 
+                   len(sync_result.added), len(sync_result.modified), len(sync_result.deleted))
+        
+        # Display processing status table
+        #if report:
+        #    render_processing_status_table(report)
+        
+        # Mark progress complete
+        phase1_progress.progress(1.0)
+        phase2_progress.progress(1.0)
+        
+    except Exception as exc:
+        LOGGER.exception("Failed to sync library")
+        overall_status.error(f"❌ Failed to sync library: {exc}")
+
 def sync_library(app_state: AppState) -> None:
+    """
+    Simple sync without progress UI (for backward compatibility).
+    
+    Used in contexts where progress bars aren't appropriate.
+    """
     manager = app_state.ensure_manager()
     manager.nodes = app_state.nodes
+    
     with st.spinner("Syncing library..."):
         try:
-            changes = manager.sync_library(app_state.index)
-            st.success(
-                f"✅ Sync complete. Added {len(changes.added)}, modified {len(changes.modified)}, deleted {len(changes.deleted)}."
+            # Call enhanced sync without progress callback
+            sync_result, report = manager.sync_library(
+                app_state.index,
+                force_retry_errors=True,
+                progress_callback=None
             )
+            
+            st.success(
+                f"✅ Sync complete. Added {len(sync_result.added)}, "
+                f"modified {len(sync_result.modified)}, deleted {len(sync_result.deleted)}."
+            )
+            
+            # Update app state
             app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()  # Clear stale cache
+            app_state.invalidate_node_map_cache()
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
-            LOGGER.info("Library synced: +%d, ~%d, -%d", len(changes.added), len(changes.modified), len(changes.deleted))
+            
+            # Store report if available
+            if report:
+                st.session_state["last_processing_report"] = report
+            
+            LOGGER.info("Library synced: +%d, ~%d, -%d", 
+                       len(sync_result.added), len(sync_result.modified), len(sync_result.deleted))
+            
         except Exception as exc:
             LOGGER.exception("Failed to sync library")
             st.error(f"❌ Failed to sync library: {exc}")
@@ -1052,7 +1159,7 @@ def render_app(
     <div style="text-align: center;">
         <h1>⚓ MA.D.ASS</h1>
         <h2>The Maritime Documentation Assistant</h2>
-        <h5 style="margin-top: -0.3em; color: #666;">Intelligent document search powered by the dreams of electric sheep</h5>
+        <h5 style="margin-top: -0.3em; color: #666;">Intelligent document search powered by dreams of electric sheep</h5>
     </div>
     """
 
@@ -1105,7 +1212,7 @@ def render_app(
         # Admin/User mode toggle button at the top
         if read_only_mode:
             # In viewer mode - show Admin button
-            if st.button("🔓 Admin", use_container_width=True, key="mode_toggle", type="primary"):
+            if st.button("🔓 Admin Panel", use_container_width=True, key="mode_toggle", type="primary"):
                 st.query_params["read_only"] = "false"
                 _rerun_app()
         else:
@@ -1314,7 +1421,7 @@ def render_app(
                 
                 # Sync button
                 if st.button("🔄 Sync library", use_container_width=True, key="sync_btn"):
-                    sync_library(app_state)
+                    sync_library_with_ui(app_state)  # Use version with progress!
         
 
         # Sessions list
@@ -1618,10 +1725,14 @@ def render_app(
             with st.chat_message("user"):
                 st.markdown(trimmed)
             
-            # Process query with spinner
+            # Process query with streaming
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching documents..."):
-                    try:
+                try:
+                    # Fancy status with updates
+                    status = st.status("🔍 Processing your query...", expanded=True)
+                    
+                    with status:
+                        st.write("🔍 Analyzing query intent...")
                         result = query_with_confidence(
                             app_state,
                             trimmed,
@@ -1632,62 +1743,823 @@ def render_app(
                             use_conversation_context=use_context,
                             enable_hierarchical=use_hierarchical,
                         )
+                        
+                        st.write("✅ Documents retrieved")
+                        st.write("✍️ Generating answer...")  # NEW - bridges the gap
+                    
+                    # Stream the response with typewriter effect
+                    answer_stream = result.get("answer_stream")
+                    if answer_stream:
+                        full_answer = st.write_stream(answer_stream)
+                        result["answer"] = full_answer
+                    else:
+                        full_answer = result.get("answer", "")
+                        st.markdown(full_answer)
+                    
+                    # NOW close the status after streaming starts
+                    status.update(label="✅ Complete", state="complete", expanded=False)
+                    
+                    # CRITICAL: Remove generator from result before saving (can't serialize)
+                    result.pop("answer_stream", None)
+                    
+                    # Display sources and confidence after streaming
+                    conf_pct = result.get("confidence_pct", 0)
+                    conf_level = result.get("confidence_level", "N/A")
+                    num_sources = result.get("num_sources", 0)
+                    
+                    # Confidence badge
+                    badge_emoji = "🟢" if "HIGH" in conf_level else "🟡" if "MEDIUM" in conf_level else "🔴"
+                    conf_level_text = conf_level.replace("🟢", "").replace("🟡", "").replace("🔴", "").strip()
+                    
+                    caption_parts = [f"{badge_emoji} **Confidence:** {conf_pct}% ({conf_level_text})", f"**Sources:** {num_sources}"]
+                    
+                    if result.get("context_mode"):
+                        context_turn = result.get("context_turn", 0)
+                        caption_parts.append(f"💬 **Turn:** {context_turn}")
+                    
+                    if result.get("context_reset_note"):
+                        st.info(result["context_reset_note"])
+                    
+                    st.caption(" • ".join(caption_parts))
+                    
+                    # Sources expander
+                    sources = result.get("sources", [])
+                    if sources:
+                        with st.expander("📚 View sources", expanded=False):
+                            for idx, src in enumerate(sources[:5], 1):
+                                source_file = src.get("source", "Unknown")
+                                title = src.get("title") or source_file.rsplit('.', 1)[0].replace('_', ' ')
+                                section = src.get("section", "Main document")
+                                st.markdown(f"**{idx}. {title}**")
+                                st.caption(f"└─ {section}")
+                    
+                    if result.get("confidence_note"):
+                        st.info(result["confidence_note"])
 
-                        # Add messages to session
-                        app_state.add_message_to_current_session("user", trimmed)
+                    # Add messages to session
+                    app_state.add_message_to_current_session("user", trimmed)
 
                         # Extract metadata for assistant message
-                        assistant_metadata = {
-                            "confidence_pct": result.get("confidence_pct"),
-                            "confidence_level": result.get("confidence_level"),
-                            "confidence_note": result.get("confidence_note"),
-                            "sources": result.get("sources"),
-                            "num_sources": result.get("num_sources"),
-                            "retriever_type": result.get("retriever_type"),
-                            "context_mode": result.get("context_mode"),
-                            "context_turn": result.get("context_turn"),
-                            "context_reset_note": result.get("context_reset_note"),
-                        }
+                    assistant_metadata = {
+                        "confidence_pct": result.get("confidence_pct"),
+                        "confidence_level": result.get("confidence_level"),
+                        "confidence_note": result.get("confidence_note"),
+                        "sources": result.get("sources"),
+                        "num_sources": result.get("num_sources"),
+                        "retriever_type": result.get("retriever_type"),
+                        "context_mode": result.get("context_mode"),
+                        "context_turn": result.get("context_turn"),
+                        "context_reset_note": result.get("context_reset_note"),
+                    }
 
-                        app_state.add_message_to_current_session(
-                            "assistant",
-                            result.get("answer", ""),
-                            assistant_metadata
-                        )
-                        
-                        # Auto-generate session title after first real search (skip greetings/chitchat)
-                        session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
-                        if session and session.title == "New Chat":
-                            # Check if this was a real query (not greeting/chitchat)
-                            retriever_type = result.get("retriever_type", "")
-                            if retriever_type != "none":  # Real search happened - generate title now
-                                app_state.ensure_session_manager().auto_generate_title(
-                                    app_state.current_session_id,
-                                    trimmed,
-                                    result.get("answer", "")[:200]
-                                )
+                    app_state.add_message_to_current_session(
+                        "assistant",
+                        result.get("answer", ""),
+                        assistant_metadata
+                    )
+                    
+                    # Auto-generate session title after first real search (skip greetings/chitchat)
+                    session = app_state.ensure_session_manager().get_session(app_state.current_session_id)
+                    if session and session.title == "New Chat":
+                        # Check if this was a real query (not greeting/chitchat)
+                        retriever_type = result.get("retriever_type", "")
+                        if retriever_type != "none":  # Real search happened - generate title now
+                            app_state.ensure_session_manager().auto_generate_title(
+                                app_state.current_session_id,
+                                trimmed,
+                                result.get("answer", "")[:200]
+                            )
 
-                        # DEPRECATED: Keep for backwards compatibility during transition
-                        app_state.append_history(result)
+                    # DEPRECATED: Keep for backwards compatibility during transition
+                    app_state.append_history(result)
 
-                        LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
-                                result.get("confidence_pct", 0), result.get("num_sources", 0))
-                        _rerun_app()
-                        
-                    except Exception as exc:
-                        LOGGER.exception("Query failed: %s", exc)
-                        st.error(f"❌ **Search failed:** {exc}")
-                        st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
+                    LOGGER.info("Query processed: confidence=%d%%, sources=%d", 
+                            result.get("confidence_pct", 0), result.get("num_sources", 0))
+                    _rerun_app()
+                    
+                except Exception as exc:
+                    LOGGER.exception("Query failed: %s", exc)
+                    st.error(f"❌ **Search failed:** {exc}")
+                    st.info("💡 **Try:**\n- Rephrasing your question\n- Using simpler terms\n- Checking if documents are indexed")
 
 
 def render_viewer_app(app_state: AppState) -> None:
     """Restricted UI for read-only querying (no database management)."""
     render_app(app_state, read_only_mode=True)
 
+def render_admin_panel(app_state: AppState) -> None:
+    """
+    Render full-width admin panel with all management features.
+    
+    NO CHAT INTERFACE - pure management UI.
+    Toggle back to User mode for chat.
+    """
+    
+    # Mode toggle in sidebar
+    with st.sidebar:
+
+        # FIX: Match button style from User mode
+        # Changed from type="primary" to match exact user mode styling
+        if st.button("👤 Back to Chat", use_container_width=True, type="secondary"):
+            st.query_params["read_only"] = "true"
+            st.rerun()
+        
+        st.divider()
+
+        st.markdown("### 🔧 Admin Panel")
+        st.caption("Library management and configuration")
+        
+        st.divider()
+            
+        # Show quick stats
+        if app_state.nodes:
+            # FIX: Count total documents, not doc types
+            docs_by_type = app_state.documents_grouped_by_type()
+            num_docs = sum(len(titles) for titles in docs_by_type.values())
+            
+            st.metric("Documents", num_docs)
+            st.metric("Chunks", len(app_state.nodes))
+        else:
+            st.info("No library loaded")
+    
+    # Main panel
+    st.title("🔧 MA.D.ASS - Admin Panel")
+    
+    # === LIBRARY MANAGEMENT ===
+    with st.expander("📚 Library Management", expanded=True):
+        _render_bulk_upload(app_state)
+        
+        st.divider()
+        
+        # Rebuild section
+        st.markdown("### 🔨 Rebuild Index")
+        st.markdown("""
+        Process all documents and rebuild the search index from scratch.
+        """)
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            clear_cache = st.checkbox(
+                "🔄 Clear Gemini cache and re-extract all files",
+                value=False,
+                help="Force re-extraction of all documents (slower but ensures fresh data)"
+            )
+            
+            if clear_cache:
+                st.warning("⚠️ All files will be re-extracted via Gemini API.")
+        
+        with col2:
+            st.write("")
+            st.write("")
+            
+            if st.button("🔨 Rebuild Index", type="primary", use_container_width=True):
+                rebuild_index_parallel_execute(app_state, clear_cache)
+        
+        st.divider()
+        
+        # Sync section
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            st.markdown("### 🔄 Sync Library")
+            st.markdown("Check for new, modified, or deleted files and update incrementally.")
+
+        with col2:
+            st.write("")
+            sync_clicked = st.button("🔄 Sync Library", use_container_width=True)
+
+        # FIX: Call OUTSIDE columns so it renders full-width below
+        if sync_clicked:
+            sync_library_with_ui(app_state)
+
+        st.divider()
+        
+        # Processing report
+        if "last_processing_report" in st.session_state:
+            report = st.session_state["last_processing_report"]
+            render_processing_status_table(report)
+        else:
+            with st.expander("📊 Processing Status Report", expanded=False):
+                st.info("No recent processing report. Build or sync to generate.")
+                
+                config = AppConfig.get()
+                report_path = config.paths.cache_dir / "last_processing_report.json"
+                
+                if report_path.exists():
+                    if st.button("📂 Load Last Report from Disk"):
+                        from app.processing_status import load_processing_report
+                        report = load_processing_report(report_path)
+                        if report:
+                            st.session_state["last_processing_report"] = report
+                            st.rerun()
+    
+    # === DOCUMENTS ON FILE ===
+    with st.expander("📄 Documents on File", expanded=False):
+        _render_documents_with_delete(app_state)
+    
+    # === FEEDBACK ANALYTICS ===
+    with st.expander("📊 Feedback Analytics", expanded=False):
+        render_feedback_stats_panel(app_state)
+    
+    # === FORM SCHEMA CONFIGURATION ===
+    with st.expander("🔧 Form Schema Configuration", expanded=True):
+        _render_form_schema_editor()
+
+
+# ==============================================================================
+# BULK UPLOAD
+# ==============================================================================
+
+def _render_bulk_upload(app_state: AppState) -> None:
+    """Bulk file upload widget with auto-clear after processing."""
+    
+    st.markdown("### 📤 Bulk Document Upload")
+    st.markdown("Upload multiple documents. Supported: **PDF, DOCX, DOC, XLSX, XLS, TXT**")
+    
+    # FIX: Use keyed uploader so we can clear it
+    if "upload_widget_key" not in st.session_state:
+        st.session_state.upload_widget_key = 0
+    
+    uploaded_files = st.file_uploader(
+        "Select documents",
+        type=["pdf", "docx", "doc", "xlsx", "xls", "txt"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+        key=f"bulk_uploader_{st.session_state.upload_widget_key}"
+    )
+    
+    if not uploaded_files:
+        st.info("No files selected")
+        return
+    
+    # Show summary
+    total_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+    st.caption(f"📦 **{len(uploaded_files)} files** ({total_size_mb:.2f} MB total)")
+    
+    # Check for duplicates
+    config = AppConfig.get()
+    docs_path = config.paths.docs_path
+    existing_files = {f.name for f in docs_path.glob("*") if f.is_file()}
+    duplicates = [f.name for f in uploaded_files if f.name in existing_files]
+    
+    if duplicates:
+        st.error(f"⚠️ **{len(duplicates)} duplicate filename(s):**")
+        for dup in duplicates[:10]:
+            st.markdown(f"- `{dup}`")
+        if len(duplicates) > 10:
+            st.markdown(f"- ... and {len(duplicates) - 10} more")
+        st.error("❌ Upload blocked. Please rename duplicates.")
+        return
+    
+    # Show what will happen
+    library_exists = len(list(docs_path.glob("*"))) > 0
+    
+    if library_exists:
+        st.info("📚 Library exists → Will run **incremental sync**")
+    else:
+        st.info("🏗️ Empty library → Will run **full rebuild**")
+    
+    # Upload button
+    if st.button("🚀 Upload & Process", type="primary", use_container_width=True):
+        _execute_bulk_upload(uploaded_files, app_state, library_exists)
+
+def _execute_bulk_upload(uploaded_files: List, app_state: AppState, library_exists: bool) -> None:
+    """Execute bulk upload and processing."""
+    
+    config = AppConfig.get()
+    docs_path = config.paths.docs_path
+    docs_path.mkdir(parents=True, exist_ok=True)
+    
+    # Copy files
+    st.write("### 📁 Copying files...")
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+    
+    copied_count = 0
+    skipped_count = 0
+    
+    for idx, uploaded_file in enumerate(uploaded_files):
+        try:
+            file_path = docs_path / uploaded_file.name
+            
+            with file_path.open("wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            copied_count += 1
+            status_text.text(f"Copied: {uploaded_file.name}")
+        
+        except Exception as exc:
+            LOGGER.exception(f"Failed to copy {uploaded_file.name}")
+            st.error(f"❌ Failed: `{uploaded_file.name}`")
+            skipped_count += 1
+        
+        progress_bar.progress((idx + 1) / len(uploaded_files))
+    
+    progress_bar.progress(1.0)
+    st.success(f"✅ Copied {copied_count} files")
+    
+    if skipped_count > 0:
+        st.warning(f"⚠️ Skipped {skipped_count} files")
+    
+    # Process
+    st.write("---")
+    
+    if library_exists:
+        st.write("### 🔄 Running incremental sync...")
+        sync_library_with_ui(app_state)  # Full version with progress
+    else:
+        st.write("### 🔨 Building index...")
+        rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
+
+    # FIX: Clear uploaded files by incrementing widget key
+    st.session_state.upload_widget_key += 1
+    LOGGER.info("Cleared file uploader after successful processing")
+    
+    # Force rerun to show fresh uploader
+    st.rerun()
+
+# ==============================================================================
+# DOCUMENT DELETION
+# ==============================================================================
+
+def _render_documents_with_delete(app_state: AppState) -> None:
+    """Document list with per-doc and bulk delete."""
+    
+    st.markdown("### 📄 Documents on File")
+    
+    if not app_state.nodes:
+        st.info("No documents indexed.")
+        return
+    
+    # Get documents grouped by type (already has correct titles from state.py)
+    docs_by_type = app_state.documents_grouped_by_type()
+    total_docs = sum(len(titles) for titles in docs_by_type.values())
+    st.caption(f"📚 **{total_docs} documents** in library")
+    
+    # SIMPLIFIED: Just map display titles to source filenames
+    # No need to re-apply form logic - state.py already did it
+    display_title_to_source: Dict[str, str] = {}
+    
+    for node in app_state.nodes:
+        metadata = node.metadata
+        # Get the RAW title from metadata (might not have form number yet)
+        raw_title = metadata.get("title", "Untitled")
+        source = metadata.get("source", "")
+        doc_type = str(metadata.get("doc_type", "")).upper()
+        
+        # For FORMS, documents_grouped_by_type() may have added form number
+        # So we need to figure out what the DISPLAY title will be
+        # But we can just check what's in docs_by_type for this doc_type
+        
+        # Actually, simpler approach: just map ALL possible variations
+        # Map both raw title AND potential form-prefixed title
+        display_title_to_source[raw_title] = source
+        
+        if doc_type == "FORM":
+            form_number = metadata.get("form_number")
+            if form_number:
+                # Map the form-prefixed version too
+                prefixed_title = f"{form_number} - {raw_title}"
+                display_title_to_source[prefixed_title] = source
+    
+    # Initialize deletion state
+    if "delete_confirmations" not in st.session_state:
+        st.session_state.delete_confirmations = set()
+    
+    # Clear confirmations after successful deletion
+    if st.session_state.get("deletion_completed", False):
+        st.session_state.delete_confirmations = set()
+        st.session_state.deletion_completed = False
+    
+    # Render by type (using titles from docs_by_type which are already formatted)
+    for doc_type, titles in sorted(docs_by_type.items()):
+        with st.expander(f"**{doc_type}** ({len(titles)} docs)", expanded=False):
+            for display_title in sorted(titles):
+                # Get source from mapping (will match either raw or prefixed)
+                source_filename = display_title_to_source.get(display_title, display_title)
+                
+                # Use source filename as unique key
+                unique_key = f"{doc_type}_{source_filename}"
+                
+                col1, col2 = st.columns([5, 1])
+                
+                with col1:
+                    st.markdown(f"📄 {display_title}")
+                
+                with col2:
+                    is_confirming = unique_key in st.session_state.delete_confirmations
+                    
+                    if is_confirming:
+                        if st.button("✅", key=f"confirm_{unique_key}", use_container_width=True):
+                            success = _delete_document_by_source(source_filename, display_title, app_state)
+                            if success:
+                                st.session_state.deletion_completed = True
+                            st.rerun()
+                    else:
+                        if st.button("🗑️", key=f"delete_{unique_key}", use_container_width=True):
+                            st.session_state.delete_confirmations.add(unique_key)
+                            st.rerun()
+    
+    # Nuclear option
+    st.markdown("---")
+    st.markdown("### ⚠️ Danger Zone")
+    
+    is_confirming_nuclear = "confirm_nuclear_delete" in st.session_state
+    
+    if is_confirming_nuclear:
+        st.warning("⚠️ **Delete ALL documents?** This cannot be undone!")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Yes, Delete Everything", type="primary", use_container_width=True):
+                _delete_entire_library(app_state)
+                del st.session_state["confirm_nuclear_delete"]
+                st.rerun()
+        
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True):
+                del st.session_state["confirm_nuclear_delete"]
+                st.rerun()
+    else:
+        if st.button("⚠️ Delete Entire Library", use_container_width=True):
+            st.session_state["confirm_nuclear_delete"] = True
+            st.rerun()
+
+def _delete_document_by_source(source_filename: str, display_title: str, app_state: AppState) -> bool:
+    """
+    Delete single document by source filename (scorched earth) and sync library.
+    
+    Uses sync_library() for thorough consistency (user's preference).
+    
+    Args:
+        source_filename: Source filename to delete
+        display_title: Display title for user messages
+        app_state: Application state
+    
+    Returns:
+        True if deletion succeeded, False otherwise
+    """
+    
+    if not source_filename:
+        st.error(f"❌ Invalid source filename for: {display_title}")
+        LOGGER.error(f"Empty source filename for display_title: {display_title}")
+        return False
+    
+    config = AppConfig.get()
+    source_path = config.paths.docs_path / source_filename
+    
+    with st.spinner(f"Deleting {display_title}..."):
+        try:
+            manager = app_state.ensure_manager()
+            manager.nodes = app_state.nodes
+            
+            # Remove from database (ChromaDB, nodes, Gemini cache)
+            manager._remove_documents({source_filename})
+            
+            # Delete source file
+            if source_path.exists():
+                source_path.unlink()
+                LOGGER.info(f"Deleted source file: {source_path}")
+            else:
+                LOGGER.warning(f"Source file not found (already deleted?): {source_path}")
+            
+            # Update app state
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            
+            st.success(f"✅ Deleted: {display_title}")
+            LOGGER.info(f"Deleted document: {display_title} (source: {source_filename})")
+            
+        except Exception as exc:
+            st.error(f"❌ Failed to delete: {exc}")
+            LOGGER.exception(f"Delete failed for {display_title} (source: {source_filename})")
+            return False
+    
+    # USER'S PREFERENCE: Use sync_library() for thorough consistency
+    with st.spinner("Syncing library after deletion..."):
+        try:
+            # Run full sync to ensure everything is consistent
+            changes, report = manager.sync_library(app_state.index)
+            
+            # Update state with synced data
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+            
+            LOGGER.info(f"Synced after deletion: +{len(changes.added)}, ~{len(changes.modified)}, -{len(changes.deleted)}")
+            
+        except Exception as exc:
+            LOGGER.warning(f"Sync after deletion failed: {exc}")
+            # Try lightweight retriever rebuild as fallback
+            try:
+                app_state.ensure_retrievers()
+                LOGGER.info("Fell back to retriever rebuild")
+            except Exception as exc2:
+                LOGGER.error(f"Retriever rebuild also failed: {exc2}")
+    
+    return True
+
+def _delete_document_by_title(title: str, app_state: AppState, unique_key: str = None) -> bool:
+    """
+    Delete single document (scorched earth) and sync library.
+    
+    Args:
+        title: Document title to delete
+        app_state: Application state
+        unique_key: Unique key for this deletion (for cleanup)
+    
+    Returns:
+        True if deletion succeeded, False otherwise
+    """
+    
+    # Find source filename
+    source_filename = None
+    for node in app_state.nodes:
+        if node.metadata.get("title") == title:
+            source_filename = node.metadata.get("source")
+            break
+    
+    if not source_filename:
+        st.error(f"❌ Could not find source for: {title}")
+        LOGGER.error(f"Failed to find source for title: {title}")
+        return False
+    
+    config = AppConfig.get()
+    source_path = config.paths.docs_path / source_filename
+    
+    with st.spinner(f"Deleting {title}..."):
+        try:
+            manager = app_state.ensure_manager()
+            manager.nodes = app_state.nodes
+            manager._remove_documents({source_filename})
+            
+            # Delete source file
+            if source_path.exists():
+                source_path.unlink()
+                LOGGER.info(f"Deleted source file: {source_path}")
+            
+            # Update app state
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            
+            st.success(f"✅ Deleted: {title}")
+            LOGGER.info(f"Deleted document: {title}")
+            
+        except Exception as exc:
+            st.error(f"❌ Failed: {exc}")
+            LOGGER.exception(f"Delete failed: {title}")
+            return False
+    
+    # FIX: Run full sync to ensure consistency
+    with st.spinner("Syncing library after deletion..."):
+        try:
+            changes, report = manager.sync_library(app_state.index)
+            LOGGER.info(f"Synced after deletion: +{len(changes.added)}, ~{len(changes.modified)}, -{len(changes.deleted)}")
+            
+            # Update state
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+            
+        except Exception as exc:
+            LOGGER.warning(f"Sync after deletion failed: {exc}")
+
+    # Remove from confirmations if key provided
+    if unique_key and unique_key in st.session_state.get("delete_confirmations", set()):
+        st.session_state.delete_confirmations.discard(unique_key)
+    
+    return True
+
+
+def _delete_entire_library(app_state: AppState) -> None:
+    """Nuclear option: delete ALL documents and reset completely."""
+    
+    config = AppConfig.get()
+    
+    with st.spinner("🔥 Deleting entire library..."):
+        try:
+            # Delete all source files
+            docs_path = config.paths.docs_path
+            deleted_count = 0
+            
+            for file_path in docs_path.glob("*"):
+                if file_path.is_file():
+                    file_path.unlink()
+                    deleted_count += 1
+            
+            # Clear ChromaDB
+            manager = app_state.ensure_manager()
+            manager.collection.delete()
+            manager.collection = manager.chroma_client.get_or_create_collection("maritime_docs")
+            
+            # Clear all caches
+            for cache_file in [
+                config.paths.nodes_cache_path,
+                config.paths.cache_info_path,
+                manager.sync_cache_file,
+                config.paths.gemini_json_cache,
+            ]:
+                if cache_file.exists():
+                    cache_file.unlink()
+            
+            # Reset state completely
+            app_state.nodes = []
+            app_state.index = None
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.manager = None
+            app_state.invalidate_node_map_cache()
+            
+            st.success(f"✅ Deleted {deleted_count} files")
+            st.info("💡 Library is now empty. Upload new documents to rebuild.")
+            LOGGER.info(f"Nuclear delete: {deleted_count} files")
+        
+        except Exception as exc:
+            st.error(f"❌ Failed: {exc}")
+            LOGGER.exception("Nuclear delete failed")
+
+
+# ==============================================================================
+# FORM SCHEMA EDITOR
+# ==============================================================================
+
+def _render_form_schema_editor() -> None:
+    """Form schema configuration editor with polished UX."""
+    
+    st.markdown("### 🔧 Form Schema Configuration")
+    st.markdown("Edit form codes. Changes saved to `config/form_categories.json`.")
+    
+    # Always load fresh from JSON
+    current_categories = load_form_categories()
+    
+    # Initialize state
+    if "form_schema_editor" not in st.session_state:
+        st.session_state.form_schema_editor = {
+            "confirm_delete": set(),
+            "last_saved": current_categories.copy(),
+            "input_counter": 0,  # FIX: Counter for unique input keys
+        }
+    
+    editor_state = st.session_state.form_schema_editor
+    categories = current_categories
+    
+    st.caption(f"**{len(categories)} codes**")
+    st.markdown("---")
+    
+    # Render existing categories (code-based keys)
+    for code, description in sorted(categories.items()):
+        col1, col2, col3 = st.columns([1.5, 5, 1])
+        
+        with col1:
+            st.text_input(
+                "Code", 
+                value=code, 
+                key=f"display_code_{code}",
+                disabled=True, 
+                label_visibility="collapsed"
+            )
+        
+        with col2:
+            st.text_input(
+                "Desc", 
+                value=description, 
+                key=f"display_desc_{code}",
+                disabled=True, 
+                label_visibility="collapsed"
+            )
+        
+        with col3:
+            is_confirming = code in editor_state["confirm_delete"]
+            
+            if is_confirming:
+                if st.button("✅", key=f"confirm_del_{code}", use_container_width=True, type="primary"):
+                    # Delete
+                    if code in categories:
+                        del categories[code]
+                        LOGGER.info(f"Deleted form code: {code}")
+                    
+                    # Save immediately
+                    if save_form_categories(categories):
+                        editor_state["last_saved"] = categories.copy()
+                        LOGGER.info("Saved after deletion")
+                    
+                    # Clear confirmation
+                    editor_state["confirm_delete"].discard(code)
+                    
+                    # Clean up widget state
+                    for key in [f"display_code_{code}", f"display_desc_{code}", 
+                               f"delete_btn_{code}", f"confirm_del_{code}"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    
+                    st.rerun()
+            else:
+                if st.button("🗑️", key=f"delete_btn_{code}", use_container_width=True):
+                    editor_state["confirm_delete"].add(code)
+                    st.rerun()
+    
+    st.markdown("---")
+    
+    # Add new code section
+    st.markdown("#### ➕ Add New Code")
+    
+    # FIX: Use counter in key to force new inputs after add
+    input_key_suffix = editor_state["input_counter"]
+    
+    col1, col2, col3 = st.columns([1.5, 5, 1])
+    
+    with col1:
+        new_code = st.text_input(
+            "Code", 
+            placeholder="e.g., X", 
+            max_chars=10, 
+            label_visibility="collapsed",
+            key=f"new_code_input_{input_key_suffix}"  # FIX: Unique key each time
+        )
+    
+    with col2:
+        new_description = st.text_input(
+            "Description", 
+            placeholder="e.g., Example", 
+            label_visibility="collapsed",
+            key=f"new_desc_input_{input_key_suffix}"  # FIX: Unique key each time
+        )
+    
+    with col3:
+        add_button = st.button("➕", use_container_width=True, type="secondary", key="add_new_btn")
+    
+    if add_button:
+        new_code_clean = new_code.strip().upper()
+        new_desc_clean = new_description.strip()
+        
+        if not new_code_clean or not new_desc_clean:
+            st.warning("⚠️ Both required")
+        elif new_code_clean in categories:
+            st.error(f"⚠️ `{new_code_clean}` exists!")
+        else:
+            # Add to dict
+            categories[new_code_clean] = new_desc_clean
+            LOGGER.info(f"Added form code: {new_code_clean}")
+            
+            # Save immediately
+            if save_form_categories(categories):
+                editor_state["last_saved"] = categories.copy()
+                LOGGER.info("Saved after addition")
+            
+            # FIX: Increment counter to create fresh inputs on next render
+            editor_state["input_counter"] += 1
+            
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # FIX: Replaced Save button with Clear All button
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.info("💾 **Changes save automatically**")
+    
+    with col2:
+        if st.button("🗑️ Clear All", use_container_width=True, type="secondary", key="clear_all_btn"):
+            st.session_state["confirm_clear_all"] = True
+            st.rerun()
+    
+    # Clear All confirmation
+    if st.session_state.get("confirm_clear_all", False):
+        st.warning("⚠️ **Delete ALL form codes?** This will clear the entire schema!")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("✅ Yes, Clear All", type="primary", use_container_width=True, key="confirm_clear_all_yes"):
+                # Clear all codes
+                empty_schema = {}
+                if save_form_categories(empty_schema):
+                    editor_state["last_saved"] = {}
+                    st.success("✅ All codes cleared!")
+                    LOGGER.info("Cleared all form codes")
+                
+                # Clear confirmation
+                del st.session_state["confirm_clear_all"]
+                st.rerun()
+        
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True, key="confirm_clear_all_no"):
+                del st.session_state["confirm_clear_all"]
+                st.rerun()
 
 __all__ = [
     "compose_result_markdown",
     "save_result_as_html",
     "render_app",
     "render_viewer_app",
+    "render_form_schema_editor",
+    "render_bulk_upload",
+    "render_documents_with_delete",
 ]

@@ -6,7 +6,7 @@ import os
 import re
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Iterator
 
 from llama_index.core.schema import NodeWithScore
 from llama_index.core import Settings as LlamaSettings
@@ -51,6 +51,20 @@ if USE_RERANKER and cohere is not None:  # pragma: no cover - runtime configurat
 # Thread pool for parallel retrieval (module-level singleton)
 _retrieval_executor = ThreadPoolExecutor(max_workers=2)
 
+def generate_answer_stream(prompt: str) -> Iterator[str]:
+    """
+    Stream LLM response for Streamlit display.
+    
+    Yields text chunks as they arrive from Gemini.
+    """
+    stream_response = LlamaSettings.llm.stream_complete(prompt)
+    
+    for chunk in stream_response:
+        if hasattr(chunk, 'delta') and chunk.delta:
+            yield chunk.delta
+        elif hasattr(chunk, 'text') and chunk.text:
+            yield chunk.text
+
 def _attach_embeddings_from_cache(
     retrieved_nodes: List[NodeWithScore],
     cached_nodes: List[Document],
@@ -58,19 +72,21 @@ def _attach_embeddings_from_cache(
     """
     Attach embeddings from cached nodes to retrieved nodes.
     
-    Uses text content hash for matching since node IDs may differ.
+    Retrieved nodes come from ChromaDB without embeddings.
+    Cached nodes (app_state.nodes) have embeddings from indexing.
+    
+    Uses content hash matching with source+section fallback.
     """
     import hashlib
     
     def text_hash(text: str) -> str:
-        """Create a short hash of text content for matching."""
-        # Normalize whitespace before hashing
+        """Create a hash of normalized text content."""
         normalized = ' '.join(text[:500].split())
         return hashlib.md5(normalized.encode('utf-8')).hexdigest()
     
-    # Build lookup: content_hash -> embedding
-    # Also build a secondary lookup by source+section for fallback
+    # Build primary lookup by content hash
     embedding_lookup: Dict[str, List[float]] = {}
+    # Secondary lookup by source+section for fallback
     source_section_lookup: Dict[Tuple[str, str], List[float]] = {}
     
     for node in cached_nodes:
@@ -80,10 +96,8 @@ def _attach_embeddings_from_cache(
         
         text = node.text if hasattr(node, 'text') else node.get_content()
         if text:
-            content_hash = text_hash(text)
-            embedding_lookup[content_hash] = embedding
+            embedding_lookup[text_hash(text)] = embedding
         
-        # Secondary lookup by source + section
         metadata = getattr(node, 'metadata', {}) or {}
         source = metadata.get('source', '')
         section = metadata.get('section', '')
@@ -94,8 +108,6 @@ def _attach_embeddings_from_cache(
     
     # Attach embeddings to retrieved nodes
     attached_count = 0
-    fallback_count = 0
-    missing_nodes = []
     
     for node_with_score in retrieved_nodes:
         node = node_with_score.node
@@ -104,35 +116,22 @@ def _attach_embeddings_from_cache(
         text = node.text if hasattr(node, 'text') else node.get_content()
         if not text:
             continue
-            
-        content_hash = text_hash(text)
         
-        if content_hash in embedding_lookup:
-            node.embedding = embedding_lookup[content_hash]
+        # Try content hash first
+        if text_hash(text) in embedding_lookup:
+            node.embedding = embedding_lookup[text_hash(text)]
             attached_count += 1
-        else:
-            # Try fallback by source + section
-            source = metadata.get('source', '')
-            section = metadata.get('section', '')
-            key = (source, section)
-            
-            if key in source_section_lookup:
-                node.embedding = source_section_lookup[key]
-                attached_count += 1
-                fallback_count += 1
-            else:
-                missing_nodes.append({
-                    'source': source[:30] if source else 'unknown',
-                    'section': section[:30] if section else 'unknown',
-                    'is_upload': metadata.get('session_upload', False),
-                })
+            continue
+        
+        # Fallback to source+section
+        source = metadata.get('source', '')
+        section = metadata.get('section', '')
+        if (source, section) in source_section_lookup:
+            node.embedding = source_section_lookup[(source, section)]
+            attached_count += 1
     
-    LOGGER.info("📎 Attached embeddings to %d/%d retrieved nodes (%d by hash, %d by source+section fallback)", 
-               attached_count, len(retrieved_nodes), attached_count - fallback_count, fallback_count)
-    
-    if missing_nodes:
-        upload_count = sum(1 for m in missing_nodes if m['is_upload'])
-        LOGGER.info("📎 Missing nodes: %d total (%d session uploads)", len(missing_nodes), upload_count)
+    LOGGER.info("📎 Attached embeddings to %d/%d retrieved nodes from cache", 
+               attached_count, len(retrieved_nodes))
     
     return retrieved_nodes
 
@@ -802,6 +801,16 @@ def retrieve_hierarchical(
 
         if not section_id or not source:
             continue
+
+        if source.lower().endswith(('.xlsx', '.xls')):
+            continue
+
+        doc_id = Path(source).stem
+        key = (doc_id, section_id)
+
+        if key not in seen_sections:
+            section_refs.append(key)
+            seen_sections.add(key)
 
         doc_id = Path(source).stem
         key = (doc_id, section_id)
@@ -1711,8 +1720,9 @@ QUESTION: {original_query}
 
 Please provide a clear, concise answer with proper citations."""
 
-    response = LlamaSettings.llm.complete(prompt)
-    answer_text = response.text
+    #response = LlamaSettings.llm.complete(prompt)
+    #answer_text = response.text
+    answer_stream = generate_answer_stream(prompt)
     
     # Update conversation state
     if DEBUG_RAG:
@@ -1746,7 +1756,9 @@ Please provide a clear, concise answer with proper citations."""
         "refinement_history": refinement_history if len(refinement_history) > 1 else None,
         "attempts": attempt,
         "best_attempt": best_result["attempt"],
-        "answer": answer_text,
+        #"answer": answer_text,
+        "answer_stream": answer_stream,
+        "answer": "",  # Placeholder for streaming
         "confidence_pct": confidence_pct,
         "confidence_level": confidence_level,
         "confidence_note": confidence_note,
