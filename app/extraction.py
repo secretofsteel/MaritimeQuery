@@ -1575,8 +1575,8 @@ def _parse_section_identifier(section_name: str) -> Optional[Dict[str, Any]]:
     Parse section name to extract section_id, title, and level.
 
     Examples:
-        "3. Discharge Procedure" → {section_id: "3", title: "Discharge Procedure", level: 1}
-        "3.1 Pre-Discharge" → {section_id: "3.1", title: "Pre-Discharge", level: 2}
+        "3. Discharge Procedure" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ {section_id: "3", title: "Discharge Procedure", level: 1}
+        "3.1 Pre-Discharge" ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ {section_id: "3.1", title: "Pre-Discharge", level: 2}
     """
     if not section_name:
         return None
@@ -1601,6 +1601,7 @@ def _parse_section_identifier(section_name: str) -> Optional[Dict[str, Any]]:
         "title": section_name.strip(),
         "level": 1
     }
+
 
 __all__ = [
     "build_extract_prompt",
