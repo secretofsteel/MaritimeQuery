@@ -68,7 +68,7 @@ def load_form_categories() -> dict[str, str]:
     """
     # Hardcoded fallback (original FORM_CATEGORIES)
     FALLBACK_CATEGORIES = {
-        "Z": "Miscellaneous (Chapter 3)",
+        "Z": "Miscellaneous",
         "C": "Crew",
         "CBO": "Cargo/Ballast Operations",
         "M": "Maintenance",
@@ -177,6 +177,9 @@ EXTRACT_SYSTEM_PROMPT = (
     "- Replace all multiple spaces with single space"
     "- Do NOT try to preserve visual alignment or formatting"
     "- Content should be clean, readable text suitable for search"
+    "CRITICAL: If you encounter markdown tables (rows with | pipe characters), you MUST preserve them EXACTLY as they appear in the original text. "
+    "Do NOT reformat tables into plain text. Keep all pipe characters (|), hyphens (---), and cell contents exactly as written. "
+    "Tables must remain in their original markdown format with proper column alignment. "
     "Title extraction rules:"
     "- The filename should be included as-is in the 'filename' field"
     "- If it is a Form or Checklist, the 'title' must start with the form/checklist code and number, followed by a hyphen and the title. Use the filename first to help infer the code/number and title"

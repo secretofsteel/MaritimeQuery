@@ -802,6 +802,16 @@ def retrieve_hierarchical(
         if not section_id or not source:
             continue
 
+        if source.lower().endswith(('.xlsx', '.xls')):
+            continue
+
+        doc_id = Path(source).stem
+        key = (doc_id, section_id)
+
+        if key not in seen_sections:
+            section_refs.append(key)
+            seen_sections.add(key)
+
         doc_id = Path(source).stem
         key = (doc_id, section_id)
 

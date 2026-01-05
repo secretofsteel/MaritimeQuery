@@ -6,6 +6,7 @@ import io
 import json
 import re
 import pickle
+import yaml
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -796,6 +797,67 @@ def _extract_visual_content_from_page(page, page_num: int, table_rects: List = N
 
     return visual_items
 
+def _detect_columns_and_sort(text_items: List[Dict], page_width: float) -> List[Dict]:
+    """
+    Detect columns and sort text blocks in proper reading order.
+    
+    Works for both single-column and multi-column layouts.
+    Handles items with direct x0/x1 keys OR rect objects.
+    
+    Args:
+        text_items: List of item dicts (text, tables, visuals)
+        page_width: Width of the page for threshold calculation
+    
+    Returns:
+        Sorted list with proper reading order
+    """
+    if not text_items:
+        return []
+    
+    # Helper function to get x-center from any item type
+    def get_x_center(item: Dict) -> float:
+        if "x1" in item:
+            # Direct access (text/table items)
+            return (item["x0"] + item["x1"]) / 2
+        elif "rect" in item:
+            # Visual items store rect object
+            return (item["rect"].x0 + item["rect"].x1) / 2
+        else:
+            # Fallback
+            return item.get("x0", 0)
+    
+    # Step 1: Extract x-positions for all items
+    x_positions = [get_x_center(item) for item in text_items]
+    
+    # Step 2: Detect column boundaries by finding gaps
+    x_sorted = sorted(set(x_positions))
+    
+    column_boundaries = []
+    threshold = page_width * 0.15  # 15% of page width = significant gap
+    
+    for i in range(len(x_sorted) - 1):
+        gap = x_sorted[i + 1] - x_sorted[i]
+        if gap > threshold:
+            # Found a column boundary
+            boundary_x = (x_sorted[i] + x_sorted[i + 1]) / 2
+            column_boundaries.append(boundary_x)
+    
+    # Step 3: Assign each item to a column
+    for item in text_items:
+        x_center = get_x_center(item)
+        
+        # Determine which column this item belongs to
+        column_idx = 0
+        for boundary in column_boundaries:
+            if x_center > boundary:
+                column_idx += 1
+        
+        item["column"] = column_idx
+    
+    # Step 4: Sort by column first, then y-position, then x-position
+    text_items.sort(key=lambda i: (i["column"], round(i["y0"], 1), i["x0"]))
+    
+    return text_items
 
 def _pymupdf_page_to_text(page, page_num: int = 0, extract_visuals: bool = False) -> str:
     """
@@ -940,7 +1002,8 @@ def _pymupdf_page_to_text(page, page_num: int = 0, extract_visuals: bool = False
     if not all_items:
         return ""
 
-    all_items.sort(key=lambda i: (round(i["y0"], 1), i["x0"]))
+    #all_items.sort(key=lambda i: (round(i["y0"], 1), i["x0"]))
+    all_items = _detect_columns_and_sort(all_items, page.rect.width)
 
     # 6. Build final markdown-ish text with inline visual descriptions
     output_parts: List[str] = []
@@ -1410,21 +1473,94 @@ def _extract_pdf_pypdf2(path: Path) -> str:
     except Exception:
         return ""
 
+def _extract_excel_yaml(path: Path) -> str:
+    """
+    Extract from Excel with smart format selection:
+    - Wide tables (>5 columns) → YAML for better LLM comprehension
+    - Narrow tables (≤5 columns) → Markdown for readability
+    """
+    try:
+        excel = pd.ExcelFile(str(path))
+    except Exception as exc:
+        LOGGER.error("Failed to open Excel file %s: %s", path.name, exc)
+        return f"[EXCEL_READ_ERROR] {exc}"
+    
+    chunks: List[str] = []
+    
+    for sheet_name in excel.sheet_names[:5]:  # Limit to first 5 sheets
+        try:
+            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
+            
+            # Clean up empty rows/columns
+            df.dropna(axis=1, how="all", inplace=True)
+            df.dropna(thresh=2, inplace=True)
+            
+            if df.empty:
+                continue
+            
+            # Heuristic: Detect headers (first row likely contains column names)
+            try:
+                df.columns = df.iloc[0]
+                df = df[1:].reset_index(drop=True)
+            except Exception:
+                pass
+            
+            # Strategy selection based on table width
+            num_columns = len(df.columns)
+            
+            if num_columns > 5:
+                # WIDE TABLE: Convert to YAML for better key-value preservation
+                records = df.to_dict(orient='records')
+                
+                # Clean nulls for readable YAML
+                clean_records = []
+                for record in records[:50]:  # Limit rows to prevent token bloat
+                    clean_record = {k: v for k, v in record.items() if pd.notna(v)}
+                    if clean_record:  # Only include non-empty records
+                        clean_records.append(clean_record)
+                
+                if clean_records:
+                    yaml_text = yaml.dump(clean_records, sort_keys=False, 
+                                         default_flow_style=False, allow_unicode=True)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n```yaml\n{yaml_text}\n```")
+                    LOGGER.debug("Sheet '%s' in %s: wide table (%d cols) → YAML", 
+                               sheet_name, path.name, num_columns)
+            else:
+                # NARROW TABLE: Markdown is fine and more readable
+                try:
+                    md = df.to_markdown(index=False)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n{md}")
+                    LOGGER.debug("Sheet '%s' in %s: narrow table (%d cols) → Markdown", 
+                               sheet_name, path.name, num_columns)
+                except Exception:
+                    # Fallback if markdown conversion fails
+                    csv_text = df.to_csv(index=False)
+                    chunks.append(f"## Sheet: {sheet_name}\n\n```csv\n{csv_text}\n```")
+        
+        except Exception as exc:
+            LOGGER.warning("Failed to extract sheet '%s' from %s: %s", 
+                          sheet_name, path.name, exc)
+            continue
+    
+    if not chunks:
+        return "[EXCEL_NO_CONTENT]"
+    
+    return "\n\n".join(chunks)
 
 def _extract_excel(path: Path) -> str:
     """Extract from Excel files (both .xlsx and .xls)."""
     excel = pd.ExcelFile(str(path))
     chunks: List[str] = []
     
-    for sheet_name in excel.sheet_names[:5]:
+    for sheet_name in excel.sheet_names[:20]:  # Limit to first 20 sheets
         try:
-            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=100, header=None)
+            df = pd.read_excel(str(path), sheet_name=sheet_name, nrows=500, header=None) #500 rows
             df.dropna(axis=1, how="all", inplace=True)
-            df.dropna(thresh=2, inplace=True)
-            df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
+            df.dropna(thresh=1, inplace=True)
+            #df = df[df.iloc[:, 0].notna() | df.any(axis=1)].copy()
             
             if not df.empty:
-                md = _df_to_markdown(df)
+                md = _df_to_markdown(df, max_rows=500, max_cols=100)  # 100 columns
                 if md:
                     chunks.append(f"[Sheet: {sheet_name}]\n{md}")
         
