@@ -72,10 +72,10 @@ def inspect_cache_entry(cache_path: Path, filename: str, output_file: str = None
                             
                             # Show first 500 chars
                             if content:
-                                preview = content[:2500]
+                                preview = content#[:2500]
                                 output.write(f"Preview:\n{preview}\n")
-                                if len(content) > 2500:
-                                    output.write(f"\n... ({len(content) - 2500} more chars)\n")
+                                #if len(content) > 2500:
+                                #    output.write(f"\n... ({len(content) - 2500} more chars)\n")
                             else:
                                 output.write("⚠️  EMPTY CONTENT!\n")
                             output.write("\n")

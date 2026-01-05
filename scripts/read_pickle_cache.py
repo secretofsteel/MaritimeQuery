@@ -14,7 +14,7 @@ def read_pickle_cache(cache_file: str, output_file: str = None):
         cache_file: Path to .pkl cache file
         output_file: Optional output text file path
     """
-    cache_path = Path(cache_file)
+    cache_path = Path("data\\cache\\text_extracts\\"+cache_file)
     
     if not cache_path.exists():
         print(f"Cache file not found: {cache_file}")
