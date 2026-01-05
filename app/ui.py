@@ -2240,7 +2240,7 @@ def _delete_document_by_source(source_filename: str, display_title: str, app_sta
     with st.spinner("Syncing library after deletion..."):
         try:
             # Run full sync to ensure everything is consistent
-            changes = manager.sync_library(app_state.index)
+            changes, report = manager.sync_library(app_state.index)
             
             # Update state with synced data
             app_state.nodes = manager.nodes
@@ -2318,7 +2318,7 @@ def _delete_document_by_title(title: str, app_state: AppState, unique_key: str =
     # FIX: Run full sync to ensure consistency
     with st.spinner("Syncing library after deletion..."):
         try:
-            changes = manager.sync_library(app_state.index)
+            changes, report = manager.sync_library(app_state.index)
             LOGGER.info(f"Synced after deletion: +{len(changes.added)}, ~{len(changes.modified)}, -{len(changes.deleted)}")
             
             # Update state
