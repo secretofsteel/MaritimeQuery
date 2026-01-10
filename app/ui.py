@@ -11,14 +11,17 @@ import html
 from markdown import markdown as md
 import streamlit as st
 import shutil
+import pickle
 
 from .constants import (
     load_form_categories, 
     save_form_categories, 
     get_form_categories_path,
+    ALLOWED_DOC_TYPES,
     MAX_CONTEXT_TURNS
 )
 from .config import AppConfig
+from .metadata_updates import update_metadata_everywhere, get_correction_status
 from .indexing import build_index_from_library, build_index_from_library_parallel, load_cached_nodes_and_index
 from .query import query_with_confidence, cohere_client
 from .state import AppState
@@ -1912,10 +1915,12 @@ def render_admin_panel(app_state: AppState) -> None:
         with col2:
             st.write("")
             st.write("")
-            
-            if st.button("🔨 Rebuild Index", type="primary", use_container_width=True):
-                rebuild_index_parallel_execute(app_state, clear_cache)
-        
+
+            rebuild_clicked = st.button("🔨 Rebuild Index", type="primary", use_container_width=True)
+
+        if rebuild_clicked:
+            rebuild_index_parallel_execute(app_state, clear_cache)
+
         st.divider()
         
         # Sync section
@@ -1972,14 +1977,18 @@ def render_admin_panel(app_state: AppState) -> None:
 # ==============================================================================
 
 def _render_bulk_upload(app_state: AppState) -> None:
-    """Bulk file upload widget with auto-clear after processing."""
+    """Bulk file upload widget with enhanced file management."""
     
     st.markdown("### 📤 Bulk Document Upload")
     st.markdown("Upload multiple documents. Supported: **PDF, DOCX, DOC, XLSX, XLS, TXT**")
     
-    # FIX: Use keyed uploader so we can clear it
+    # Use keyed uploader so we can clear it
     if "upload_widget_key" not in st.session_state:
         st.session_state.upload_widget_key = 0
+    
+    # Track files to exclude
+    if "excluded_files" not in st.session_state:
+        st.session_state.excluded_files = set()
     
     uploaded_files = st.file_uploader(
         "Select documents",
@@ -1991,6 +2000,26 @@ def _render_bulk_upload(app_state: AppState) -> None:
     
     if not uploaded_files:
         st.info("No files selected")
+        # Clear exclusions when no files
+        if st.session_state.excluded_files:
+            st.session_state.excluded_files = set()
+        return
+    
+    # Filter out excluded files
+    uploaded_files = [f for f in uploaded_files if f.name not in st.session_state.excluded_files]
+    
+    if not uploaded_files:
+        st.warning("All selected files were removed from upload list")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔄 Reset removals", use_container_width=True):
+                st.session_state.excluded_files = set()
+                st.rerun()
+        with col2:
+            if st.button("🗑️ Clear all", use_container_width=True):
+                st.session_state.excluded_files = set()
+                st.session_state.upload_widget_key += 1
+                st.rerun()
         return
     
     # Show summary
@@ -2001,16 +2030,108 @@ def _render_bulk_upload(app_state: AppState) -> None:
     config = AppConfig.get()
     docs_path = config.paths.docs_path
     existing_files = {f.name for f in docs_path.glob("*") if f.is_file()}
-    duplicates = [f.name for f in uploaded_files if f.name in existing_files]
+    duplicates = {f.name for f in uploaded_files if f.name in existing_files}
     
+    # ALWAYS show our custom file list (not just for 3+)
+    st.markdown("---")
+    st.markdown("**📋 Files to upload:**")
+    
+    # Custom CSS for button styling only
+    st.markdown("""
+    <style>
+    /* Make remove buttons minimal and properly sized */
+    button[key^="remove_file_"] {
+        background: transparent !important;
+        border: none !important;
+        padding: 0.3rem 0.5rem !important;
+        box-shadow: none !important;
+        min-width: auto !important;
+        width: 2rem !important;
+        height: 2rem !important;
+        font-size: 1.1rem !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    button[key^="remove_file_"]:hover {
+        background: rgba(255, 0, 0, 0.15) !important;
+        border-radius: 0.3rem !important;
+    }
+    
+    /* Force visible scrollbar on the container */
+    div[data-testid="stVerticalBlock"] > div[style*="height: 400px"] {
+        overflow-y: scroll !important;  /* Always show scrollbar */
+        scrollbar-width: auto !important;  /* Firefox */
+        scrollbar-color: rgba(255, 255, 255, 0.3) rgba(255, 255, 255, 0.05) !important;  /* Firefox */
+    }
+    
+    /* Webkit scrollbar styling (Chrome, Edge, Safari) */
+    div[data-testid="stVerticalBlock"] > div[style*="height: 400px"]::-webkit-scrollbar {
+        width: 12px !important;
+        display: block !important;
+    }
+    
+    div[data-testid="stVerticalBlock"] > div[style*="height: 400px"]::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border-radius: 6px !important;
+        margin: 4px !important;
+    }
+    
+    div[data-testid="stVerticalBlock"] > div[style*="height: 400px"]::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.3) !important;
+        border-radius: 6px !important;
+        border: 2px solid rgba(0, 0, 0, 0.1) !important;
+    }
+    
+    div[data-testid="stVerticalBlock"] > div[style*="height: 400px"]::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.5) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Use Streamlit's container with height parameter (Streamlit 1.31+)
+    with st.container(height=400, border=True):
+        # Display files with remove buttons
+        for idx, uploaded_file in enumerate(uploaded_files):
+            is_duplicate = uploaded_file.name in duplicates
+            
+            col1, col2, col3 = st.columns([6, 1.5, 0.5])
+            
+            with col1:
+                # Highlight duplicates in red
+                if is_duplicate:
+                    st.markdown(f"🔴 **{uploaded_file.name}** _(exists on server)_")
+                else:
+                    st.markdown(f"📄 {uploaded_file.name}")
+            
+            with col2:
+                st.text(_format_file_size(uploaded_file.size))
+            
+            with col3:
+                # Plain text X that acts as button
+                if st.button("❌", key=f"remove_file_{idx}_{uploaded_file.name}", 
+                           help="Remove from upload", use_container_width=False):
+                    st.session_state.excluded_files.add(uploaded_file.name)
+                    st.rerun()
+    
+    st.markdown("---")
+    
+    # Handle duplicates
     if duplicates:
-        st.error(f"⚠️ **{len(duplicates)} duplicate filename(s):**")
-        for dup in duplicates[:10]:
-            st.markdown(f"- `{dup}`")
-        if len(duplicates) > 10:
-            st.markdown(f"- ... and {len(duplicates) - 10} more")
-        st.error("❌ Upload blocked. Please rename duplicates.")
-        return
+        st.warning(f"⚠️ **{len(duplicates)} duplicate filename(s) detected**")
+        
+        # Show overwrite option with explanation
+        overwrite = st.checkbox(
+            "🔄 Overwrite & force re-index",
+            value=False,
+            help="Delete old versions (including DB chunks) then upload new ones"
+        )
+        
+        if not overwrite:
+            st.error("❌ Upload blocked. Either:\n- Enable overwrite above, or\n- Click ❌ next to duplicates to remove them")
+            return
+        else:
+            st.info("✓ Will delete old files completely, then upload and index new ones")
     
     # Show what will happen
     library_exists = len(list(docs_path.glob("*"))) > 0
@@ -2022,17 +2143,62 @@ def _render_bulk_upload(app_state: AppState) -> None:
     
     # Upload button
     if st.button("🚀 Upload & Process", type="primary", use_container_width=True):
-        _execute_bulk_upload(uploaded_files, app_state, library_exists)
+        _execute_bulk_upload(uploaded_files, app_state, library_exists, 
+                           overwrite_duplicates=list(duplicates) if duplicates and overwrite else [])
 
-def _execute_bulk_upload(uploaded_files: List, app_state: AppState, library_exists: bool) -> None:
-    """Execute bulk upload and processing."""
+
+def _execute_bulk_upload(
+    uploaded_files: List, 
+    app_state: AppState, 
+    library_exists: bool,
+    overwrite_duplicates: List[str] = None
+) -> None:
+    """Execute bulk upload and processing.
+    
+    Args:
+        uploaded_files: Files to upload
+        app_state: Application state
+        library_exists: Whether library already has documents
+        overwrite_duplicates: List of filenames to delete before uploading (for forced re-index)
+    """
     
     config = AppConfig.get()
     docs_path = config.paths.docs_path
     docs_path.mkdir(parents=True, exist_ok=True)
     
-    # Copy files
-    st.write("### 📁 Copying files...")
+    overwrite_duplicates = overwrite_duplicates or []
+    
+    # Step 1: Delete old versions if overwriting
+    if overwrite_duplicates:
+        st.write("### 🗑️ Deleting old versions...")
+        delete_progress = st.progress(0.0)
+        delete_status = st.empty()
+        
+        for idx, filename in enumerate(overwrite_duplicates):
+            delete_status.text(f"Deleting: {filename}")
+            
+            # Delete from filesystem
+            old_path = docs_path / filename
+            if old_path.exists():
+                old_path.unlink()
+            
+            delete_progress.progress((idx + 1) / len(overwrite_duplicates))
+        
+        delete_progress.progress(1.0)
+        st.success(f"✅ Deleted {len(overwrite_duplicates)} old files")
+        
+        # Run sync to remove from DB (if library exists)
+        if library_exists:
+            st.write("Cleaning up database...")
+            manager = app_state.ensure_manager()
+            manager.nodes = app_state.nodes
+            sync_result, _ = manager.sync_library(app_state.index, force_retry_errors=False)
+            st.success(f"✅ Removed {len(sync_result.deleted)} old entries from database")
+        
+        st.write("---")
+    
+    # Step 2: Copy new files
+    st.write("### 📁 Copying new files...")
     progress_bar = st.progress(0.0)
     status_text = st.empty()
     
@@ -2042,12 +2208,12 @@ def _execute_bulk_upload(uploaded_files: List, app_state: AppState, library_exis
     for idx, uploaded_file in enumerate(uploaded_files):
         try:
             file_path = docs_path / uploaded_file.name
+            status_text.text(f"Copying: {uploaded_file.name}")
             
             with file_path.open("wb") as f:
                 f.write(uploaded_file.getbuffer())
             
             copied_count += 1
-            status_text.text(f"Copied: {uploaded_file.name}")
         
         except Exception as exc:
             LOGGER.exception(f"Failed to copy {uploaded_file.name}")
@@ -2057,106 +2223,150 @@ def _execute_bulk_upload(uploaded_files: List, app_state: AppState, library_exis
         progress_bar.progress((idx + 1) / len(uploaded_files))
     
     progress_bar.progress(1.0)
-    st.success(f"✅ Copied {copied_count} files")
+    st.success(f"✅ Copied {copied_count} new files")
     
     if skipped_count > 0:
-        st.warning(f"⚠️ Skipped {skipped_count} files")
+        st.warning(f"⚠️ Skipped {skipped_count} files due to errors")
     
-    # Process
+    # Step 3: Process
     st.write("---")
     
     if library_exists:
         st.write("### 🔄 Running incremental sync...")
-        sync_library_with_ui(app_state)  # Full version with progress
+        sync_library_with_ui(app_state)
     else:
         st.write("### 🔨 Building index...")
         rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
-    # FIX: Clear uploaded files by incrementing widget key
+    # Clear state
+    st.session_state.excluded_files = set()
     st.session_state.upload_widget_key += 1
     LOGGER.info("Cleared file uploader after successful processing")
     
     # Force rerun to show fresh uploader
     st.rerun()
 
+
 # ==============================================================================
 # DOCUMENT DELETION
 # ==============================================================================
 
 def _render_documents_with_delete(app_state: AppState) -> None:
-    """Document list with per-doc and bulk delete."""
-    
+    """Admin document list with edit and delete capabilities."""
     st.markdown("### 📄 Documents on File")
     
     if not app_state.nodes:
         st.info("No documents indexed.")
         return
     
-    # Get documents grouped by type (already has correct titles from state.py)
-    docs_by_type = app_state.documents_grouped_by_type()
-    total_docs = sum(len(titles) for titles in docs_by_type.values())
-    st.caption(f"📚 **{total_docs} documents** in library")
+    # Initialize session states
+    if "editing_doc" not in st.session_state:
+        st.session_state.editing_doc = None
     
-    # SIMPLIFIED: Just map display titles to source filenames
-    # No need to re-apply form logic - state.py already did it
-    display_title_to_source: Dict[str, str] = {}
+    if "pending_edits" not in st.session_state:
+        st.session_state.pending_edits = {}
     
-    for node in app_state.nodes:
-        metadata = node.metadata
-        # Get the RAW title from metadata (might not have form number yet)
-        raw_title = metadata.get("title", "Untitled")
-        source = metadata.get("source", "")
-        doc_type = str(metadata.get("doc_type", "")).upper()
-        
-        # For FORMS, documents_grouped_by_type() may have added form number
-        # So we need to figure out what the DISPLAY title will be
-        # But we can just check what's in docs_by_type for this doc_type
-        
-        # Actually, simpler approach: just map ALL possible variations
-        # Map both raw title AND potential form-prefixed title
-        display_title_to_source[raw_title] = source
-        
-        if doc_type == "FORM":
-            form_number = metadata.get("form_number")
-            if form_number:
-                # Map the form-prefixed version too
-                prefixed_title = f"{form_number} - {raw_title}"
-                display_title_to_source[prefixed_title] = source
-    
-    # Initialize deletion state
     if "delete_confirmations" not in st.session_state:
         st.session_state.delete_confirmations = set()
     
-    # Clear confirmations after successful deletion
+    # Clear delete confirmations after successful deletion
     if st.session_state.get("deletion_completed", False):
         st.session_state.delete_confirmations = set()
         st.session_state.deletion_completed = False
     
-    # Render by type (using titles from docs_by_type which are already formatted)
+    # Get documents grouped by type
+    docs_by_type = app_state.documents_grouped_by_type()
+    total_docs = sum(len(titles) for titles in docs_by_type.values())
+    st.caption(f"📚 **{total_docs} documents** in library")
+    
+    # Build mapping: display_title -> (source_filename, metadata)
+    display_to_meta: Dict[str, tuple] = {}
+    for node in app_state.nodes:
+        metadata = node.metadata
+        source = metadata.get("source", "")
+        if not source:
+            continue
+        
+        # Use same title logic as documents_grouped_by_type
+        doc_type = str(metadata.get("doc_type", "")).upper()
+        title = metadata.get("title") or source
+        
+        if doc_type == "FORM":
+            form_number = metadata.get("form_number")
+            if form_number:
+                form_normalized = form_number.replace(" ", "").upper()
+                title_start = title.split("-")[0].strip().replace(" ", "").upper()
+                if not title_start.startswith(form_normalized):
+                    title = f"{form_number} - {title}"
+        
+        display_to_meta[title] = (source, metadata)
+    
+    # Render by document type
     for doc_type, titles in sorted(docs_by_type.items()):
         with st.expander(f"**{doc_type}** ({len(titles)} docs)", expanded=False):
             for display_title in sorted(titles):
-                # Get source from mapping (will match either raw or prefixed)
-                source_filename = display_title_to_source.get(display_title, display_title)
+                source, metadata = display_to_meta.get(display_title, (display_title, {}))
+                unique_key = f"{doc_type}_{source}"
                 
-                # Use source filename as unique key
-                unique_key = f"{doc_type}_{source_filename}"
+                # Determine document state
+                is_editing = st.session_state.editing_doc == source
+                is_confirming_delete = unique_key in st.session_state.delete_confirmations
                 
-                col1, col2 = st.columns([5, 1])
-                
-                with col1:
-                    st.markdown(f"📄 {display_title}")
-                
-                with col2:
-                    is_confirming = unique_key in st.session_state.delete_confirmations
+                # Document header with action buttons
+                if is_editing:
+                    # EDITING STATE - Show cancel button only
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        st.markdown(f"**{display_title}**")
+                    with col2:
+                        if st.button("❌", key=f"cancel_{source}", help="Cancel editing"):
+                            st.session_state.editing_doc = None
+                            if source in st.session_state.pending_edits:
+                                del st.session_state.pending_edits[source]
+                            st.rerun()
                     
-                    if is_confirming:
+                    # Show edit form
+                    st.markdown("─" * 50)
+                    _render_metadata_edit_form(source, metadata, app_state)
+                    st.markdown("─" * 50)
+                
+                elif is_confirming_delete:
+                    # DELETE CONFIRMATION STATE
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        st.markdown(f"📄 {display_title}")
+                    with col2:
                         if st.button("✅", key=f"confirm_{unique_key}", use_container_width=True):
-                            success = _delete_document_by_source(source_filename, display_title, app_state)
+                            success = _delete_document_by_source(source, display_title, app_state)
                             if success:
                                 st.session_state.deletion_completed = True
                             st.rerun()
-                    else:
+                
+                else:
+                    # NORMAL STATE - Show edit and delete buttons
+                    col1, col2, col3 = st.columns([4, 1, 1])
+                    with col1:
+                        st.markdown(f"📄 {display_title}")
+                    with col2:
+                        if st.button("✏️", key=f"edit_{source}", use_container_width=True, help="Edit metadata"):
+                            st.session_state.editing_doc = source
+                            
+                            # Load current values
+                            form_categories = load_form_categories()
+                            category_value = metadata.get("form_category_name", "")
+                            
+                            # Map code to full name if it's a shortcode
+                            if category_value and category_value in form_categories:
+                                category_value = form_categories[category_value]
+                            
+                            st.session_state.pending_edits[source] = {
+                                "doc_type": str(metadata.get("doc_type", "DOCUMENT")).upper(),  # Normalize case
+                                "title": metadata.get("title", ""),
+                                "form_number": metadata.get("form_number", ""),
+                                "form_category_name": category_value,
+                            }
+                            st.rerun()
+                    with col3:
                         if st.button("🗑️", key=f"delete_{unique_key}", use_container_width=True):
                             st.session_state.delete_confirmations.add(unique_key)
                             st.rerun()
@@ -2184,6 +2394,140 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     else:
         if st.button("⚠️ Delete Entire Library", use_container_width=True):
             st.session_state["confirm_nuclear_delete"] = True
+            st.rerun()
+
+
+def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState) -> None:
+    """Render inline metadata editing form."""
+    pending = st.session_state.pending_edits.get(source, {})
+    
+    # Filename (read-only)
+    st.text_input("Filename", value=source, disabled=True, key=f"filename_{source}")
+    
+    # Title
+    new_title = st.text_input(
+        "Title",
+        value=pending.get("title", ""),
+        key=f"title_{source}"
+    )
+    pending["title"] = new_title
+    
+    # Document Type
+    current_doc_type = str(pending.get("doc_type", "DOCUMENT")).upper()  # Normalize case
+    try:
+        type_index = ALLOWED_DOC_TYPES.index(current_doc_type)
+    except ValueError:
+        # Fallback to first item if not found
+        LOGGER.warning("Unknown doc_type '%s' for %s, defaulting to first option", current_doc_type, source)
+        type_index = 0
+    
+    new_doc_type = st.selectbox(
+        "Document Type",
+        options=ALLOWED_DOC_TYPES,
+        index=type_index,
+        key=f"doctype_{source}"
+    )
+    pending["doc_type"] = new_doc_type
+    
+    # Form-specific fields (show for FORM and CHECKLIST)
+    if new_doc_type in ["FORM", "CHECKLIST"]:
+        new_form_number = st.text_input(
+            "Form Number",
+            value=pending.get("form_number", ""),
+            key=f"formnum_{source}"
+        )
+        pending["form_number"] = new_form_number
+        
+        # Form category dropdown
+        form_categories = load_form_categories()
+        category_options = [""] + sorted(form_categories.values())
+        
+        current_category = pending.get("form_category_name", "")
+        try:
+            cat_index = category_options.index(current_category)
+        except ValueError:
+            cat_index = 0
+        
+        new_category = st.selectbox(
+            "Form Category",
+            options=category_options,
+            index=cat_index,
+            key=f"formcat_{source}"
+        )
+        pending["form_category_name"] = new_category
+    
+    # Update pending edits
+    st.session_state.pending_edits[source] = pending
+    
+    # Save button
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Save Changes", key=f"save_{source}", type="primary", use_container_width=True):
+            # Apply corrections
+            corrections = {}
+            
+            if pending["title"] != metadata.get("title", ""):
+                corrections["title"] = pending["title"]
+            
+            # Normalize case for comparison
+            old_doc_type = str(metadata.get("doc_type", "")).upper()
+            if pending["doc_type"] != old_doc_type:
+                corrections["doc_type"] = pending["doc_type"]
+            
+            if new_doc_type in ["FORM", "CHECKLIST"]:
+                if pending["form_number"] != metadata.get("form_number", ""):
+                    corrections["form_number"] = pending["form_number"]
+                
+                # Convert category full name back to code
+                selected_category = pending["form_category_name"]
+                old_category = metadata.get("form_category_name", "")
+                
+                # Map full name to code
+                form_categories = load_form_categories()
+                reverse_map = {v: k for k, v in form_categories.items()}
+                
+                # Get code for selected category (if it's a full name)
+                category_code = reverse_map.get(selected_category, selected_category)
+                
+                # Check if changed (comparing codes)
+                old_category_code = old_category if old_category in form_categories else reverse_map.get(old_category, old_category)
+                
+                if category_code != old_category_code:
+                    corrections["form_category_name"] = category_code
+            
+            if corrections:
+                config = AppConfig.get()
+                
+                # Apply updates
+                success = update_metadata_everywhere(
+                    source,
+                    corrections,
+                    app_state.nodes,
+                    config.paths.chroma_path
+                )
+                
+                if success:
+                    # Re-pickle nodes
+                    with config.paths.nodes_cache_path.open("wb") as f:
+                        pickle.dump(app_state.nodes, f)
+                    
+                    st.success("✅ Metadata updated successfully!")
+                    st.session_state.editing_doc = None
+                    if source in st.session_state.pending_edits:
+                        del st.session_state.pending_edits[source]
+                    
+                    # Rerun to refresh display
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to update metadata")
+            else:
+                st.info("No changes detected")
+    
+    with col2:
+        if st.button("Cancel", key=f"cancel2_{source}", use_container_width=True):
+            st.session_state.editing_doc = None
+            if source in st.session_state.pending_edits:
+                del st.session_state.pending_edits[source]
             st.rerun()
 
 def _delete_document_by_source(source_filename: str, display_title: str, app_state: AppState) -> bool:

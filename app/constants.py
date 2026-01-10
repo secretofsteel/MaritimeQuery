@@ -154,51 +154,63 @@ FORM_CATEGORIES = load_form_categories()
 # REST OF CONSTANTS
 # ==============================================================================
 
-EXTRACT_SYSTEM_PROMPT = (
-    "You are a maritime document analysis model. Your task is to extract structured information in STRICT JSON format based on the provided schema. Be sure to use double quotes for the keys and values of the JSON file"
-    "Return ONLY the JSON object. Do not include any surrounding text, markdown code blocks (like ```json), or explanations."
-    "Ensure all string values within the JSON are properly escaped according to JSON standards (e.g., `\\'` and '\"' for quotes, `\\\\` for backslashes, `\\n` for new lines, `\\t` for tabs)."
-    "Always ensure to properly close the JSON output with the required brackets. Never forget to add the ',' delimiter where it is needed"
-    "Detect and preserve tables and lists within section content. Represent them as accurately as possible in the raw text content."
-    "If nested hierarchy of sections exists, include it as an array of strings in 'hierarchy', (for example 'Chapter 4', '1.1 Bunkering', '1.1.1 Measuring the bunkers', etc.)"
-    "Map shorthand codes like 'Form C 002' or 'Checklist EN 002' to full category names using the provided map."
-    "Identify distinct sections within the document. For EACH identified section, provide its 'name' and the full 'content' belonging to that section. The 'content' should include all relevant text, lists, tables, and details associated with the section name."
-    "Be precise in separating content belonging to different sections."
-    "If the document is a Form or a Checklist ensure to start the title with the Form or Checklist code and number then follow with its title, (eg. 'C 004 - Briefing of Masters and Senior Offiers' or 'CBO 015 - Cargo Operation Checklist')"
-    "Identify and list any explicit cross-references to other documents, forms, procedures, policies, regulations, reports, their chapters and/or sections mentioned in the text."
-    "Use the 'references' object in the schema, listing full names/numbers (e.g., 'Form C 002b', 'Ballast Water Management Procedure', 'SOLAS Chapter V'). Be specific and include the complete name/number as it appears or is logically inferred."
-    "IMPORTANT: Any form, procedure,regulation, etc. that goes into the references should be included only ONCE!! DO NOT INSERT REPEATED ENTRIES!!!!"
-    "Adhere strictly to the provided JSON schema, including all required properties and data types."
-    "Do not include trailing commas after the last item in arrays or objects."
-    "CRITICAL CONTENT RULES:"
-    "- Extract content as plain text only, NO formatting preservation"
-    "- Replace all sequences of dots (....) with single ellipsis (...)"
-    "- Replace all tabs with single space"
-    "- Replace all multiple spaces with single space"
-    "- Do NOT try to preserve visual alignment or formatting"
-    "- Content should be clean, readable text suitable for search"
-    "CRITICAL: If you encounter markdown tables (rows with | pipe characters), you MUST preserve them EXACTLY as they appear in the original text. "
-    "Do NOT reformat tables into plain text. Keep all pipe characters (|), hyphens (---), and cell contents exactly as written. "
-    "Tables must remain in their original markdown format with proper column alignment. "
-    "Title extraction rules:"
-    "- The filename should be included as-is in the 'filename' field"
-    "- If it is a Form or Checklist, the 'title' must start with the form/checklist code and number, followed by a hyphen and the title. Use the filename first to help infer the code/number and title"
-    "- For procedures, policies, regulations, and manuals, the 'title' should be the main title of the document as prominently displayed, if not, use the filename to help infer the title"
-    "- Generally, the document title should be taken from the main heading/header or prominent title text or filename if no title is found, or combination of both if needed for clarity"
-    "- Rule of Thumb: in case of forms/checklists filename trumps extracted title, in case of procedures/policies/regulations/manuals extracted title trumps filename"
-    "- If using filename as title, remove file extension and replace underscores/hyphens with spaces for readability"
-    "doc_type options:"
-    "define the doc type strictly from this list:"
-    "- Form"
-    "- Checklist"
-    "- Procedure"
-    "- Regulation"
-    "- Policy"
-    "- Manual"
-    "Use 'Manual' only when it is a set of instructions or equipment manual"
-    "For any document that is part of company's Management System, then label it 'Procedure'"
-)
+# Document type constants - centralized for UI, validation, and Gemini prompts
+ALLOWED_DOC_TYPES = [
+    "FORM",
+    "CHECKLIST", 
+    "PROCEDURE",
+    "REGULATION",
+    "VETTING",
+    "CIRCULAR",
+]
 
+def build_extract_system_prompt() -> str:
+    """Build the extraction prompt with current allowed doc types."""
+    doc_types_list = "\n".join(f"- {dt.title()}" for dt in ALLOWED_DOC_TYPES)
+    
+    return (
+        "You are a maritime document analysis model. Your task is to extract structured information in STRICT JSON format based on the provided schema. Be sure to use double quotes for the keys and values of the JSON file"
+        "Return ONLY the JSON object. Do not include any surrounding text, markdown code blocks (like ```json), or explanations."
+        "Ensure all string values within the JSON are properly escaped according to JSON standards (e.g., `\\'` and '\"' for quotes, `\\\\` for backslashes, `\\n` for new lines, `\\t` for tabs)."
+        "Always ensure to properly close the JSON output with the required brackets. Never forget to add the ',' delimiter where it is needed"
+        "Detect and preserve tables and lists within section content. Represent them as accurately as possible in the raw text content."
+        "If nested hierarchy of sections exists, include it as an array of strings in 'hierarchy', (for example 'Chapter 4', '1.1 Bunkering', '1.1.1 Measuring the bunkers', etc.)"
+        "Map shorthand codes like 'Form C 002' or 'Checklist EN 002' to full category names using the provided map."
+        "Identify distinct sections within the document. For EACH identified section, provide its 'name' and the full 'content' belonging to that section. The 'content' should include all relevant text, lists, tables, and details associated with the section name."
+        "Be precise in separating content belonging to different sections."
+        "If the document is a Form or a Checklist ensure to start the title with the Form or Checklist code and number then follow with its title, (eg. 'C 004 - Briefing of Masters and Senior Offiers' or 'CBO 015 - Cargo Operation Checklist')"
+        "Identify and list any explicit cross-references to other documents, forms, procedures, policies, regulations, reports, their chapters and/or sections mentioned in the text."
+        "Use the 'references' object in the schema, listing full names/numbers (e.g., 'Form C 002b', 'Ballast Water Management Procedure', 'SOLAS Chapter V'). Be specific and include the complete name/number as it appears or is logically inferred."
+        "IMPORTANT: Any form, procedure,regulation, etc. that goes into the references should be included only ONCE!! DO NOT INSERT REPEATED ENTRIES!!!!"
+        "Adhere strictly to the provided JSON schema, including all required properties and data types."
+        "Do not include trailing commas after the last item in arrays or objects."
+        "Never skip IMAGE or DRAWING descriptions, these are found between tags such as [IMAGE - ...] or [DRAWING - ...] and [/IMAGE] or [/DRAWING], include the full description text as part of the content in the relevant section."
+        "CRITICAL CONTENT RULES:"
+        "- Extract content as plain text only, NO formatting preservation"
+        "- Replace all sequences of dots (....) with single ellipsis (...)"
+        "- Replace all tabs with single space"
+        "- Replace all multiple spaces with single space"
+        "- Do NOT try to preserve visual alignment or formatting"
+        "- Content should be clean, readable text suitable for search"
+        "CRITICAL: If you encounter markdown tables (rows with | pipe characters), you MUST preserve them EXACTLY as they appear in the original text. "
+        "Do NOT reformat tables into plain text. Keep all pipe characters (|), hyphens (---), and cell contents exactly as written. "
+        "Tables must remain in their original markdown format with proper column alignment. "
+        "Title extraction rules:"
+        "- The filename should be included as-is in the 'filename' field"
+        "- If it is a Form or Checklist, the 'title' must start with the form/checklist code and number, followed by a hyphen and the title. Use the filename first to help infer the code/number and title"
+        "- For procedures, policies, regulations, and manuals, the 'title' should be the main title of the document as prominently displayed, if not, use the filename to help infer the title"
+        "- Generally, the document title should be taken from the main heading/header or prominent title text or filename if no title is found, or combination of both if needed for clarity"
+        "- Rule of Thumb: in case of forms/checklists filename trumps extracted title, in case of procedures/policies/regulations/manuals extracted title trumps filename"
+        "- If using filename as title, remove file extension and replace underscores/hyphens with spaces for readability"
+        "doc_type options:"
+        "define the doc_type STRICTLY from this list:"
+        f"{doc_types_list}"
+        "Use 'Manual' only when it is a set of instructions or equipment manual"
+        "For any document that is part of company's Management System, then label it 'Procedure'"       
+    )
+
+# Create the constant using the function
+EXTRACT_SYSTEM_PROMPT = build_extract_system_prompt()
 
 CONFIDENCE_HIGH_THRESHOLD = 75
 CONFIDENCE_MEDIUM_THRESHOLD = 55
@@ -219,6 +231,7 @@ __all__ = [
     "DEBUG_RAG",
     "GEMINI_SCHEMA",
     "FORM_CATEGORIES",
+    "ALLOWED_DOC_TYPES",
     "EXTRACT_SYSTEM_PROMPT",
     "CONFIDENCE_HIGH_THRESHOLD",
     "CONFIDENCE_MEDIUM_THRESHOLD",

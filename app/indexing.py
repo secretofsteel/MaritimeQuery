@@ -19,6 +19,7 @@ from llama_index.core.schema import Document
 
 from .config import AppConfig
 from .constants import CHUNK_OVERLAP, CHUNK_SIZE
+from .metadata_updates import apply_corrections_to_gemini_record
 from .extraction import gemini_extract_record, to_documents_from_gemini, build_document_tree
 from .files import current_files_index, load_jsonl, upsert_jsonl_record, write_jsonl
 from .logger import LOGGER
@@ -198,7 +199,7 @@ def map_chunks_to_tree_sections(
 
 
 def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
-    """Process the full document library and build the vector index."""
+    """Original non-parallel version with corrections support."""
     config = AppConfig.get()
     paths = config.paths
 
@@ -216,6 +217,11 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 
         if not needs_updates and cached and "gemini" in cached:
             meta = cached["gemini"]
+            
+            # *** NEW: Apply corrections if they exist ***
+            if "corrections" in cached:
+                meta = apply_corrections_to_gemini_record(meta, cached["corrections"])
+                LOGGER.debug("Applied corrections to %s", filename)
         else:
             meta = gemini_extract_record(doc_path)
 
@@ -327,6 +333,10 @@ def build_index_from_library_parallel(
         if not needs_extraction and cached and "gemini" in cached:
             meta = cached["gemini"]
             status.used_cache = True
+            # Apply corrections if they exist
+            if "corrections" in cached:
+                meta = apply_corrections_to_gemini_record(meta, cached["corrections"])
+                LOGGER.debug("Applied corrections to %s", filename)
         else:
             # Need to extract
             docs_to_extract.append(doc_path)
@@ -362,7 +372,12 @@ def build_index_from_library_parallel(
                 )
             else:
                 status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
-        
+
+        # Mark embedding as success from cache
+        status.embedding = StageResult(StageStatus.SUCCESS, "Embeddings cached")
+        # Add to report
+        report.add_status(status)
+        # Convert cached extraction to documents
         documents_from_cache = to_documents_from_gemini(doc_path, meta)
         all_documents.extend(documents_from_cache)
     
@@ -468,7 +483,7 @@ def build_index_from_library_parallel(
     chunk_texts = [node.get_content() for node in nodes]
     
     # Generate embeddings in parallel
-    embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
+    embedding_gen = ParallelEmbeddingGenerator(max_workers=5)
     embedding_batch = embedding_gen.generate_batch(chunk_texts, progress_callback)
     
     LOGGER.info("Generated %d embeddings in %.2fs", 
@@ -1003,7 +1018,7 @@ class IncrementalIndexManager:
         # Attach embeddings to nodes
         for node, embedding in zip(new_nodes, embedding_batch.embeddings):
             node.embedding = embedding
-        
+
         # Mark embedding success
         for filename in chunks_per_file.keys():
             if filename in file_statuses:
@@ -1011,7 +1026,7 @@ class IncrementalIndexManager:
                     StageStatus.SUCCESS,
                     f"Embedded {chunks_per_file[filename]} chunks"
                 )
-        
+
         # Phase 4: Add to index sequentially
         if index is not None:
             LOGGER.info("Adding %d chunks to index...", len(new_nodes))
