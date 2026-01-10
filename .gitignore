@@ -1,7 +1,7 @@
 /.conda
 /Dockerfile
 /tests
-
+/data
 # Python cache files
 __pycache__/
 *.py[cod]
