@@ -175,13 +175,14 @@ class ParallelDocumentProcessor:
 class ParallelEmbeddingGenerator:
     """Handles parallel embedding generation using Google Embeddings API."""
     
-    def __init__(self, max_workers: int = 10):
+    def __init__(self, max_workers: int = 5):
         """Initialize with specified worker count."""
         self.max_workers = max_workers
     
     def generate_embedding(self, text: str, index: int) -> Tuple[int, List[float]]:
         """Generate embedding for a single text."""
         try:
+            time.sleep(0.05)  # To avoid triggering API rate limits
             embedding = LlamaSettings.embed_model.get_text_embedding(text)
             return (index, embedding)
         except Exception as exc:

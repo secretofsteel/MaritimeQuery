@@ -21,4 +21,5 @@ __all__ = [
     "state",
     "ui",
     "logger",
+    "metadata_updates",
 ]  # pragma: no cover
