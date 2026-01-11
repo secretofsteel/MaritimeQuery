@@ -32,6 +32,19 @@ from .processing_status import ProcessingReport, DocumentProcessingStatus, Stage
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
+def _toggle_select_all_for_category(doc_type: str, category_filenames: Set[str]) -> None:
+    """Callback for select-all checkbox. Toggles all files in a category."""
+    # Check current state
+    all_currently_selected = category_filenames.issubset(st.session_state.batch_selected_docs)
+    
+    # Toggle: if all selected, deselect all. If not all selected, select all.
+    if all_currently_selected:
+        # Deselect all in this category
+        st.session_state.batch_selected_docs.difference_update(category_filenames)
+    else:
+        # Select all in this category
+        st.session_state.batch_selected_docs.update(category_filenames)
+
 def _stage_icon(status: StageStatus) -> str:
     """Get icon for stage status."""
     icons = {
@@ -1960,7 +1973,7 @@ def render_admin_panel(app_state: AppState) -> None:
                             st.rerun()
     
     # === DOCUMENTS ON FILE ===
-    with st.expander("📄 Documents on File", expanded=False):
+    with st.expander("📄 Documents on File", expanded=True):
         _render_documents_with_delete(app_state)
     
     # === FEEDBACK ANALYTICS ===
@@ -2252,14 +2265,21 @@ def _execute_bulk_upload(
 # ==============================================================================
 
 def _render_documents_with_delete(app_state: AppState) -> None:
-    """Admin document list with edit and delete capabilities."""
+    """Admin document list with edit, delete, and batch operations."""
     st.markdown("### 📄 Documents on File")
     
     if not app_state.nodes:
         st.info("No documents indexed.")
         return
     
-    # Initialize session states
+    # Check if we need to reset batch mode (from previous operation)
+    if st.session_state.get("reset_batch_mode_flag", False):
+        st.session_state["batch_mode_toggle"] = False
+        st.session_state.batch_mode_enabled = False
+        st.session_state.batch_selected_docs = set()
+        st.session_state["reset_batch_mode_flag"] = False
+    
+    # Initialize session states (EXISTING CODE)
     if "editing_doc" not in st.session_state:
         st.session_state.editing_doc = None
     
@@ -2269,17 +2289,46 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     if "delete_confirmations" not in st.session_state:
         st.session_state.delete_confirmations = set()
     
-    # Clear delete confirmations after successful deletion
+    # NEW: Initialize batch mode states
+    if "batch_mode_enabled" not in st.session_state:
+        st.session_state.batch_mode_enabled = False
+    if "batch_selected_docs" not in st.session_state:
+        st.session_state.batch_selected_docs = set()
+    if "batch_delete_confirm" not in st.session_state:
+        st.session_state.batch_delete_confirm = False
+    if "batch_edit_expanded" not in st.session_state:
+        st.session_state.batch_edit_expanded = False
+    
+    # Clear delete confirmations after successful deletion (EXISTING CODE)
     if st.session_state.get("deletion_completed", False):
         st.session_state.delete_confirmations = set()
         st.session_state.deletion_completed = False
     
-    # Get documents grouped by type
+    # Get documents grouped by type 
     docs_by_type = app_state.documents_grouped_by_type()
     total_docs = sum(len(titles) for titles in docs_by_type.values())
     st.caption(f"📚 **{total_docs} documents** in library")
     
-    # Build mapping: display_title -> (source_filename, metadata)
+    # NEW: Batch mode toggle
+    batch_mode = st.checkbox(
+        "Batch select mode",
+        value=st.session_state.batch_mode_enabled,
+        key="batch_mode_toggle",
+        help="Enable to select multiple documents for batch operations"
+    )
+    
+    # Update batch mode state
+    if batch_mode != st.session_state.batch_mode_enabled:
+        st.session_state.batch_mode_enabled = batch_mode
+        # Clear selections when toggling mode
+        st.session_state.batch_selected_docs = set()
+        st.session_state.batch_delete_confirm = False
+        st.session_state.batch_edit_expanded = False
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # Build mapping: display_title -> (source_filename, metadata) (EXISTING CODE)
     display_to_meta: Dict[str, tuple] = {}
     for node in app_state.nodes:
         metadata = node.metadata
@@ -2301,77 +2350,182 @@ def _render_documents_with_delete(app_state: AppState) -> None:
         
         display_to_meta[title] = (source, metadata)
     
-    # Render by document type
+    # Render by document type (MODIFIED: Add batch mode logic)
     for doc_type, titles in sorted(docs_by_type.items()):
         with st.expander(f"**{doc_type}** ({len(titles)} docs)", expanded=False):
+
+            # ============================================================
+            # Select All checkbox (only in batch mode)
+            if batch_mode:
+                # Get all filenames and their keys for this category
+                category_files = []  # List of (display_title, source, unique_key)
+                for display_title in titles:
+                    source, metadata = display_to_meta.get(display_title, (display_title, {}))
+                    unique_key = f"{doc_type}_{source}"
+                    category_files.append((display_title, source, unique_key))
+                
+                # Check if all individual checkboxes are currently checked
+                all_checked = all(
+                    st.session_state.get(f"batch_sel_{uk}", False) 
+                    for _, _, uk in category_files
+                )
+                
+                # Track previous value of the select-all checkbox widget
+                select_all_key = f"select_all_{doc_type}"
+                prev_value_key = f"prev_{select_all_key}"
+                
+                # Select All checkbox
+                col1, col2 = st.columns([0.3, 5.7], vertical_alignment="center")
+                
+                with col1:
+                    select_all = st.checkbox(
+                        "Select all",
+                        value=all_checked,
+                        key=select_all_key,
+                        label_visibility="collapsed"
+                    )
+                
+                with col2:
+                    st.markdown("**Select all**")
+                
+                # ONLY update if the checkbox widget value actually changed
+                # (meaning user clicked it, not just page rerendered)
+                prev_value = st.session_state.get(prev_value_key, all_checked)
+                
+                if select_all != prev_value:
+                    # User clicked the select-all checkbox!
+                    for _, _, unique_key in category_files:
+                        checkbox_key = f"batch_sel_{unique_key}"
+                        st.session_state[checkbox_key] = select_all
+                    
+                    # Store current value as previous for next render
+                    st.session_state[prev_value_key] = select_all
+                
+                st.markdown("---")
+            # ============================================================
+
             for display_title in sorted(titles):
                 source, metadata = display_to_meta.get(display_title, (display_title, {}))
+                source_filename = Path(source).name
                 unique_key = f"{doc_type}_{source}"
                 
-                # Determine document state
-                is_editing = st.session_state.editing_doc == source
-                is_confirming_delete = unique_key in st.session_state.delete_confirmations
-                
-                # Document header with action buttons
-                if is_editing:
-                    # EDITING STATE - Show cancel button only
-                    col1, col2 = st.columns([5, 1])
-                    with col1:
-                        st.markdown(f"**{display_title}**")
-                    with col2:
-                        if st.button("❌", key=f"cancel_{source}", help="Cancel editing"):
-                            st.session_state.editing_doc = None
-                            if source in st.session_state.pending_edits:
-                                del st.session_state.pending_edits[source]
-                            st.rerun()
+                # BATCH MODE vs NORMAL MODE
+                if batch_mode:
+                    # BATCH MODE: Show checkbox + title only
+                    col1, col2 = st.columns([0.3, 5.7], vertical_alignment="center")
                     
-                    # Show edit form
-                    st.markdown("─" * 50)
-                    _render_metadata_edit_form(source, metadata, app_state)
-                    st.markdown("─" * 50)
-                
-                elif is_confirming_delete:
-                    # DELETE CONFIRMATION STATE
-                    col1, col2 = st.columns([5, 1])
                     with col1:
-                        st.markdown(f"📄 {display_title}")
+                        is_selected = source_filename in st.session_state.batch_selected_docs
+                        if st.checkbox("Select", value=is_selected, key=f"batch_sel_{unique_key}", label_visibility="collapsed"):
+                            st.session_state.batch_selected_docs.add(source_filename)
+                        else:
+                            st.session_state.batch_selected_docs.discard(source_filename)
+                    
                     with col2:
-                        if st.button("✅", key=f"confirm_{unique_key}", use_container_width=True):
-                            success = _delete_document_by_source(source, display_title, app_state)
-                            if success:
-                                st.session_state.deletion_completed = True
-                            st.rerun()
+                        st.markdown(f"📄 {display_title}")
                 
                 else:
-                    # NORMAL STATE - Show edit and delete buttons
-                    col1, col2, col3 = st.columns([4, 1, 1])
-                    with col1:
-                        st.markdown(f"📄 {display_title}")
-                    with col2:
-                        if st.button("✏️", key=f"edit_{source}", use_container_width=True, help="Edit metadata"):
-                            st.session_state.editing_doc = source
-                            
-                            # Load current values
-                            form_categories = load_form_categories()
-                            category_value = metadata.get("form_category_name", "")
-                            
-                            # Map code to full name if it's a shortcode
-                            if category_value and category_value in form_categories:
-                                category_value = form_categories[category_value]
-                            
-                            st.session_state.pending_edits[source] = {
-                                "doc_type": str(metadata.get("doc_type", "DOCUMENT")).upper(),  # Normalize case
-                                "title": metadata.get("title", ""),
-                                "form_number": metadata.get("form_number", ""),
-                                "form_category_name": category_value,
-                            }
-                            st.rerun()
-                    with col3:
-                        if st.button("🗑️", key=f"delete_{unique_key}", use_container_width=True):
-                            st.session_state.delete_confirmations.add(unique_key)
-                            st.rerun()
+                    # NORMAL MODE: Existing edit/delete logic (UNCHANGED)
+                    is_editing = st.session_state.editing_doc == source
+                    is_confirming_delete = unique_key in st.session_state.delete_confirmations
+                    
+                    if is_editing:
+                        # EDITING STATE - Show cancel button only
+                        col1, col2 = st.columns([5, 1])
+                        with col1:
+                            st.markdown(f"**{display_title}**")
+                        with col2:
+                            if st.button("❌", key=f"cancel_{source}", help="Cancel editing"):
+                                st.session_state.editing_doc = None
+                                if source in st.session_state.pending_edits:
+                                    del st.session_state.pending_edits[source]
+                                st.rerun()
+                        
+                        # Show edit form
+                        st.markdown("─" * 50)
+                        _render_metadata_edit_form(source, metadata, app_state)
+                        st.markdown("─" * 50)
+                    
+                    elif is_confirming_delete:
+                        # DELETE CONFIRMATION STATE
+                        col1, col2 = st.columns([5, 1])
+                        with col1:
+                            st.markdown(f"📄 {display_title}")
+                        with col2:
+                            if st.button("✅", key=f"confirm_{unique_key}", use_container_width=True):
+                                success = _delete_document_by_source(source, display_title, app_state)
+                                if success:
+                                    st.session_state.deletion_completed = True
+                                st.rerun()
+                    
+                    else:
+                        # NORMAL STATE - Show edit and delete buttons
+                        col1, col2, col3 = st.columns([4, 1, 1])
+                        with col1:
+                            st.markdown(f"📄 {display_title}")
+                        with col2:
+                            if st.button("✏️", key=f"edit_{source}", use_container_width=True, help="Edit metadata"):
+                                st.session_state.editing_doc = source
+                                
+                                # Load current values
+                                form_categories = load_form_categories()
+                                category_value = metadata.get("form_category_name", "")
+                                
+                                # Map code to full name if it's a shortcode
+                                if category_value and category_value in form_categories:
+                                    category_value = form_categories[category_value]
+                                
+                                st.session_state.pending_edits[source] = {
+                                    "doc_type": str(metadata.get("doc_type", "DOCUMENT")).upper(),
+                                    "title": metadata.get("title", ""),
+                                    "form_number": metadata.get("form_number", ""),
+                                    "form_category_name": category_value,
+                                }
+                                st.rerun()
+                        with col3:
+                            if st.button("🗑️", key=f"delete_{unique_key}", use_container_width=True):
+                                st.session_state.delete_confirmations.add(unique_key)
+                                st.rerun()
     
-    # Nuclear option
+    # NEW: Batch operations buttons (only in batch mode)
+    if batch_mode and st.session_state.batch_selected_docs:
+        st.markdown("---")
+        
+        num_selected = len(st.session_state.batch_selected_docs)
+        st.caption(f"**{num_selected} document(s) selected**")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Batch delete
+            if st.session_state.batch_delete_confirm:
+                if st.button(f"✅ Confirm Delete {num_selected}", type="primary", use_container_width=True):
+                    _batch_delete_documents(list(st.session_state.batch_selected_docs), app_state)
+                    st.session_state.batch_selected_docs = set()
+                    st.session_state.batch_delete_confirm = False
+                    st.rerun()
+            else:
+                if st.button(f"🗑️ Delete Selected ({num_selected})", use_container_width=True):
+                    st.session_state.batch_delete_confirm = True
+                    st.rerun()
+        
+        with col2:
+            if st.button(f"✏️ Edit Doc Type ({num_selected})", use_container_width=True):
+                st.session_state.batch_edit_expanded = not st.session_state.batch_edit_expanded
+                st.rerun()
+        
+        # Cancel delete confirmation
+        if st.session_state.batch_delete_confirm:
+            if st.button("❌ Cancel Delete", use_container_width=True):
+                st.session_state.batch_delete_confirm = False
+                st.rerun()
+        
+        # Batch edit expander
+        if st.session_state.batch_edit_expanded:
+            with st.expander("✏️ Edit Document Type", expanded=True):
+                _render_batch_edit_form(list(st.session_state.batch_selected_docs), app_state)
+    
+    # Nuclear option (EXISTING CODE - UNCHANGED)
     st.markdown("---")
     st.markdown("### ⚠️ Danger Zone")
     
@@ -2529,6 +2683,127 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
             if source in st.session_state.pending_edits:
                 del st.session_state.pending_edits[source]
             st.rerun()
+
+def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
+    """Render batch edit form for changing doc_type of multiple documents."""
+    
+    st.markdown(f"**Editing {len(filenames)} document(s)**")
+    
+    # Doc type dropdown
+    new_doc_type = st.selectbox(
+        "New Document Type",
+        options=ALLOWED_DOC_TYPES,
+        key="batch_edit_doc_type"
+    )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("💾 Save Changes", type="primary", use_container_width=True, key="batch_save"):
+            success_count = 0
+            
+            with st.spinner(f"Updating {len(filenames)} documents..."):
+                for filename in filenames:
+                    try:
+                        # Find the source path for this filename
+                        source = None
+                        metadata = None
+                        for node in app_state.nodes:
+                            node_source = node.metadata.get("source", "")
+                            if Path(node_source).name == filename:
+                                source = node_source
+                                metadata = node.metadata
+                                break
+                        
+                        if source and metadata:
+                            corrections = {"doc_type": new_doc_type}
+                            
+                            config = AppConfig.get()
+                            success = update_metadata_everywhere(
+                                source,
+                                corrections,
+                                app_state.nodes,
+                                config.paths.chroma_path
+                            )
+                            
+                            if success:
+                                success_count += 1
+                        else:
+                            LOGGER.warning(f"Could not find source for {filename}")
+                    
+                    except Exception as exc:
+                        LOGGER.exception(f"Failed to update {filename}")
+                        st.error(f"❌ Failed: {filename}")
+            
+            if success_count > 0:
+                # Re-pickle nodes after all updates
+                config = AppConfig.get()
+                with config.paths.nodes_cache_path.open("wb") as f:
+                    pickle.dump(app_state.nodes, f)
+                
+                st.success(f"✅ Updated {success_count}/{len(filenames)} documents to {new_doc_type}")
+            
+            # Clear batch state
+            st.session_state.batch_selected_docs = set()
+            st.session_state.batch_edit_expanded = False
+            st.session_state["reset_batch_mode_flag"] = True  # Uncheck the checkbox
+            st.rerun()
+    
+    with col2:
+        if st.button("❌ Cancel", use_container_width=True, key="batch_cancel"):
+            st.session_state.batch_edit_expanded = False
+            st.rerun()
+
+
+def _batch_delete_documents(filenames: List[str], app_state: AppState) -> None:
+    """Delete multiple documents and sync once at the end."""
+    
+    from .config import AppConfig
+    
+    config = AppConfig.get()
+    docs_path = config.paths.docs_path
+    
+    # Step 1: Delete all files from disk
+    deleted_count = 0
+    with st.spinner(f"Deleting {len(filenames)} files..."):
+        for filename in filenames:
+            file_path = docs_path / filename
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                    LOGGER.info(f"Deleted file: {filename}")
+                except Exception as exc:
+                    LOGGER.exception(f"Failed to delete {filename}")
+                    st.error(f"❌ Failed to delete: {filename}")
+            else:
+                LOGGER.warning(f"File not found: {filename}")
+    
+    st.success(f"✅ Deleted {deleted_count}/{len(filenames)} files from disk")
+    
+    # Step 2: Sync library once to clean up database
+    if deleted_count > 0:
+        with st.spinner("Syncing library to update database..."):
+            manager = app_state.ensure_manager()
+            manager.nodes = app_state.nodes
+            
+            sync_result, _ = manager.sync_library(
+                app_state.index,
+                force_retry_errors=False
+            )
+            
+            # Update app state
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            app_state.vector_retriever = None
+            app_state.bm25_retriever = None
+            app_state.ensure_retrievers()
+        
+        st.success(f"✅ Removed {len(sync_result.deleted)} entries from database")
+        st.session_state.batch_mode_enabled = False
+        LOGGER.info(f"Batch deleted {deleted_count} files, removed {len(sync_result.deleted)} from DB")
+        st.session_state["reset_batch_mode_flag"] = True   # Uncheck the checkbox
+        #st.session_state.batch_selected_docs = set()    # Clear selections
 
 def _delete_document_by_source(source_filename: str, display_title: str, app_state: AppState) -> bool:
     """
