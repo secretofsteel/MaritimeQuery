@@ -1,10 +1,18 @@
 /.conda
 /Dockerfile
 /tests
-/data
 # Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+data/cache/*
+!data/cache/.gitkeep
+data/chroma_db/*
+!data/chroma_db/.gitkeep
+data/docs/*
+!data/docs/.gitkeep
+*.pkl
+*.jsonl
+*.sqlite3
