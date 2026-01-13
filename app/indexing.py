@@ -543,6 +543,73 @@ def build_index_from_library_parallel(
     save_processing_report(report, report_path)
     LOGGER.info("Processing report saved to %s", report_path)
     
+    LOGGER.info("Phase 4: Building document trees...")
+    sys.stdout.flush()
+
+    # Import here to avoid circular dependency
+    from .extraction import build_document_tree
+
+    try:
+        # Reload cache to get all extractions (cached + newly extracted)
+        all_cached_records = load_jsonl(paths.gemini_json_cache)
+        
+        # Build trees for all successfully processed files
+        document_trees = []
+        
+        for filename in files_index.keys():
+            if filename not in all_cached_records:
+                LOGGER.debug("Skipping tree for %s (no cache entry)", filename)
+                continue
+            
+            cached_record = all_cached_records[filename]
+            gemini_meta = cached_record.get("gemini", {})
+            
+            # Skip files with extraction errors or no sections
+            if "parse_error" in gemini_meta:
+                LOGGER.debug("Skipping tree for %s (parse error)", filename)
+                continue
+                
+            if "extraction_error" in gemini_meta:
+                LOGGER.debug("Skipping tree for %s (extraction error)", filename)
+                continue
+                
+            if not gemini_meta.get("sections"):
+                LOGGER.debug("Skipping tree for %s (no sections)", filename)
+                continue
+            
+            # Build tree
+            doc_path = paths.docs_path / filename
+            doc_id = doc_path.stem  # Filename without extension
+            
+            try:
+                tree = build_document_tree(gemini_meta, doc_id)
+                document_trees.append(tree)
+                LOGGER.debug("Built tree for %s with %d root sections", 
+                            doc_id, len(tree.get("sections", [])))
+            except Exception as tree_exc:
+                LOGGER.exception("Failed to build tree for %s: %s", filename, tree_exc)
+                continue
+        
+        LOGGER.info("Built %d document trees", len(document_trees))
+        
+        # Map chunks to tree sections
+        if document_trees:
+            document_trees = map_chunks_to_tree_sections(nodes, document_trees)
+            LOGGER.info("Mapped chunks to tree sections")
+        
+        # Save trees
+        trees_path = paths.cache_dir / "document_trees.json"
+        save_document_trees(document_trees, trees_path)
+        
+        LOGGER.info("✅ Phase 5 complete: %d document trees saved to %s", 
+                    len(document_trees), trees_path)
+        sys.stdout.flush()
+        
+    except Exception as exc:
+        LOGGER.exception("Failed to build/save document trees: %s", exc)
+        LOGGER.warning("⚠️  Continuing without document trees - hierarchical retrieval will be disabled")
+        sys.stdout.flush()
+
     LOGGER.info("=== Parallel Processing Complete ===")
     LOGGER.info("Total time: %.2f seconds", elapsed_time)
     LOGGER.info("Results: %d successful, %d warnings, %d failed",
@@ -828,11 +895,7 @@ class IncrementalIndexManager:
         
         Returns:
             Tuple of (successfully_processed_filenames, file_statuses)
-        """
-        from .parallel_processing import ParallelDocumentProcessor, ParallelEmbeddingGenerator
-        from .processing_status import DocumentProcessingStatus, StageResult, StageStatus
-        from .config import AppConfig
-        
+        """        
         config = AppConfig.get()
         paths = config.paths
         
@@ -1042,7 +1105,8 @@ class IncrementalIndexManager:
         
         # Save nodes pickle
         self._save_nodes_pickle()
-        
+
+
         LOGGER.info("✓ Sync complete for %d files", len(successfully_processed))
         sys.stdout.flush()
         

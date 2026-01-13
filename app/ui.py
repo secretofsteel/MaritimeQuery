@@ -32,18 +32,128 @@ from .processing_status import ProcessingReport, DocumentProcessingStatus, Stage
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
-def _toggle_select_all_for_category(doc_type: str, category_filenames: Set[str]) -> None:
-    """Callback for select-all checkbox. Toggles all files in a category."""
-    # Check current state
-    all_currently_selected = category_filenames.issubset(st.session_state.batch_selected_docs)
+def rebuild_trees_only(app_state: AppState) -> None:
+    """
+    Rebuild document trees from existing Gemini cache without touching index.
     
-    # Toggle: if all selected, deselect all. If not all selected, select all.
-    if all_currently_selected:
-        # Deselect all in this category
-        st.session_state.batch_selected_docs.difference_update(category_filenames)
-    else:
-        # Select all in this category
-        st.session_state.batch_selected_docs.update(category_filenames)
+    This is FAST (~5 seconds) because it:
+    - Doesn't re-extract documents (uses cached Gemini extractions)
+    - Doesn't re-chunk documents
+    - Doesn't re-embed chunks
+    - Just rebuilds tree JSON structure from existing cache
+    
+    Perfect for:
+    - Testing tree building changes
+    - Fixing tree issues without full rebuild
+    - Quick recovery from tree corruption
+    - Development and debugging
+    """
+    from .config import AppConfig
+    from .indexing import (
+        load_jsonl, 
+        load_document_trees,
+        save_document_trees,
+        map_chunks_to_tree_sections
+    )
+    from .extraction import build_document_tree
+    from .logger import LOGGER
+    
+    with st.spinner("🌲 Rebuilding document trees from cache..."):
+        try:
+            config = AppConfig.get()
+            paths = config.paths
+            
+            # Load Gemini cache
+            LOGGER.info("Loading Gemini extraction cache...")
+            cached_records = load_jsonl(paths.gemini_json_cache)
+            
+            if not cached_records:
+                st.error("❌ No Gemini cache found. Please rebuild the index first.")
+                LOGGER.error("Cannot rebuild trees: no Gemini cache")
+                return
+            
+            LOGGER.info("Found %d cached extractions", len(cached_records))
+            
+            # Build trees for all files with valid extractions
+            document_trees = []
+            skipped = 0
+            errors = []
+            
+            for filename, cached_record in cached_records.items():
+                gemini_meta = cached_record.get("gemini", {})
+                
+                # Skip files with extraction errors
+                if "parse_error" in gemini_meta:
+                    LOGGER.debug("Skipping %s (parse error)", filename)
+                    skipped += 1
+                    continue
+                
+                if "extraction_error" in gemini_meta:
+                    LOGGER.debug("Skipping %s (extraction error)", filename)
+                    skipped += 1
+                    continue
+                
+                # Skip files with no sections
+                if not gemini_meta.get("sections"):
+                    LOGGER.debug("Skipping %s (no sections)", filename)
+                    skipped += 1
+                    continue
+                
+                # Build tree for this document
+                doc_path = paths.docs_path / filename
+                doc_id = doc_path.stem  # Filename without extension
+                
+                try:
+                    tree = build_document_tree(gemini_meta, doc_id)
+                    document_trees.append(tree)
+                    LOGGER.debug("Built tree for %s with %d sections", 
+                                doc_id, len(tree.get("sections", [])))
+                except Exception as exc:
+                    LOGGER.exception("Failed to build tree for %s: %s", filename, exc)
+                    errors.append(f"{filename}: {str(exc)}")
+                    skipped += 1
+                    continue
+            
+            LOGGER.info("Built %d document trees (%d files skipped)", 
+                       len(document_trees), skipped)
+            
+            # Map chunks to tree sections (if nodes available)
+            if app_state.nodes:
+                LOGGER.info("Mapping %d chunks to tree sections...", len(app_state.nodes))
+                document_trees = map_chunks_to_tree_sections(app_state.nodes, document_trees)
+                LOGGER.info("Chunk mapping complete")
+            else:
+                LOGGER.warning("No nodes loaded - skipping chunk mapping")
+            
+            # Save trees to JSON
+            trees_path = paths.cache_dir / "document_trees.json"
+            save_document_trees(document_trees, trees_path)
+            LOGGER.info("Saved trees to %s", trees_path)
+            
+            # Reload hierarchical state in app
+            app_state._validate_hierarchical_support()
+            
+            # Success message
+            success_msg = f"✅ Rebuilt {len(document_trees)} document trees!"
+            if skipped > 0:
+                success_msg += f" (Skipped {skipped} files with errors/no sections)"
+            
+            st.success(success_msg)
+            LOGGER.info("Tree rebuild complete: %d trees, %d skipped", 
+                       len(document_trees), skipped)
+            
+            # Show errors if any
+            if errors:
+                with st.expander(f"⚠️ {len(errors)} files had errors", expanded=False):
+                    for error in errors[:20]:  # Limit to first 20
+                        st.text(error)
+                    if len(errors) > 20:
+                        st.text(f"... and {len(errors) - 20} more")
+            
+        except Exception as exc:
+            LOGGER.exception("Failed to rebuild document trees")
+            st.error(f"❌ Failed to rebuild trees: {exc}")
+
 
 def _stage_icon(status: StageStatus) -> str:
     """Get icon for stage status."""
@@ -56,6 +166,37 @@ def _stage_icon(status: StageStatus) -> str:
     }
     return icons.get(status, "❓")
 
+def detect_table_in_stream(text_buffer: str) -> bool:
+    """
+    Detect if response contains a Markdown table.
+    
+    Looks for patterns like:
+    - Multiple lines with pipe characters (|)
+    - Header separator line (| --- | --- |)
+    - At least 2 rows (header + separator + data)
+    
+    Args:
+        text_buffer: Accumulated text from stream
+    
+    Returns:
+        True if table detected, False otherwise
+    """
+    lines = text_buffer.split('\n')
+    
+    # Count lines with pipe characters
+    pipe_lines = [line for line in lines if '|' in line and line.strip().startswith('|')]
+    
+    if len(pipe_lines) < 2:
+        return False  # Need at least header + separator
+    
+    # Check for separator line (contains hyphens between pipes)
+    has_separator = any(
+        '|' in line and '-' in line and line.count('-') >= 3
+        for line in lines
+    )
+    
+    # Table detected if we have multiple pipe lines AND a separator
+    return len(pipe_lines) >= 2 and has_separator
 
 def render_processing_status_table(report: ProcessingReport) -> None:
     """Display processing status table after index build/sync.
@@ -224,7 +365,7 @@ def render_admin_index_management(app_state) -> None:
             help="Process all documents and rebuild the search index"
         ):
             rebuild_index_parallel_execute(app_state, clear_cache)
-    
+
     st.divider()
     
     # Sync controls
@@ -1766,9 +1907,49 @@ def render_app(
                     # Stream the response with typewriter effect
                     answer_stream = result.get("answer_stream")
                     if answer_stream:
-                        full_answer = st.write_stream(answer_stream)
-                        result["answer"] = full_answer
+                        # Buffer initial chunks to detect tables
+                        initial_buffer = ""
+                        chunks_collected = []
+                        table_detected = False
+                        
+                        # Collect first ~500 chars or until table detected
+                        for chunk in answer_stream:
+                            chunks_collected.append(chunk)
+                            initial_buffer += chunk
+                            
+                            # Check for table after collecting enough content
+                            if len(initial_buffer) > 100:  # Need some content to detect
+                                if detect_table_in_stream(initial_buffer):
+                                    table_detected = True
+                                    LOGGER.info("📊 Table detected in response, switching to buffered rendering")
+                                    break
+                            
+                            # Stop buffering after reasonable amount if no table
+                            if len(initial_buffer) > 500 and not table_detected:
+                                break
+                        
+                        if table_detected:
+                            # TABLE PATH: Buffer complete response, render all at once
+                            LOGGER.info("Buffering complete response due to table content")
+                            remaining_chunks = list(answer_stream)  # Collect rest of stream
+                            full_answer = "".join(chunks_collected + remaining_chunks)
+                            st.markdown(full_answer)
+                            result["answer"] = full_answer
+                        else:
+                            # NORMAL PATH: Continue streaming with typewriter effect
+                            # First show what we buffered
+                            placeholder = st.empty()
+                            placeholder.markdown(initial_buffer)
+                            
+                            # Then stream the rest
+                            for chunk in answer_stream:
+                                initial_buffer += chunk
+                                placeholder.markdown(initial_buffer)
+                            
+                            full_answer = initial_buffer
+                            result["answer"] = full_answer
                     else:
+                        # No stream available, render complete
                         full_answer = result.get("answer", "")
                         st.markdown(full_answer)
                     
@@ -1933,6 +2114,22 @@ def render_admin_panel(app_state: AppState) -> None:
 
         if rebuild_clicked:
             rebuild_index_parallel_execute(app_state, clear_cache)
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.markdown("#### 🌲 Rebuild Document Tree")
+            st.markdown("""
+            Document trees enable **hierarchical retrieval** - fetching complete sections with their subsections.
+            Use this button to rebuild trees without re-indexing.
+            """)
+
+        with col2:
+            if st.button(
+                "🌲 Rebuild Document Tree",
+                help="Fast rebuild of hierarchical structure from existing cache without re-indexing"
+            ):
+                rebuild_trees_only(app_state)
 
         st.divider()
         
@@ -2251,13 +2448,29 @@ def _execute_bulk_upload(
         st.write("### 🔨 Building index...")
         rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
-    # Clear state
-    st.session_state.excluded_files = set()
-    st.session_state.upload_widget_key += 1
-    LOGGER.info("Cleared file uploader after successful processing")
-    
-    # Force rerun to show fresh uploader
-    st.rerun()
+    st.write("---")
+    st.write("### 🌲 Updating document trees...")
+
+    try:
+        # Call the same function the "Rebuild Trees" button uses
+        # This takes ~5 seconds and updates trees automatically
+        rebuild_trees_only(app_state)
+        LOGGER.info("✅ Document trees automatically rebuilt after bulk upload")
+        
+    except Exception as exc:
+        # Don't fail the entire upload if tree building fails
+        LOGGER.warning("⚠️ Tree rebuild failed after bulk upload: %s", exc)
+        st.warning(f"⚠️ Tree rebuild failed: {exc}")
+        st.info("💡 You can manually rebuild trees using the button in Admin panel")
+
+
+        # Clear state
+        st.session_state.excluded_files = set()
+        st.session_state.upload_widget_key += 1
+        LOGGER.info("Cleared file uploader after successful processing")
+        
+        # Force rerun to show fresh uploader
+        st.rerun()
 
 
 # ==============================================================================
@@ -2464,7 +2677,7 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                         with col1:
                             st.markdown(f"📄 {display_title}")
                         with col2:
-                            if st.button("✏️", key=f"edit_{source}", use_container_width=True, help="Edit metadata"):
+                            if st.button("✏️", key=f"edit_{unique_key}", use_container_width=True, help="Edit metadata"):
                                 st.session_state.editing_doc = source
                                 
                                 # Load current values
