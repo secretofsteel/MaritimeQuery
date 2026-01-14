@@ -13,7 +13,7 @@ CHUNK_OVERLAP = 200
 # Fuzzy matching threshold for finding section boundaries in raw text (0-1 scale)
 # Lower values = more lenient matching, higher values = stricter matching
 # Recommended range: 0.80-0.90 for maritime documents with formatting variations
-PYTHON_SLICING_FUZZY_THRESHOLD = 0.80
+PYTHON_SLICING_FUZZY_THRESHOLD = 0.65
 
 # Debug mode toggle (can be controlled via environment variable or admin UI)
 DEBUG_RAG = os.getenv("DEBUG_RAG", "false").lower() == "true"

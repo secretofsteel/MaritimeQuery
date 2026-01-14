@@ -580,8 +580,12 @@ def build_document_tree(meta: Dict[str, Any], doc_id: str) -> Dict[str, Any]:
     for i, section in enumerate(parsed_sections):
         section_id = section["section_id"]
 
-        # Skip non-numeric section IDs (can't determine hierarchy)
-        if '.' not in section_id and not section_id.replace('.', '').isdigit():
+        # Numeric IDs are like "3", "3.1", "3.1.2" etc.
+        is_numeric = bool(re.match(r'^[\d\.]+$', section_id))
+        
+        if not is_numeric:
+            # Non-numeric sections (like "Risk Management", "APPENDIX III") 
+            # stay at root level with no parent
             continue
 
         # Find parent: e.g., for "3.1.2", parent is "3.1"
