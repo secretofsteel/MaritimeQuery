@@ -6,7 +6,7 @@ import datetime
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Set
+from typing import Any, Dict, List, Tuple, Set, Optional
 import html
 from markdown import markdown as md
 import streamlit as st
@@ -28,9 +28,287 @@ from .state import AppState
 from .logger import LOGGER
 from .session_uploads import MAX_UPLOADS_PER_SESSION
 from .processing_status import ProcessingReport, DocumentProcessingStatus, StageStatus
+from app.document_inspector_helpers import (
+    load_cached_text,
+    load_document_tree,
+    load_extraction_data,
+    format_tree_visually,
+    identify_problem_documents,
+    get_document_metrics,
+)
 
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
+
+def render_document_inspector(app_state):
+    """
+    Render the Document Inspector section in admin panel.
+    
+    """
+    
+    if not app_state.nodes:
+        st.info("No documents indexed. Build or sync the library first.")
+        return
+    
+    st.markdown("""
+    Inspect document processing results, view extracted text, document trees, 
+    and identify potential issues.
+    """)
+    
+    # Get all unique sources
+    sources = sorted(set(node.metadata.get("source", "") for node in app_state.nodes if node.metadata.get("source")))
+    
+    if not sources:
+        st.warning("No source documents found in index.")
+        return
+    
+    st.markdown(f"**{len(sources)} documents** indexed")
+    
+    # ===== BULK ANALYSIS =====
+    st.markdown("---")
+    st.markdown("### 🔍 Bulk Analysis")
+    
+    if st.button("Identify Problem Documents", type="primary"):
+        with st.spinner("Scanning documents..."):
+            from app.document_inspector_helpers import identify_problem_documents
+            problems = identify_problem_documents(app_state)
+        
+        if problems:
+            st.error(f"Found {len(problems)} document(s) with issues:")
+            
+            for source, issues in problems:
+                with st.expander(f"⚠️ {source}", expanded=False):
+                    for issue in issues:
+                        st.markdown(f"- {issue}")
+        else:
+            st.success("✅ All documents look good!")
+    
+    # ===== DOCUMENT LIST =====
+    st.markdown("---")
+    st.markdown("### 📋 Document List")
+    
+    # Document selector
+    selected_doc = st.selectbox(
+        "Select a document to inspect:",
+        options=sources,
+        index=0,
+        key="doc_inspector_selector"
+    )
+    
+    if not selected_doc:
+        return
+    
+    # Get metrics for selected document
+    from app.document_inspector_helpers import get_document_metrics
+    metrics = get_document_metrics(selected_doc, app_state)
+    
+    if not metrics:
+        st.error(f"Could not load metrics for: {selected_doc}")
+        return
+    
+    # Display metrics in columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Status", metrics.extraction_status)
+    
+    with col2:
+        st.metric("Chunks", metrics.num_chunks)
+    
+    with col3:
+        st.metric("Sections", metrics.num_sections)
+    
+    with col4:
+        coverage_display = f"{metrics.validation_coverage * 100:.1f}%"
+        st.metric("Coverage", coverage_display)
+    
+    # File info
+    size_kb = metrics.file_size_bytes / 1024
+    size_display = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+    
+    st.caption(f"📄 File size: {size_display} • Text: {metrics.text_length:,} chars")
+    
+    # ===== ACTION BUTTONS =====
+    st.markdown("---")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        view_text = st.button("👁️ View Text Extract", use_container_width=True)
+    
+    with col2:
+        view_tree = st.button("🌲 View Document Tree", use_container_width=True)
+    
+    with col3:
+        view_extraction = st.button("📊 View Extraction Data", use_container_width=True)
+    
+    # ===== VIEW TEXT EXTRACT =====
+    if view_text:
+        from app.document_inspector_helpers import load_cached_text
+        
+        with st.spinner("Loading cached text..."):
+            text = load_cached_text(selected_doc)
+        
+        if text:
+            st.markdown("#### 📄 Cached Text Extract")
+            st.caption(f"Length: {len(text):,} characters")
+            
+            # Show first 5000 chars
+            preview_length = 5000
+            preview_text = text[:preview_length]
+            
+            st.text_area(
+                "Content Preview (first 5,000 chars)",
+                value=preview_text,
+                height=400,
+                disabled=True,
+                key=f"text_preview_{selected_doc}"
+            )
+            
+            if len(text) > preview_length:
+                st.caption(f"... +{len(text) - preview_length:,} more characters")
+            
+            # Option to download full text
+            st.download_button(
+                label="💾 Download Full Text",
+                data=text,
+                file_name=f"{Path(selected_doc).stem}_extract.txt",
+                mime="text/plain"
+            )
+        else:
+            st.error("❌ No cached text found for this document.")
+    
+    # ===== VIEW DOCUMENT TREE =====
+    if view_tree:
+        from app.document_inspector_helpers import load_document_tree, format_tree_visually, calculate_section_token_sizes
+        
+        with st.spinner("Loading document tree..."):
+            doc_id = Path(selected_doc).stem
+            tree = load_document_tree(doc_id)
+        
+        if tree:
+            st.markdown("#### 🌲 Document Tree Structure")
+            
+            # Calculate section token sizes
+            section_tokens = calculate_section_token_sizes(tree, app_state.nodes)
+            
+            # Identify mega-sections
+            mega_sections = {sid: tokens for sid, tokens in section_tokens.items() if tokens > 15000}
+            
+            if mega_sections:
+                st.warning(f"⚠️ Found {len(mega_sections)} mega-section(s) (>15K tokens):")
+                for sid, tokens in mega_sections.items():
+                    st.markdown(f"- **{sid}**: {tokens:,} tokens")
+            
+            # Display formatted tree
+            formatted_tree = format_tree_visually(tree)
+            
+            # Use code block for better formatting (no markdown interpretation)
+            st.code(formatted_tree, language=None)
+            
+            # Option to download JSON
+            import json
+            tree_json = json.dumps(tree, indent=2, ensure_ascii=False)
+            
+            st.download_button(
+                label="💾 Download Tree JSON",
+                data=tree_json,
+                file_name=f"{doc_id}_tree.json",
+                mime="application/json"
+            )
+        else:
+            st.error("❌ No document tree found for this document.")
+    
+    # ===== VIEW EXTRACTION DATA =====
+    if view_extraction:
+        from app.document_inspector_helpers import load_extraction_data
+        
+        with st.spinner("Loading Gemini extraction data..."):
+            extraction = load_extraction_data(selected_doc)
+        
+        if extraction:
+            st.markdown("#### 📊 Gemini Extraction Data")
+            
+            # Show key metadata
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Metadata:**")
+                
+                # Check if corrections exist and prefer those
+                corrections = extraction.get('corrections', {})
+                
+                title = extraction.get('title', 'N/A')
+                doc_type = corrections.get('doc_type') or extraction.get('doc_type', 'N/A')
+                form_num = corrections.get('form_number') or extraction.get('form_number', 'N/A')
+                category = corrections.get('form_category_name') or extraction.get('category', 'N/A')
+                
+                st.markdown(f"- **Title:** {title}")
+                st.markdown(f"- **Type:** {doc_type}")
+                st.markdown(f"- **Form #:** {form_num}")
+                st.markdown(f"- **Category:** {category}")
+                
+                if corrections:
+                    st.info("ℹ️ Some fields have been corrected")
+            
+            with col2:
+                st.markdown("**Validation:**")
+                
+                validation = extraction.get('validation', {})
+                validation_error = extraction.get('validation_error')
+                
+                # Check if this is a form/checklist
+                corrections = extraction.get('corrections', {})
+                doc_type = corrections.get('doc_type') or extraction.get('doc_type', 'N/A')
+                is_form_or_checklist = doc_type.upper() in ("FORM", "CHECKLIST")
+                
+                if validation and isinstance(validation, dict):
+                    # Use ngram_coverage as primary metric (0-1 scale, convert to %)
+                    ngram_cov = validation.get('ngram_coverage', 0) * 100
+                    word_cov = validation.get('word_coverage', 0) * 100
+                    halluc_rate = validation.get('hallucination_rate', 0) * 100
+                    length_ratio = validation.get('length_ratio', 0)
+                    
+                    st.markdown(f"- **N-gram Coverage:** {ngram_cov:.1f}%")
+                    st.markdown(f"- **Word Coverage:** {word_cov:.1f}%")
+                    st.markdown(f"- **Hallucination Rate:** {halluc_rate:.2f}%")
+                    st.markdown(f"- **Length Ratio:** {length_ratio:.2f}")
+                    
+                    if is_form_or_checklist and ngram_cov < 85:
+                        st.info("ℹ️ Low coverage is normal for forms/checklists (empty fields discarded)")
+                    elif validation_error:
+                        st.warning(f"⚠️ {validation_error}")
+                else:
+                    st.markdown("- **Coverage:** N/A")
+                    st.markdown("- **Validation:** No data")
+            
+            # Show sections
+            sections = extraction.get('sections', [])
+            st.markdown(f"**Sections:** {len(sections)}")
+            
+            if sections:
+                with st.expander("View All Sections", expanded=False):
+                    for i, section in enumerate(sections, 1):
+                        section_name = section.get('name', 'Unnamed')
+                        content_len = len(section.get('content', ''))
+                        st.markdown(f"{i}. **{section_name}** ({content_len:,} chars)")
+            
+            # Debug: Show raw JSON structure
+            with st.expander("🔍 Debug: View Raw JSON", expanded=False):
+                st.json(extraction)
+            
+            # Option to download full extraction
+            import json
+            extraction_json = json.dumps(extraction, indent=2, ensure_ascii=False)
+            
+            st.download_button(
+                label="💾 Download Extraction JSON",
+                data=extraction_json,
+                file_name=f"{Path(selected_doc).stem}_extraction.json",
+                mime="application/json"
+            )
+        else:
+            st.error("❌ No Gemini extraction found for this document.")
 
 def rebuild_trees_only(app_state: AppState) -> None:
     """
@@ -2181,6 +2459,10 @@ def render_admin_panel(app_state: AppState) -> None:
     with st.expander("🔧 Form Schema Configuration", expanded=True):
         _render_form_schema_editor()
 
+    # === DOCUMENT INSPECTOR === (NEW - ADD THIS)
+    with st.expander("📋 Document Inspector", expanded=False):
+        render_document_inspector(app_state)
+
 
 # ==============================================================================
 # BULK UPLOAD
@@ -2463,7 +2745,7 @@ def _execute_bulk_upload(
         st.warning(f"⚠️ Tree rebuild failed: {exc}")
         st.info("💡 You can manually rebuild trees using the button in Admin panel")
 
-
+    
     # Clear state
     st.session_state.excluded_files = set()
     st.session_state.upload_widget_key += 1
