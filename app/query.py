@@ -794,7 +794,7 @@ def retrieve_hierarchical(
     section_refs: List[Tuple[str, str]] = []  # (doc_id, section_id)
     seen_sections = set()
 
-    for node_with_score in hybrid_results[:5]:  # Top 5 chunks to find sections
+    for node_with_score in hybrid_results[:15]:  # Top 5 chunks to find sections
         metadata = node_with_score.node.metadata
         source = metadata.get("source", "")
         section_id = metadata.get("section_id")
@@ -1390,15 +1390,27 @@ Keep it clean, compact, and human-readable – not JSON, not a list, just plain 
                     top_sections=HIERARCHICAL_MAX_SECTIONS
                 )
 
-                # Fallback: if insufficient context, use chunk-level
+                # Fallback: Check both chunk count AND token count for quality
                 total_text = "".join([n.node.text for n in nodes]) if nodes else ""
-                if not nodes or len(total_text) < HIERARCHICAL_MIN_CONTEXT_TOKENS:
-                    LOGGER.warning("Hierarchical retrieval insufficient (%d tokens), falling back to chunks",
-                                 len(total_text))
+                total_tokens = len(total_text.split()) if total_text else 0
+                chunk_count = len(nodes) if nodes else 0
+                
+                # Fall back if any quality indicator is too low
+                insufficient_chunks = chunk_count < 5
+                insufficient_tokens = total_tokens < HIERARCHICAL_MIN_CONTEXT_TOKENS
+                
+                if not nodes or insufficient_chunks or insufficient_tokens:
+                    LOGGER.warning(
+                        "Hierarchical retrieval insufficient (chunks: %d, tokens: %d), falling back to chunk-level",
+                        chunk_count, total_tokens
+                    )
                     retrieval_strategy = "chunk_level"
                     # nodes will be retrieved in chunk-level path below
                 else:
-                    LOGGER.info("✅ Hierarchical retrieval: %d chunks from complete sections", len(nodes))
+                    LOGGER.info(
+                        "✅ Hierarchical retrieval successful: %d chunks from complete sections (%d tokens)",
+                        chunk_count, total_tokens
+                    )
                     hierarchical_success = True
 
                     # Apply post-retrieval processing

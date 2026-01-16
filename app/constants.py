@@ -220,10 +220,10 @@ MAX_CONTEXT_TURNS = 6  # Hard reset after this many exchanges
 CONTEXT_HISTORY_WINDOW = 5  # Number of recent Q&A pairs to include in prompt
 
 # Hierarchical Retrieval Configuration
-HIERARCHICAL_MAX_SECTIONS = 2  # Maximum sections to retrieve per query
+HIERARCHICAL_MAX_SECTIONS = 10  # Maximum sections to retrieve per query
 HIERARCHICAL_MAX_DEPTH = 3  # Maximum recursion depth in section tree
-HIERARCHICAL_MIN_CONTEXT_TOKENS = 500  # Fallback to chunks if less than this
-HIERARCHICAL_MAX_CONTEXT_TOKENS = 8000  # Token budget per query
+HIERARCHICAL_MIN_CONTEXT_TOKENS = 2000  # Fallback to chunks if less than this
+HIERARCHICAL_MAX_CONTEXT_TOKENS = 50000  # Token budget per query
 
 __all__ = [
     "CHUNK_SIZE",
