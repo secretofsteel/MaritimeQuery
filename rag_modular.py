@@ -51,6 +51,28 @@ def main() -> None:
             else:
                 LOGGER.info("No cached index found")
     
+    # Data consistency check: warn if memory and DB are out of sync
+    if app_state.nodes:
+        try:
+            manager = app_state.ensure_manager()
+            memory_count = len(app_state.nodes)
+            db_count = manager.collection.count()
+            diff = abs(memory_count - db_count)
+            
+            if diff > 10:
+                LOGGER.warning(
+                    "Data inconsistency detected: Memory=%d chunks, DB=%d chunks, diff=%d",
+                    memory_count, db_count, diff
+                )
+                # Also log which is larger for debugging
+                if memory_count > db_count:
+                    LOGGER.warning("Memory has %d MORE chunks than DB (memory bloat)", diff)
+                else:
+                    LOGGER.warning("DB has %d MORE chunks than memory (orphaned chunks)", diff)
+        except Exception as exc:
+            # Don't fail startup if consistency check fails
+            LOGGER.warning("Failed to check data consistency: %s", exc)
+    
     # Check query parameter for mode
     read_only = st.query_params.get("read_only", "true").lower() == "true"
     
