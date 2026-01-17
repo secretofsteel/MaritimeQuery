@@ -40,6 +40,63 @@ from app.document_inspector_helpers import (
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
+
+def _sync_memory_to_db(app_state: AppState) -> None:
+    """
+    Rebuild app_state.nodes from ChromaDB (single source of truth).
+    
+    Use when memory is bloated but ChromaDB is correct.
+    """
+    from llama_index.core.schema import TextNode
+    import chromadb
+    from app.config import AppConfig
+    
+    config = AppConfig.get()
+    
+    with st.spinner("Rebuilding memory from ChromaDB..."):
+        # Get current counts
+        old_count = len(app_state.nodes)
+        
+        # Connect to ChromaDB
+        client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
+        collection = client.get_collection("maritime_docs")
+        
+        # Fetch all chunks
+        result = collection.get(
+            include=['documents', 'metadatas', 'embeddings']
+        )
+        
+        # Rebuild nodes
+        nodes = []
+        for i, chunk_id in enumerate(result['ids']):
+            node = TextNode(
+                id_=chunk_id,
+                text=result['documents'][i],
+                metadata=result['metadatas'][i],
+                embedding=result['embeddings'][i] if result['embeddings'] is not None else None
+            )
+            nodes.append(node)
+        
+        # Update app_state
+        app_state.nodes = nodes
+        app_state.invalidate_node_map_cache()
+        app_state.vector_retriever = None
+        app_state.bm25_retriever = None
+        app_state.ensure_retrievers()
+        
+        # Save to pickle cache
+        import pickle
+        with config.paths.nodes_cache_path.open("wb") as f:
+            pickle.dump(nodes, f)
+        
+        new_count = len(nodes)
+        removed = old_count - new_count
+        
+        st.success(f"✅ Synced memory to DB: {old_count} → {new_count} nodes (removed {removed} bloated)")
+        LOGGER.info(f"Synced memory to DB: removed {removed} bloated nodes")
+        
+        st.rerun()
+
 def render_document_inspector(app_state):
     """
     Render the Document Inspector section in admin panel.
@@ -2346,14 +2403,46 @@ def render_admin_panel(app_state: AppState) -> None:
         
         st.divider()
             
-        # Show quick stats
+        # Show quick stats with DB health check
         if app_state.nodes:
-            # FIX: Count total documents, not doc types
-            docs_by_type = app_state.documents_grouped_by_type()
-            num_docs = sum(len(titles) for titles in docs_by_type.values())
+            unique_sources = set(node.metadata.get("source") for node in app_state.nodes)
+            num_docs = len(unique_sources)
+            chunks_memory = len(app_state.nodes)
             
             st.metric("Documents", num_docs)
-            st.metric("Chunks", len(app_state.nodes))
+            st.metric("Chunks (memory)", chunks_memory)
+            
+            # Check ChromaDB health
+            try:
+                manager = app_state.ensure_manager()
+                chunks_db = manager.collection.count()
+                
+                if chunks_db > chunks_memory:
+                    # Database has orphaned chunks - show warning
+                    orphan_count = chunks_db - chunks_memory
+                    st.metric(
+                        "Chunks (DB)", 
+                        f"{chunks_db} ⚠️",
+                        delta=f"+{orphan_count} orphaned",
+                        delta_color="off",
+                        help="ChromaDB has more chunks than memory - orphaned chunks detected"
+                    )
+                elif chunks_db < chunks_memory:
+                    # This should never happen - something is very wrong
+                    st.metric(
+                        "Chunks (DB)", 
+                        f"{chunks_db} ❌",
+                        delta=f"-{chunks_memory - chunks_db} missing",
+                        delta_color="off",
+                        help="ChromaDB has fewer chunks than memory - please investigate!"
+                    )
+                else:
+                    # Perfect match - healthy state
+                    st.metric("Chunks (DB)", f"{chunks_db} ✓", help="Database is in sync with memory")
+            
+            except Exception as exc:
+                st.metric("Chunks (DB)", "Error", help=f"Failed to query ChromaDB: {exc}")
+                LOGGER.warning("Failed to query ChromaDB count: %s", exc)
         else:
             st.info("No library loaded")
     
@@ -2408,6 +2497,20 @@ def render_admin_panel(app_state: AppState) -> None:
                 help="Fast rebuild of hierarchical structure from existing cache without re-indexing"
             ):
                 rebuild_trees_only(app_state)
+        
+        st.divider()
+        
+        #Database Health section
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown("### 🔄 Database Health")
+            st.markdown("Rebuild memory from ChromaDB when memory is bloated.")
+        
+        with col2:
+            st.write("")
+            if st.button("🔄 Sync Memory to DB", use_container_width=True):
+                _sync_memory_to_db(app_state)
 
         st.divider()
         
@@ -2685,6 +2788,9 @@ def _execute_bulk_upload(
             manager = app_state.ensure_manager()
             manager.nodes = app_state.nodes
             sync_result, _ = manager.sync_library(app_state.index, force_retry_errors=False)
+            app_state.nodes = manager.nodes
+            app_state.invalidate_node_map_cache()
+            app_state.ensure_retrievers()
             st.success(f"✅ Removed {len(sync_result.deleted)} old entries from database")
         
         st.write("---")

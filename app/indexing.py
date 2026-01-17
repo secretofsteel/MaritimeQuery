@@ -509,7 +509,16 @@ def build_index_from_library_parallel(
     
     # Initialize ChromaDB
     chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
-    collection = chroma_client.get_or_create_collection("maritime_docs")
+
+    try:
+        # Delete old collection if it exists
+        chroma_client.delete_collection("maritime_docs")
+        LOGGER.info("Deleted old ChromaDB collection")
+    except ValueError:
+        # Collection doesn't exist - that's fine
+        LOGGER.info("No existing ChromaDB collection to delete")
+
+    collection = chroma_client.create_collection("maritime_docs")
     vector_store = ChromaVectorStore(chroma_collection=collection)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     

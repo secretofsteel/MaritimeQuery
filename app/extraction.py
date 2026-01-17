@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-
+from datetime import datetime, timezone
 from llama_index.core import Document
 from google.genai import types
 from rapidfuzz import fuzz
@@ -467,6 +467,8 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
     if not result.get("parse_error") and not result.get("extraction_error"):
         result = _validate_extraction(result, full_text, path)
     
+    result["processing_timestamp"] = datetime.now(timezone.utc).isoformat()
+
     return result
 
 
@@ -499,6 +501,7 @@ def to_documents_from_gemini(path: Path, meta: Dict[str, Any]) -> List[Document]
         "doc_type": meta.get("doc_type", "DOCUMENT"),
         "title": meta.get("title", path.stem),
         "topic": meta.get("normalized_topic") or meta.get("title", path.stem),
+        "processing_timestamp": meta.get("processing_timestamp"),
         "sections_found_by_gemini_str": ", ".join(
             [sec["name"] for sec in meta.get("sections", []) if isinstance(sec, dict) and "name" in sec]
         ),
