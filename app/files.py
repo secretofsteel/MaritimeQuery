@@ -595,6 +595,8 @@ def _describe_visual_with_gemini(image_bytes: bytes, context: str = "") -> Optio
             "You are reading a technical manual. Describe in detail this diagram, chart, image, or drawing "
             "Preserve all labels, units, measurements, conditions, table-like information, information flow if flowchart, and key visual relationships"
             "Be specific and technical. Use bullet points and tables if needed."
+            "IMPORTANT: If it is a page header or decorative graphic/image, say respond with 'Decorative image' and OCR any text in it,"
+            "EXAMPLE ONLY FOR HEADERS/DECORATIVE IMAGES: a circular letter by ABS, may have as  header image the ABS logo and a short sentence reading 'ABS CIRCULAR 1/2026', your reply should be 'Decorative image - ABS CIRCULAR 1/2026', nothing else."
         )
 
         if context:
