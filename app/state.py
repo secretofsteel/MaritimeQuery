@@ -22,44 +22,45 @@ from .logger import LOGGER
 from .sessions import SessionManager
 from .session_uploads import SessionUploadManager, SessionUploadChunk
 
-
-
-
 @dataclass
 class AppState:
+    # === Index state ===
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
     vector_retriever: Optional[VectorIndexRetriever] = None
     bm25_retriever: Optional[BM25Retriever] = None
+    manager: Optional[IncrementalIndexManager] = None
+    
+    # === Query history (legacy) ===
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
-    manager: Optional[IncrementalIndexManager] = None
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
-    # Session upload management
-    session_upload_manager: Optional[SessionUploadManager] = None
-    _session_upload_metadata_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
-
-    # REMOVED: _index_load_attempted (now in st.session_state)
     
-    # Context-aware conversation state
-    sticky_chunks: List[Any] = field(default_factory=list)  # Reused chunks for followups
-    context_turn_count: int = 0  # Track turns in current conversation thread
-    conversation_active: bool = False  # Is context mode enabled?
-    last_topic: Optional[str] = None  # Semantic topic from last query (for inheritance)
-    conversation_summary: str = ""  # Running summary instead of full history
-    last_doc_type_pref: Optional[str] = None  # Last detected doc type preference
-    last_scope: Optional[str] = None  # NEW: Last detected scope (company/regulatory/operational/safety/general)
+    # === Context-aware conversation state ===
+    sticky_chunks: List[Any] = field(default_factory=list)
+    context_turn_count: int = 0
+    conversation_active: bool = False
+    last_topic: Optional[str] = None
+    conversation_summary: str = ""
+    last_doc_type_pref: Optional[str] = None
+    last_scope: Optional[str] = None
+    
+    # === Session management ===
     session_manager: Optional[SessionManager] = None
     current_session_id: Optional[str] = None
     _session_messages_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    
+    # === Session uploads (per-session temporary files) ===
     session_upload_manager: Optional[SessionUploadManager] = None
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
-    _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
-    hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
+    
+    # === Hierarchical retrieval ===
+    _node_map_cache: Optional[Dict[str, Any]] = None
+    hierarchical_enabled: bool = False
 
     def ensure_index_loaded(self) -> bool:
         """
