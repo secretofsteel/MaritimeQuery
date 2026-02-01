@@ -812,6 +812,13 @@ def retrieve_hierarchical(
             section_refs.append(key)
             seen_sections.add(key)
 
+        doc_id = Path(source).stem
+        key = (doc_id, section_id)
+
+        if key not in seen_sections:
+            section_refs.append(key)
+            seen_sections.add(key)
+
     if not section_refs:
         LOGGER.warning("No section_ids found in top chunks, falling back to chunk-level")
         return hybrid_results

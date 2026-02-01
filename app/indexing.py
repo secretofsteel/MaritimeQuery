@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import pickle
 import sys
 import time
 from dataclasses import dataclass
@@ -31,6 +30,8 @@ from .processing_status import (
     StageStatus,
     save_processing_report,
 )
+from .nodes import NodeRepository, bulk_insert_nodes
+from .database import init_db, rebuild_fts_index
 
 
 def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
@@ -83,20 +84,55 @@ def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = Tr
     return nodes
 
 
-def cache_nodes(nodes: List[Document], documents_count: int, cache_path: Path, info_path: Path) -> None:
-    """Persist chunked nodes and audit metadata."""
+def cache_nodes(
+    nodes: List[Document], 
+    documents_count: int, 
+    cache_path: Path, 
+    info_path: Path,
+    tenant_id: str = "shared"
+) -> None:
+    """
+    Save nodes to SQLite database (replaces pickle storage).
+    
+    Also saves cache info JSON for compatibility with existing code.
+    
+    Args:
+        nodes: List of TextNode/Document objects to save
+        documents_count: Number of source documents
+        cache_path: Legacy path (ignored, kept for signature compatibility)
+        info_path: Path for cache info JSON
+        tenant_id: Tenant identifier for multi-tenancy
+    """
+    from .nodes import bulk_insert_nodes
+    from .database import init_db, rebuild_fts_index
+    
+    # Ensure database is initialized
+    init_db()
+    
+    # Clear existing nodes for this tenant and insert new ones
+    repo = NodeRepository(tenant_id=tenant_id)
+    repo.clear_all()
+    
+    # Bulk insert for performance
+    inserted = bulk_insert_nodes(nodes, tenant_id=tenant_id)
+    
+    # Rebuild FTS index after bulk insert
+    rebuild_fts_index()
+    
+    # Save cache info (for compatibility and debugging)
     cache_info = {
         "timestamp": datetime.now().isoformat(),
         "num_nodes": len(nodes),
         "num_documents": documents_count,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
+        "storage": "sqlite",  # Flag that we're using SQLite now
+        "tenant_id": tenant_id,
     }
-    with cache_path.open("wb") as file:
-        pickle.dump(nodes, file)
     with info_path.open("w") as file:
         json.dump(cache_info, file, indent=2)
-    LOGGER.info("Cached %s nodes", len(nodes))
+    
+    LOGGER.info("Saved %d nodes to SQLite (tenant=%s)", inserted, tenant_id)
 
 
 def save_document_trees(trees: List[Dict[str, Any]], trees_path: Path) -> None:
@@ -265,6 +301,7 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 def build_index_from_library_parallel(
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
     clear_gemini_cache: bool = False,
+    tenant_id: str = "shared",
 ) -> Tuple[List[Document], VectorStoreIndex, ProcessingReport]:
     """Process the full document library with parallel extraction and embedding generation.
     
@@ -466,11 +503,14 @@ def build_index_from_library_parallel(
     # Track chunks per file
     chunks_per_file: Dict[str, int] = {}
     for node in nodes:
+        node.metadata["tenant_id"] = tenant_id
         source = node.metadata.get("source", "")
         if source:
             filename = Path(source).name
             chunks_per_file[filename] = chunks_per_file.get(filename, 0) + 1
-    
+
+    LOGGER.info("Added tenant_id='%s' to %d nodes", tenant_id, len(nodes))
+
     # Update chunk counts in statuses
     for filename, count in chunks_per_file.items():
         if filename in file_statuses:
@@ -496,7 +536,14 @@ def build_index_from_library_parallel(
     LOGGER.info("Attached embeddings to %d nodes", len(nodes))
     
     # Cache nodes WITH embeddings attached (so they're available on reload)
-    cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
+    #cache_nodes(nodes, len(all_documents), paths.nodes_cache_path, paths.cache_info_path)
+    cache_nodes(
+    nodes, 
+    len(all_documents), 
+    paths.nodes_cache_path,  # Kept for signature, not used
+    paths.cache_info_path,
+    tenant_id=tenant_id
+    )
     LOGGER.info("Cached nodes with embeddings")
     
     # Mark all files with chunks as having successful embedding
@@ -628,22 +675,45 @@ def build_index_from_library_parallel(
 
 
 def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[VectorStoreIndex]]:
-    """Load cached nodes and rehydrate the index if possible."""
+    """
+    Connect to ChromaDB index. 
+    
+    Note: With FTS5, we don't load nodes into memory here.
+    Nodes are queried directly from SQLite by the FTS5 retriever.
+    
+    Returns:
+        Tuple of (empty nodes list, VectorStoreIndex) or (None, None) if no data
+    """
+    from .database import get_node_count
+    
     config = AppConfig.get()
     paths = config.paths
-    if paths.nodes_cache_path.exists() and paths.chroma_path.exists():
-        LOGGER.info("Detected cached nodes and ChromaDB.")
-        with paths.nodes_cache_path.open("rb") as file:
-            cached_nodes: List[Document] = pickle.load(file)
-        chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
-        collection = chroma_client.get_or_create_collection("maritime_docs")
-        vector_store = ChromaVectorStore(chroma_collection=collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
-        LOGGER.info("Loaded %s cached nodes and existing Chroma collection.", len(cached_nodes))
-        return cached_nodes, index
-    LOGGER.info("No existing cache found.")
-    return None, None
+    
+    # Check if we have ANY nodes in SQLite (no tenant filter for existence check)
+    node_count = get_node_count(None)
+    
+    if node_count == 0:
+        LOGGER.info("No nodes found in SQLite")
+        return None, None
+    
+    # Check ChromaDB exists
+    if not paths.chroma_path.exists():
+        LOGGER.info("ChromaDB path doesn't exist")
+        return None, None
+    
+    LOGGER.info("Found %d nodes in SQLite, connecting to ChromaDB", node_count)
+    
+    # Connect to ChromaDB
+    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
+    collection = chroma_client.get_or_create_collection("maritime_docs")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
+    
+    # Don't load nodes into memory - FTS5 queries SQLite directly
+    # Return empty list; code needing nodes calls ensure_nodes_loaded()
+    LOGGER.info("Connected to ChromaDB index")
+    return [], index
 
 
 @dataclass
@@ -660,14 +730,16 @@ class IncrementalIndexManager:
         self,
         docs_path: Path,
         gemini_cache_path: Path,
-        nodes_cache_path: Path,
+        nodes_cache_path: Path, # DEPRECATED: unused after Phase 3 (SQLite migration)
         cache_info_path: Path,
         chroma_path: Path,
+        tenant_id: str = "shared",
     ) -> None:
         self.docs_path = docs_path
         self.gemini_cache_path = gemini_cache_path
         self.nodes_cache_path = nodes_cache_path
         self.cache_info_path = cache_info_path
+        self.tenant_id = tenant_id
         self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
         self.collection = self.chroma_client.get_or_create_collection("maritime_docs")
         self.sync_cache_file = cache_info_path.parent / "sync_cache.json"
@@ -684,51 +756,98 @@ class IncrementalIndexManager:
         self.sync_cache_file.parent.mkdir(parents=True, exist_ok=True)
         self.sync_cache_file.write_text(json.dumps(self.sync_cache, indent=2))
 
-    def _save_nodes_pickle(self) -> None:
-        if self.nodes_cache_path:
-            with self.nodes_cache_path.open("wb") as file:
-                pickle.dump(self.nodes, file)
+    def _save_nodes_pickle(self, tenant_id: str = "shared") -> None:
+        """
+        Save current nodes to SQLite.
+        
+        Note: Method name kept for compatibility, but now saves to SQLite.
+        """
+        from .nodes import bulk_insert_nodes
+        from .database import rebuild_fts_index
+        
+        if not self.nodes:
+            LOGGER.warning("No nodes to save")
+            return
+        
+        # Get existing doc_ids to determine what to update
+        repo = NodeRepository(tenant_id=tenant_id)
+        
+        # Group nodes by doc_id for efficient upsert
+        nodes_by_doc = {}
+        for node in self.nodes:
+            doc_id = node.metadata.get("source", "unknown")
+            if doc_id not in nodes_by_doc:
+                nodes_by_doc[doc_id] = []
+            nodes_by_doc[doc_id].append(node)
+        
+        # Upsert nodes (this handles both new and existing)
+        inserted = bulk_insert_nodes(self.nodes, tenant_id=tenant_id)
+        
+        # Rebuild FTS index
+        rebuild_fts_index()
+        
+        # Update cache info
         cache_info = {
             "timestamp": datetime.now().isoformat(),
             "num_nodes": len(self.nodes),
             "chunk_size": CHUNK_SIZE,
             "chunk_overlap": CHUNK_OVERLAP,
             "last_sync": datetime.now().isoformat(),
+            "storage": "sqlite",
         }
         self.cache_info_path.write_text(json.dumps(cache_info, indent=2))
+        
+        LOGGER.info("Saved %d nodes to SQLite", inserted)
 
     def _get_files_hash(self, docs_path: Path) -> Dict[str, Dict[str, Any]]:
         return current_files_index(docs_path)
 
-    def _remove_documents(self, filenames: Set[str]) -> None:
+    def _remove_documents(self, filenames: Set[str], tenant_id: str = "shared") -> None:
         """
-        Remove documents from ChromaDB, in-memory nodes, and Gemini cache.
+        Remove documents from ChromaDB, SQLite, and Gemini cache.
         
-        FIX FOR ISSUE #2: Now properly removes entries from Gemini cache JSONL file.
+        Args:
+            filenames: Set of source filenames to remove
+            tenant_id: Tenant identifier
         """
+        if not filenames:
+            return
+        
+        LOGGER.info("Removing %d documents: %s", len(filenames), filenames)
+        
+        # 1. Remove from ChromaDB
         for filename in filenames:
-            # Remove from ChromaDB
-            results = self.collection.get(where={"source": filename})
-            if results.get("ids"):
-                LOGGER.info("Removing %s chunks for %s from ChromaDB", len(results["ids"]), filename)
-                self.collection.delete(ids=results["ids"])
-            
-            # Remove from in-memory nodes
-            self.nodes = [node for node in self.nodes if node.metadata.get("source") != filename]
-            
-            # FIX FOR ISSUE #2: Remove from Gemini cache (both dict and JSONL file)
-            if filename in self.gemini_cache:
-                del self.gemini_cache[filename]
-                LOGGER.info("Removed %s from Gemini cache", filename)
+            try:
+                # Get chunk IDs for this document
+                results = self.collection.get(
+                    where={"source": filename},
+                    include=[]
+                )
+                if results and results['ids']:
+                    self.collection.delete(ids=results['ids'])
+                    LOGGER.debug("Removed %d chunks from ChromaDB for %s", 
+                            len(results['ids']), filename)
+            except Exception as exc:
+                LOGGER.warning("Failed to remove %s from ChromaDB: %s", filename, exc)
         
-        if filenames:
-            # Save updated nodes pickle
-            self._save_nodes_pickle()
-            
-            # FIX FOR ISSUE #2: Rewrite JSONL file without deleted entries
-            if filenames:
-                write_jsonl(self.gemini_cache_path, self.gemini_cache.values())
-                LOGGER.info("Updated Gemini cache file (removed %d entries)", len(filenames))
+        # 2. Remove from SQLite
+        repo = NodeRepository(tenant_id=tenant_id)
+        for filename in filenames:
+            deleted = repo.delete_by_doc(filename)
+            LOGGER.debug("Removed %d nodes from SQLite for %s", deleted, filename)
+        
+        # 3. Remove from Gemini cache
+        if filename in self.gemini_cache:
+            del self.gemini_cache[filename]
+            LOGGER.info("Removed %s from Gemini cache", filename)
+        
+        # 4. Update in-memory nodes list (for compatibility during transition)
+        self.nodes = [
+            node for node in self.nodes 
+            if node.metadata.get("source") not in filenames
+        ]
+        
+        LOGGER.info("Removed documents: %s", filenames)
 
     def _add_or_update_documents(self, filenames: Set[str], index: Optional[VectorStoreIndex]) -> None:
         """Sequential version - kept for compatibility."""
@@ -764,6 +883,7 @@ class IncrementalIndexManager:
                     from llama_index.core import Settings as LlamaSettings
                     embed_model = LlamaSettings.embed_model
                     for node in new_nodes:
+                        node.metadata["tenant_id"] = self.tenant_id
                         if not getattr(node, 'embedding', None):
                             node.embedding = embed_model.get_text_embedding(node.get_content())
                     
@@ -1064,6 +1184,7 @@ class IncrementalIndexManager:
         # Track chunks per file
         chunks_per_file: Dict[str, int] = {}
         for node in new_nodes:
+            node.metadata["tenant_id"] = self.tenant_id
             source = node.metadata.get("source", "")
             if source:
                 filename = Path(source).name
