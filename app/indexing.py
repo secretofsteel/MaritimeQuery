@@ -33,6 +33,16 @@ from .processing_status import (
 from .nodes import NodeRepository, bulk_insert_nodes
 from .database import init_db, rebuild_fts_index
 
+def clear_all_nodes_for_rebuild() -> int:
+    """Clear ALL nodes from SQLite regardless of tenant."""
+    from .database import db_connection
+    
+    with db_connection() as conn:
+        cursor = conn.execute("DELETE FROM nodes")
+        deleted = cursor.rowcount
+    
+    LOGGER.warning("Cleared ALL %d nodes from SQLite for rebuild", deleted)
+    return deleted
 
 def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
     """
@@ -89,7 +99,8 @@ def cache_nodes(
     documents_count: int, 
     cache_path: Path, 
     info_path: Path,
-    tenant_id: str = "shared"
+    tenant_id: str = "shared",
+    skip_clear: bool = False
 ) -> None:
     """
     Save nodes to SQLite database (replaces pickle storage).
@@ -110,8 +121,9 @@ def cache_nodes(
     init_db()
     
     # Clear existing nodes for this tenant and insert new ones
-    repo = NodeRepository(tenant_id=tenant_id)
-    repo.clear_all()
+    if not skip_clear:
+        repo = NodeRepository(tenant_id=tenant_id)
+        repo.clear_all()
     
     # Bulk insert for performance
     inserted = bulk_insert_nodes(nodes, tenant_id=tenant_id)
@@ -325,13 +337,19 @@ def build_index_from_library_parallel(
 
     LOGGER.info("=== Starting Parallel Processing ===")
     
+    # Clear ALL nodes before rebuild (all tenants)
+    clear_all_nodes_for_rebuild()
+    
+    # Track tenant_id per file (read from Gemini cache)
+    file_tenant_map: Dict[str, str] = {}
+    
     # Create processing report
     files_index = current_files_index(paths.docs_path)
     report = ProcessingReport(
         timestamp=datetime.now().isoformat(),
         total_files=len(files_index),
     )
-    
+        
     # Track status for each file
     file_statuses: Dict[str, DocumentProcessingStatus] = {}
     for filename in files_index.keys():
@@ -370,6 +388,9 @@ def build_index_from_library_parallel(
         if not needs_extraction and cached and "gemini" in cached:
             meta = cached["gemini"]
             status.used_cache = True
+            # Track tenant from cache
+            file_tenant_map[filename] = cached.get("tenant_id", "shared")
+            #LOGGER.info("DEBUG: %s -> tenant_id from cache = %s", filename, file_tenant_map[filename])
             # Apply corrections if they exist
             if "corrections" in cached:
                 meta = apply_corrections_to_gemini_record(meta, cached["corrections"])
@@ -435,6 +456,11 @@ def build_index_from_library_parallel(
             status = file_statuses[filename]
             
             if result.record:
+                # Preserve existing tenant_id from cache (don't overwrite manual edits)
+                existing_tenant = "shared"
+                if filename in cached_records:
+                    existing_tenant = cached_records[filename].get("tenant_id", "shared")
+                
                 # Update cache
                 upsert_jsonl_record(
                     paths.gemini_json_cache,
@@ -443,9 +469,11 @@ def build_index_from_library_parallel(
                         "mtime": fingerprint["mtime"],
                         "size": fingerprint["size"],
                         "gemini": result.record,
+                        "tenant_id": existing_tenant,
                     },
                 )
-                
+                #LOGGER.info("DEBUG: %s -> preserving tenant_id = %s", filename, existing_tenant)   
+
                 # Update status based on extraction result
                 if "parse_error" in result.record or "extraction_error" in result.record:
                     error_msg = result.record.get("parse_error") or result.record.get("extraction_error")
@@ -474,10 +502,14 @@ def build_index_from_library_parallel(
                         else:
                             status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
         
+        # Track tenant for newly extracted files (default to shared)
+        for result in extraction_results.successful:
+            file_tenant_map[result.filename] = "shared"
+
         # Convert successful extractions to documents
         for result in extraction_results.successful:
-            # Only add if no parse/extraction errors
-            if "parse_error" not in result.record and "extraction_error" not in result.record:
+            # Only add if no parse/extraction errors and record exists
+            if result.record and "parse_error" not in result.record and "extraction_error" not in result.record:
                 doc_path = paths.docs_path / result.filename
                 documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
                 all_documents.extend(documents_from_extraction)
@@ -500,16 +532,17 @@ def build_index_from_library_parallel(
     nodes = chunk_documents(all_documents)
     LOGGER.info("Created %d chunks", len(nodes))
     
-    # Track chunks per file
+    # Track chunks per file and assign tenant_id
     chunks_per_file: Dict[str, int] = {}
     for node in nodes:
-        node.metadata["tenant_id"] = tenant_id
         source = node.metadata.get("source", "")
         if source:
             filename = Path(source).name
+            node.metadata["tenant_id"] = file_tenant_map.get(filename, "shared")
             chunks_per_file[filename] = chunks_per_file.get(filename, 0) + 1
-
-    LOGGER.info("Added tenant_id='%s' to %d nodes", tenant_id, len(nodes))
+        else:
+            node.metadata["tenant_id"] = "shared"
+    LOGGER.info("Assigned tenant_id to %d nodes from cache mapping", len(nodes))
 
     # Update chunk counts in statuses
     for filename, count in chunks_per_file.items():
@@ -542,7 +575,8 @@ def build_index_from_library_parallel(
     len(all_documents), 
     paths.nodes_cache_path,  # Kept for signature, not used
     paths.cache_info_path,
-    tenant_id=tenant_id
+    tenant_id="shared",
+    skip_clear=True
     )
     LOGGER.info("Cached nodes with embeddings")
     
@@ -558,11 +592,10 @@ def build_index_from_library_parallel(
     chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
 
     try:
-        # Delete old collection if it exists
         chroma_client.delete_collection("maritime_docs")
         LOGGER.info("Deleted old ChromaDB collection")
-    except ValueError:
-        # Collection doesn't exist - that's fine
+    except Exception:
+        # Collection doesn't exist or other issue - that's fine for fresh start
         LOGGER.info("No existing ChromaDB collection to delete")
 
     collection = chroma_client.create_collection("maritime_docs")
@@ -1117,6 +1150,7 @@ class IncrementalIndexManager:
                         "mtime": fingerprint.get("mtime", 0),
                         "size": fingerprint.get("size", 0),
                         "gemini": result.record,
+                        "tenant_id": self.tenant_id,
                     },
                 )
             

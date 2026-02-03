@@ -273,9 +273,12 @@ def calculate_section_token_sizes(tree: Dict[str, Any], nodes: List[Any]) -> Dic
     return section_tokens
 
 
-def identify_problem_documents(app_state) -> List[Tuple[str, List[str]]]:
+def identify_problem_documents(nodes: List) -> List[Tuple[str, List[str]]]:
     """
     Scan all documents and identify problems.
+    
+    Args:
+        nodes: List of document nodes to analyze
     
     Returns:
         List of (filename, [issue descriptions])
@@ -285,7 +288,7 @@ def identify_problem_documents(app_state) -> List[Tuple[str, List[str]]]:
     
     # Get all unique sources from nodes
     sources = set()
-    for node in app_state.nodes:
+    for node in nodes:
         source = node.metadata.get("source")
         if source:
             sources.add(source)
@@ -297,7 +300,7 @@ def identify_problem_documents(app_state) -> List[Tuple[str, List[str]]]:
         # Check 1: Load tree and check for mega-sections
         tree = load_document_tree(doc_id)
         if tree:
-            section_tokens = calculate_section_token_sizes(tree, app_state.nodes)
+            section_tokens = calculate_section_token_sizes(tree, nodes)
             mega_sections = {sid: tokens for sid, tokens in section_tokens.items() if tokens > 15000}
             
             if mega_sections:
@@ -343,13 +346,13 @@ def identify_problem_documents(app_state) -> List[Tuple[str, List[str]]]:
     return problems
 
 
-def get_document_metrics(source: str, app_state) -> Optional[DocumentMetrics]:
+def get_document_metrics(source: str, nodes: List) -> Optional[DocumentMetrics]:
     """
     Get comprehensive metrics for a document.
     
     Args:
         source: Source filename
-        app_state: AppState instance
+        nodes: List of document nodes
     
     Returns:
         DocumentMetrics or None
@@ -377,22 +380,19 @@ def get_document_metrics(source: str, app_state) -> Optional[DocumentMetrics]:
     extraction = load_extraction_data(source)
     has_extraction = extraction is not None
     
-    # Try to get validation coverage from multiple possible locations
+    # Try to get validation coverage
     validation_coverage = 0.0
     if extraction:
-        # Validation data is directly in the extraction (since we unwrapped it)
         validation = extraction.get("validation")
         if validation and isinstance(validation, dict):
-            # Use ngram_coverage as the primary metric (it's already 0-1 scale)
             ngram_cov = validation.get("ngram_coverage")
             if ngram_cov is not None:
                 validation_coverage = float(ngram_cov)
-            # Fallback to word_coverage if ngram not available
             elif validation.get("word_coverage") is not None:
                 validation_coverage = float(validation.get("word_coverage"))
     
-    # Count chunks from app_state
-    num_chunks = sum(1 for node in app_state.nodes if node.metadata.get("source") == source)
+    # Count chunks from nodes
+    num_chunks = sum(1 for node in nodes if node.metadata.get("source") == source)
     
     # Determine extraction status
     # Get doc_type to check if it's a form/checklist

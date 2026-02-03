@@ -104,6 +104,48 @@ def save_correction(filename: str, field: str, value: Any) -> bool:
         return False
 
 
+def save_tenant_id(filename: str, tenant_id: str) -> bool:
+    """
+    Save tenant_id to the gemini_json_cache at record top level.
+    
+    Unlike corrections (which override Gemini fields), tenant_id is a 
+    file assignment property stored at the record's top level.
+    
+    Args:
+        filename: Source filename
+        tenant_id: Tenant identifier
+    
+    Returns:
+        True if successful
+    """
+    config = AppConfig.get()
+    cache_path = config.paths.gemini_json_cache
+    
+    if not cache_path.exists():
+        LOGGER.error("Gemini cache not found: %s", cache_path)
+        return False
+    
+    try:
+        records = load_jsonl(cache_path)
+        
+        if filename not in records:
+            LOGGER.error("File not found in cache: %s", filename)
+            return False
+        
+        record = records[filename]
+        record["tenant_id"] = tenant_id
+        
+        LOGGER.info("✏️  Set tenant_id for %s = %s", filename, tenant_id)
+        
+        ordered_records = [records[key] for key in sorted(records.keys())]
+        write_jsonl(cache_path, ordered_records)
+        
+        return True
+        
+    except Exception as exc:
+        LOGGER.error("Failed to save tenant_id: %s", exc)
+        return False
+
 def update_metadata_everywhere(
     filename: str,
     corrections: Dict[str, Any],

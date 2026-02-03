@@ -118,20 +118,29 @@ def _sync_memory_to_db(app_state: AppState) -> None:
 def render_document_inspector(app_state):
     """
     Render the Document Inspector section in admin panel.
-    
     """
-    app_state.ensure_nodes_loaded()
-    if not app_state.nodes:
-        st.info("No documents indexed. Build or sync the library first.")
+    # Get tenant to manage
+    manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+    
+    # Load nodes for managed tenant ONLY
+    from .nodes import NodeRepository
+    
+    repo = NodeRepository(tenant_id=manage_tenant)
+    managed_nodes = repo.get_all_nodes()
+    
+    if not managed_nodes:
+        st.info(f"No documents indexed for **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**.")
         return
+    
+    st.caption(f"Inspecting: **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**")
     
     st.markdown("""
     Inspect document processing results, view extracted text, document trees, 
     and identify potential issues.
     """)
     
-    # Get all unique sources
-    sources = sorted(set(node.metadata.get("source", "") for node in app_state.nodes if node.metadata.get("source")))
+    # Get all unique sources from managed_nodes
+    sources = sorted(set(node.metadata.get("source", "") for node in managed_nodes if node.metadata.get("source")))
     
     if not sources:
         st.warning("No source documents found in index.")
@@ -146,7 +155,7 @@ def render_document_inspector(app_state):
     if st.button("Identify Problem Documents", type="primary"):
         with st.spinner("Scanning documents..."):
             from app.document_inspector_helpers import identify_problem_documents
-            problems = identify_problem_documents(app_state)
+            problems = identify_problem_documents(managed_nodes)
         
         if problems:
             st.error(f"Found {len(problems)} document(s) with issues:")
@@ -175,7 +184,7 @@ def render_document_inspector(app_state):
     
     # Get metrics for selected document
     from app.document_inspector_helpers import get_document_metrics
-    metrics = get_document_metrics(selected_doc, app_state)
+    metrics = get_document_metrics(selected_doc, managed_nodes)
     
     if not metrics:
         st.error(f"Could not load metrics for: {selected_doc}")
@@ -317,11 +326,13 @@ def render_document_inspector(app_state):
                 doc_type = corrections.get('doc_type') or extraction.get('doc_type', 'N/A')
                 form_num = corrections.get('form_number') or extraction.get('form_number', 'N/A')
                 category = corrections.get('form_category_name') or extraction.get('category', 'N/A')
+                ownership = corrections.get('tenant_id') or extraction.get('tenant_id', 'N/A')
                 
                 st.markdown(f"- **Title:** {title}")
                 st.markdown(f"- **Type:** {doc_type}")
                 st.markdown(f"- **Form #:** {form_num}")
                 st.markdown(f"- **Category:** {category}")
+                st.markdown(f"- **Ownership:** {ownership}")
                 
                 if corrections:
                     st.info("ℹ️ Some fields have been corrected")
@@ -1035,7 +1046,7 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
     
     phase1_container = st.container()
     phase2_container = st.container()
-    
+
     with phase1_container:
         st.write("**Phase 1:** Extracting documents (Gemini)")
         phase1_progress = st.progress(0.0)
@@ -1083,6 +1094,7 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         app_state.invalidate_node_map_cache()  # Clear stale cache
         app_state.vector_retriever = None
         app_state.bm25_retriever = None
+        app_state.manager = None
         app_state.ensure_retrievers()
         app_state.ensure_manager().nodes = nodes
         
@@ -1788,6 +1800,7 @@ def render_app(
             # NEW: Context-aware conversation toggle
             use_context = st.checkbox(
                 "💬 Context-aware chat",
+                value=True,
                 key="use_context",
                 help=f"Remember previous exchanges (resets after {MAX_CONTEXT_TURNS} turns)"
             )
@@ -2398,8 +2411,8 @@ def render_admin_panel(app_state: AppState) -> None:
                 manager = app_state.ensure_manager()
                 total_db = manager.collection.count()
                 st.caption(f"📊 {total_db} total in DB")
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.warning("Failed to get DB count: %s", exc)
         else:
             st.info("No documents for this tenant")
             
@@ -2820,18 +2833,11 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     # Get tenant to manage
     manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
     
-    # Load nodes for managed tenant
+    # Load nodes for managed tenant ONLY (shared has its own entry in dropdown)
     from .nodes import NodeRepository
     
     repo = NodeRepository(tenant_id=manage_tenant)
-    tenant_nodes = repo.get_all_nodes()
-    
-    if manage_tenant != "shared":
-        repo_shared = NodeRepository(tenant_id="shared")
-        shared_nodes = repo_shared.get_all_nodes()
-        managed_nodes = tenant_nodes + shared_nodes
-    else:
-        managed_nodes = tenant_nodes
+    managed_nodes = repo.get_all_nodes()
     
     st.markdown("### 📄 Documents on File")
     st.caption(f"Viewing: **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**")
@@ -2847,7 +2853,7 @@ def _render_documents_with_delete(app_state: AppState) -> None:
         st.session_state.batch_selected_docs = set()
         st.session_state["reset_batch_mode_flag"] = False
     
-    # Initialize session states (EXISTING CODE)
+    # Initialize session states
     if "editing_doc" not in st.session_state:
         st.session_state.editing_doc = None
     
@@ -2857,7 +2863,6 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     if "delete_confirmations" not in st.session_state:
         st.session_state.delete_confirmations = set()
     
-    # NEW: Initialize batch mode states
     if "batch_mode_enabled" not in st.session_state:
         st.session_state.batch_mode_enabled = False
     if "batch_selected_docs" not in st.session_state:
@@ -2867,13 +2872,27 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     if "batch_edit_expanded" not in st.session_state:
         st.session_state.batch_edit_expanded = False
     
-    # Clear delete confirmations after successful deletion (EXISTING CODE)
     if st.session_state.get("deletion_completed", False):
         st.session_state.delete_confirmations = set()
         st.session_state.deletion_completed = False
     
-    # Get documents grouped by type 
-    docs_by_type = app_state.documents_grouped_by_type()
+    # Group managed_nodes by doc_type (not app_state.nodes!)
+    from collections import defaultdict
+    docs_by_type: Dict[str, set] = defaultdict(set)
+    for node in managed_nodes:
+        metadata = node.metadata
+        doc_type = str(metadata.get("doc_type", "UNCATEGORIZED")).upper()
+        title = metadata.get("title") or metadata.get("source") or "Untitled"
+        if doc_type == "FORM":
+            form_number = metadata.get("form_number")
+            if form_number:
+                form_normalized = form_number.replace(" ", "").upper()
+                title_start = title.split("-")[0].strip().replace(" ", "").upper()
+                if not title_start.startswith(form_normalized):
+                    title = f"{form_number} - {title}"
+        docs_by_type[doc_type].add(title)
+    docs_by_type = {k: sorted(list(v)) for k, v in docs_by_type.items()}
+    
     total_docs = sum(len(titles) for titles in docs_by_type.values())
     st.caption(f"📚 **{total_docs} documents** in library")
     
@@ -3046,7 +3065,8 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                                 st.session_state.editing_doc = source
                                 
                                 # Load current values
-                                form_categories = load_form_categories()
+                                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                                form_categories = load_form_categories(manage_tenant)
                                 category_value = metadata.get("form_category_name", "")
                                 
                                 # Map code to full name if it's a shortcode
@@ -3090,7 +3110,7 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                     st.rerun()
         
         with col2:
-            if st.button(f"✏️ Edit Doc Type ({num_selected})", use_container_width=True):
+            if st.button(f"✏️ Edit Type/Ownership ({num_selected})", use_container_width=True):
                 st.session_state.batch_edit_expanded = not st.session_state.batch_edit_expanded
                 st.rerun()
         
@@ -3188,7 +3208,8 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
         )
         pending["form_number"] = new_form_number
         
-        form_categories = load_form_categories()
+        manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+        form_categories = load_form_categories(manage_tenant)
         category_options = [""] + sorted(form_categories.values())
         
         current_category = pending.get("form_category_name", "")
@@ -3231,7 +3252,8 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                 selected_category = pending["form_category_name"]
                 old_category = metadata.get("form_category_name", "")
                 
-                form_categories = load_form_categories()
+                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                form_categories = load_form_categories(manage_tenant)
                 reverse_map = {v: k for k, v in form_categories.items()}
                 
                 category_code = reverse_map.get(selected_category, selected_category)
@@ -3257,6 +3279,8 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                     
                     with db_connection() as conn:
                         if "tenant_id" in corrections:
+                            from .metadata_updates import save_tenant_id
+                            save_tenant_id(source, corrections["tenant_id"])
                             conn.execute(
                                 "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
                                 (corrections["tenant_id"], source)
@@ -3324,11 +3348,17 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
             success_count = 0
             
             with st.spinner(f"Updating {len(filenames)} documents..."):
+                # Load nodes for managed tenant
+                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                from .nodes import NodeRepository
+                repo = NodeRepository(tenant_id=manage_tenant)
+                managed_nodes = repo.get_all_nodes()
+                
                 for filename in filenames:
                     try:
                         source = None
                         metadata = None
-                        for node in app_state.nodes:
+                        for node in managed_nodes:
                             node_source = node.metadata.get("source", "")
                             if Path(node_source).name == filename:
                                 source = node_source
@@ -3370,6 +3400,8 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                                             "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
                                             (corrections["tenant_id"], source)
                                         )
+                                        from .metadata_updates import save_tenant_id
+                                        save_tenant_id(source, corrections["tenant_id"])
                                     
                                     # Update metadata JSON in SQLite too
                                     for node in app_state.nodes:
@@ -3576,18 +3608,27 @@ def _delete_entire_library(app_state: AppState) -> None:
 def _render_form_schema_editor() -> None:
     """Form schema configuration editor with polished UX."""
     
-    st.markdown("### 🔧 Form Schema Configuration")
-    st.markdown("Edit form codes. Changes saved to `config/form_categories.json`.")
+    # Get tenant to manage
+    manage_tenant = st.session_state.get("manage_tenant", "shared")
+    tenant_display = _get_tenant_display_names().get(manage_tenant, manage_tenant)
     
-    # Always load fresh from JSON
-    current_categories = load_form_categories()
+    st.markdown("### 🔧 Form Schema Configuration")
+    st.caption(f"Editing codes for: **{tenant_display}**")
+    
+    if manage_tenant == "shared":
+        st.info("📋 Shared codes are used as defaults for all tenants.")
+    else:
+        st.info(f"📋 These codes are specific to **{tenant_display}**. Falls back to shared if empty.")
+    
+    # Always load fresh from JSON for managed tenant
+    current_categories = load_form_categories(manage_tenant)
     
     # Initialize state
     if "form_schema_editor" not in st.session_state:
         st.session_state.form_schema_editor = {
             "confirm_delete": set(),
             "last_saved": current_categories.copy(),
-            "input_counter": 0,  # FIX: Counter for unique input keys
+            "input_counter": 0,
         }
     
     editor_state = st.session_state.form_schema_editor
@@ -3596,7 +3637,7 @@ def _render_form_schema_editor() -> None:
     st.caption(f"**{len(categories)} codes**")
     st.markdown("---")
     
-    # Render existing categories (code-based keys)
+    # Render existing categories
     for code, description in sorted(categories.items()):
         col1, col2, col3 = st.columns([1.5, 5, 1])
         
@@ -3623,20 +3664,16 @@ def _render_form_schema_editor() -> None:
             
             if is_confirming:
                 if st.button("✅", key=f"confirm_del_{code}", use_container_width=True, type="primary"):
-                    # Delete
                     if code in categories:
                         del categories[code]
-                        LOGGER.info(f"Deleted form code: {code}")
+                        LOGGER.info(f"Deleted form code: {code} (tenant={manage_tenant})")
                     
-                    # Save immediately
-                    if save_form_categories(categories):
+                    if save_form_categories(categories, manage_tenant):
                         editor_state["last_saved"] = categories.copy()
                         LOGGER.info("Saved after deletion")
                     
-                    # Clear confirmation
                     editor_state["confirm_delete"].discard(code)
                     
-                    # Clean up widget state
                     for key in [f"display_code_{code}", f"display_desc_{code}", 
                                f"delete_btn_{code}", f"confirm_del_{code}"]:
                         if key in st.session_state:
@@ -3653,7 +3690,6 @@ def _render_form_schema_editor() -> None:
     # Add new code section
     st.markdown("#### ➕ Add New Code")
     
-    # FIX: Use counter in key to force new inputs after add
     input_key_suffix = editor_state["input_counter"]
     
     col1, col2, col3 = st.columns([1.5, 5, 1])
@@ -3664,7 +3700,7 @@ def _render_form_schema_editor() -> None:
             placeholder="e.g., X", 
             max_chars=10, 
             label_visibility="collapsed",
-            key=f"new_code_input_{input_key_suffix}"  # FIX: Unique key each time
+            key=f"new_code_input_{input_key_suffix}"
         )
     
     with col2:
@@ -3672,7 +3708,7 @@ def _render_form_schema_editor() -> None:
             "Description", 
             placeholder="e.g., Example", 
             label_visibility="collapsed",
-            key=f"new_desc_input_{input_key_suffix}"  # FIX: Unique key each time
+            key=f"new_desc_input_{input_key_suffix}"
         )
     
     with col3:
@@ -3687,23 +3723,18 @@ def _render_form_schema_editor() -> None:
         elif new_code_clean in categories:
             st.error(f"⚠️ `{new_code_clean}` exists!")
         else:
-            # Add to dict
             categories[new_code_clean] = new_desc_clean
-            LOGGER.info(f"Added form code: {new_code_clean}")
+            LOGGER.info(f"Added form code: {new_code_clean} (tenant={manage_tenant})")
             
-            # Save immediately
-            if save_form_categories(categories):
+            if save_form_categories(categories, manage_tenant):
                 editor_state["last_saved"] = categories.copy()
                 LOGGER.info("Saved after addition")
             
-            # FIX: Increment counter to create fresh inputs on next render
             editor_state["input_counter"] += 1
-            
             st.rerun()
     
     st.markdown("---")
     
-    # FIX: Replaced Save button with Clear All button
     col1, col2 = st.columns([3, 1])
     
     with col1:
@@ -3714,21 +3745,18 @@ def _render_form_schema_editor() -> None:
             st.session_state["confirm_clear_all"] = True
             st.rerun()
     
-    # Clear All confirmation
     if st.session_state.get("confirm_clear_all", False):
         st.warning("⚠️ **Delete ALL form codes?** This will clear the entire schema!")
         col1, col2 = st.columns(2)
         
         with col1:
             if st.button("✅ Yes, Clear All", type="primary", use_container_width=True, key="confirm_clear_all_yes"):
-                # Clear all codes
                 empty_schema = {}
-                if save_form_categories(empty_schema):
+                if save_form_categories(empty_schema, manage_tenant):
                     editor_state["last_saved"] = {}
                     st.success("✅ All codes cleared!")
-                    LOGGER.info("Cleared all form codes")
+                    LOGGER.info(f"Cleared all form codes (tenant={manage_tenant})")
                 
-                # Clear confirmation
                 del st.session_state["confirm_clear_all"]
                 st.rerun()
         

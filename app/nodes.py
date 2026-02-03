@@ -389,13 +389,15 @@ def bulk_insert_nodes(
     for node in nodes:
         doc_id = node.metadata.get("source", "unknown")
         section_id = node.metadata.get("section_id")
+        # Use tenant_id from node metadata (set during indexing), fallback to parameter
+        node_tenant_id = node.metadata.get("tenant_id", tenant_id)
         rows.append((
             node.node_id,
             doc_id,
             node.text,
             json.dumps(node.metadata),
             section_id,
-            tenant_id,
+            node_tenant_id,
             now,
             now,
         ))
