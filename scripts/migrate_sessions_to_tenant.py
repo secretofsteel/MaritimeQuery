@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """
-Migration Script: Transfer Single-Tenant Sessions to Multi-Tenant
+Migration Script: File-Based Sessions to SQLite Multi-Tenant
 
-This script migrates existing sessions from a single-tenant deployment
-to a specific tenant in the new multi-tenant system.
+Migrates sessions from the old file-based storage (data/cache/sessions/)
+to the new SQLite-based multi-tenant system.
+
+Old structure:
+    data/cache/sessions/
+    ├── {session_uuid}/
+    │   ├── {message_uuid}.jsonl
+    │   └── ...
+    └── index.json
+
+New structure:
+    SQLite tables: sessions, messages
 
 Usage:
-    python migrate_sessions_to_tenant.py --target-tenant alpha_shipping
-    python migrate_sessions_to_tenant.py --target-tenant alpha_shipping --dry-run
-    python migrate_sessions_to_tenant.py --target-tenant alpha_shipping --source-tenant shared
-
-Arguments:
-    --target-tenant   The tenant_id to assign to migrated sessions (REQUIRED)
-    --source-tenant   Only migrate sessions with this tenant_id (default: migrate all)
-    --dry-run         Show what would be migrated without making changes
-    --db-path         Path to maritime.db (default: data/maritime.db)
+    python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping
+    python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping --dry-run
+    python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping --sessions-path data/cache/sessions
 """
 
 import argparse
+import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 
 def get_db_connection(db_path: Path):
@@ -30,136 +36,162 @@ def get_db_connection(db_path: Path):
     return conn
 
 
-def count_sessions(conn, tenant_id: str = None) -> int:
-    """Count sessions, optionally filtered by tenant."""
-    if tenant_id:
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
-            (tenant_id,)
-        )
-    else:
-        cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-    return cursor.fetchone()[0]
+def load_index_json(sessions_path: Path) -> Dict[str, Any]:
+    """Load the index.json file if it exists."""
+    index_path = sessions_path / "index.json"
+    if index_path.exists():
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Warning: Could not load index.json: {e}")
+    return {}
 
 
-def list_sessions_by_tenant(conn) -> dict:
-    """Get session counts grouped by tenant."""
-    cursor = conn.execute("""
-        SELECT tenant_id, COUNT(*) as count 
-        FROM sessions 
-        GROUP BY tenant_id 
-        ORDER BY tenant_id
-    """)
-    return {row["tenant_id"]: row["count"] for row in cursor.fetchall()}
-
-
-def migrate_sessions(
-    conn, 
-    target_tenant: str, 
-    source_tenant: str = None,
-    dry_run: bool = False
-) -> int:
-    """
-    Migrate sessions to target tenant.
+def load_session_messages(session_path: Path) -> List[Dict[str, Any]]:
+    """Load all messages from a session folder."""
+    messages = []
     
-    Args:
-        conn: Database connection
-        target_tenant: Tenant ID to assign
-        source_tenant: Only migrate from this tenant (None = all)
-        dry_run: If True, don't actually modify
+    for jsonl_file in session_path.glob("*.jsonl"):
+        try:
+            with open(jsonl_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            msg = json.loads(line)
+                            messages.append(msg)
+                        except json.JSONDecodeError:
+                            continue
+        except OSError as e:
+            print(f"  Warning: Could not read {jsonl_file}: {e}")
     
-    Returns:
-        Number of sessions migrated
-    """
-    if source_tenant:
-        # Migrate specific tenant
-        if dry_run:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
-                (source_tenant,)
-            )
-        else:
-            cursor = conn.execute(
-                "UPDATE sessions SET tenant_id = ? WHERE tenant_id = ?",
-                (target_tenant, source_tenant)
-            )
-    else:
-        # Migrate all sessions
-        if dry_run:
-            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-        else:
-            cursor = conn.execute(
-                "UPDATE sessions SET tenant_id = ?",
-                (target_tenant,)
-            )
+    # Also try loading single .json files (some systems use this)
+    for json_file in session_path.glob("*.json"):
+        if json_file.name == "metadata.json":
+            continue  # Skip metadata files
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    messages.extend(data)
+                elif isinstance(data, dict):
+                    messages.append(data)
+        except (json.JSONDecodeError, OSError):
+            continue
     
-    if dry_run:
-        return cursor.fetchone()[0]
-    else:
-        conn.commit()
-        return cursor.rowcount
+    return messages
 
 
-def migrate_nodes(
+def get_session_metadata(session_path: Path, index_data: Dict) -> Dict[str, Any]:
+    """Extract session metadata from folder or index."""
+    session_id = session_path.name
+    
+    # Try to get from index.json first
+    if session_id in index_data:
+        return index_data[session_id]
+    
+    # Try metadata.json in session folder
+    metadata_path = session_path / "metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    # Fall back to folder timestamps
+    try:
+        stat = session_path.stat()
+        return {
+            "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "last_active": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        }
+    except OSError:
+        return {
+            "created_at": datetime.now().isoformat(),
+            "last_active": datetime.now().isoformat(),
+        }
+
+
+def migrate_session(
     conn,
+    session_id: str,
+    metadata: Dict[str, Any],
+    messages: List[Dict[str, Any]],
     target_tenant: str,
-    source_tenant: str = None,
     dry_run: bool = False
-) -> int:
-    """
-    Migrate nodes to target tenant (optional, if needed).
+) -> bool:
+    """Migrate a single session to SQLite."""
     
-    Args:
-        conn: Database connection
-        target_tenant: Tenant ID to assign
-        source_tenant: Only migrate from this tenant (None = all)
-        dry_run: If True, don't actually modify
-    
-    Returns:
-        Number of nodes migrated
-    """
-    if source_tenant:
-        if dry_run:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM nodes WHERE tenant_id = ?",
-                (source_tenant,)
-            )
-        else:
-            cursor = conn.execute(
-                "UPDATE nodes SET tenant_id = ? WHERE tenant_id = ?",
-                (target_tenant, source_tenant)
-            )
-    else:
-        if dry_run:
-            cursor = conn.execute("SELECT COUNT(*) FROM nodes")
-        else:
-            cursor = conn.execute(
-                "UPDATE nodes SET tenant_id = ?",
-                (target_tenant,)
-            )
+    # Check if session already exists
+    cursor = conn.execute(
+        "SELECT session_id FROM sessions WHERE session_id = ?",
+        (session_id,)
+    )
+    if cursor.fetchone():
+        print(f"  Skipping {session_id[:8]}... (already exists)")
+        return False
     
     if dry_run:
-        return cursor.fetchone()[0]
-    else:
-        conn.commit()
-        return cursor.rowcount
+        return True
+    
+    # Extract metadata
+    title = metadata.get("title", "Imported Session")
+    created_at = metadata.get("created_at", datetime.now().isoformat())
+    last_active = metadata.get("last_active", created_at)
+    
+    # Insert session
+    conn.execute("""
+        INSERT INTO sessions (session_id, tenant_id, title, created_at, last_active, message_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        session_id,
+        target_tenant,
+        title,
+        created_at,
+        last_active,
+        len(messages)
+    ))
+    
+    # Insert messages
+    for i, msg in enumerate(messages):
+        msg_id = msg.get("id", f"{session_id}_{i}")
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        timestamp = msg.get("timestamp", created_at)
+        msg_metadata = json.dumps({k: v for k, v in msg.items() if k not in ["id", "role", "content", "timestamp"]})
+        
+        try:
+            conn.execute("""
+                INSERT INTO messages (message_id, session_id, role, content, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                msg_id,
+                session_id,
+                role,
+                content,
+                timestamp,
+                msg_metadata
+            ))
+        except sqlite3.IntegrityError:
+            # Message already exists, skip
+            pass
+    
+    conn.commit()
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Migrate sessions to a specific tenant",
+        description="Migrate file-based sessions to SQLite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
     parser.add_argument(
         "--target-tenant",
         required=True,
-        help="Target tenant_id to assign to sessions"
-    )
-    parser.add_argument(
-        "--source-tenant",
-        default=None,
-        help="Only migrate sessions from this tenant (default: all)"
+        help="Target tenant_id to assign to migrated sessions"
     )
     parser.add_argument(
         "--dry-run",
@@ -172,83 +204,108 @@ def main():
         help="Path to SQLite database (default: data/maritime.db)"
     )
     parser.add_argument(
-        "--include-nodes",
-        action="store_true",
-        help="Also migrate nodes table (use with caution)"
+        "--sessions-path",
+        default="data/cache/sessions",
+        help="Path to file-based sessions folder (default: data/cache/sessions)"
     )
     
     args = parser.parse_args()
     
     db_path = Path(args.db_path)
+    sessions_path = Path(args.sessions_path)
+    
     if not db_path.exists():
         print(f"ERROR: Database not found at {db_path}")
         return 1
     
-    print(f"{'DRY RUN - ' if args.dry_run else ''}Session Migration")
-    print("=" * 50)
+    if not sessions_path.exists():
+        print(f"ERROR: Sessions folder not found at {sessions_path}")
+        return 1
+    
+    print(f"{'DRY RUN - ' if args.dry_run else ''}Session Migration (File → SQLite)")
+    print("=" * 60)
     print(f"Database: {db_path}")
+    print(f"Sessions folder: {sessions_path}")
     print(f"Target tenant: {args.target_tenant}")
-    if args.source_tenant:
-        print(f"Source tenant: {args.source_tenant}")
     print()
+    
+    # Load index.json if available
+    index_data = load_index_json(sessions_path)
+    if index_data:
+        print(f"Found index.json with {len(index_data)} entries")
+    
+    # Find all session folders (UUID-named directories)
+    session_folders = [
+        p for p in sessions_path.iterdir() 
+        if p.is_dir() and len(p.name) == 36 and "-" in p.name  # UUID format
+    ]
+    
+    print(f"Found {len(session_folders)} session folders")
+    print()
+    
+    if not session_folders:
+        print("No sessions to migrate!")
+        return 0
     
     conn = get_db_connection(db_path)
     
-    # DEBUG: Show table structure
-    print("DEBUG - Tables in database:")
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    for row in cursor:
-        print(f"  {row[0]}")
-    print()
-    
-    # DEBUG: Show sessions table structure
-    print("DEBUG - Sessions table columns:")
-    cursor = conn.execute("PRAGMA table_info(sessions)")
-    for row in cursor:
-        print(f"  {row[1]} ({row[2]})")
-    print()
-    
-    # DEBUG: Show raw count
+    # Check current SQLite state
     cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-    print(f"DEBUG - Total sessions in table: {cursor.fetchone()[0]}")
+    existing_count = cursor.fetchone()[0]
+    print(f"Existing sessions in SQLite: {existing_count}")
     print()
     
-    # DEBUG: Show
+    # Migrate each session
+    migrated = 0
+    skipped = 0
+    failed = 0
+    total_messages = 0
     
-    # Migrate sessions
-    session_count = migrate_sessions(
-        conn,
-        target_tenant=args.target_tenant,
-        source_tenant=args.source_tenant,
-        dry_run=args.dry_run
-    )
-    
-    if args.dry_run:
-        print(f"Would migrate {session_count} sessions to '{args.target_tenant}'")
-    else:
-        print(f"✅ Migrated {session_count} sessions to '{args.target_tenant}'")
-    
-    # Optionally migrate nodes
-    if args.include_nodes:
-        print()
-        node_count = migrate_nodes(
-            conn,
-            target_tenant=args.target_tenant,
-            source_tenant=args.source_tenant,
-            dry_run=args.dry_run
-        )
+    print("Migrating sessions...")
+    for session_folder in session_folders:
+        session_id = session_folder.name
         
-        if args.dry_run:
-            print(f"Would migrate {node_count} nodes to '{args.target_tenant}'")
-        else:
-            print(f"✅ Migrated {node_count} nodes to '{args.target_tenant}'")
+        try:
+            # Load messages
+            messages = load_session_messages(session_folder)
+            
+            # Get metadata
+            metadata = get_session_metadata(session_folder, index_data)
+            
+            # Migrate
+            success = migrate_session(
+                conn,
+                session_id,
+                metadata,
+                messages,
+                args.target_tenant,
+                dry_run=args.dry_run
+            )
+            
+            if success:
+                migrated += 1
+                total_messages += len(messages)
+                print(f"  ✅ {session_id[:8]}... ({len(messages)} messages)")
+            else:
+                skipped += 1
+                
+        except Exception as e:
+            failed += 1
+            print(f"  ❌ {session_id[:8]}... Error: {e}")
     
-    # Show final state
+    print()
+    print("=" * 60)
+    print(f"Results:")
+    print(f"  Migrated: {migrated} sessions ({total_messages} messages)")
+    print(f"  Skipped:  {skipped} (already existed)")
+    print(f"  Failed:   {failed}")
+    
     if not args.dry_run:
+        # Show final count
+        cursor = conn.execute("SELECT COUNT(*) FROM sessions WHERE tenant_id = ?", (args.target_tenant,))
+        final_count = cursor.fetchone()[0]
         print()
-        print("Final session distribution:")
-        for tenant, count in list_sessions_by_tenant(conn).items():
-            print(f"  {tenant}: {count} sessions")
+        print(f"Total sessions for '{args.target_tenant}': {final_count}")
     
     conn.close()
     print()
