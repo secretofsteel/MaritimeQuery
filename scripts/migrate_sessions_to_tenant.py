@@ -103,31 +103,25 @@ def migrate_session(
     
     # Insert messages
     for i, msg in enumerate(messages):
-        # Handle different message formats
-        msg_id = msg.get("id") or msg.get("message_id") or f"{session_id}_{i}"
         role = msg.get("role", "user")
         content = msg.get("content", "")
         timestamp = msg.get("timestamp") or msg.get("created_at") or created_at
         
         # Store extra fields as metadata
         extra_fields = {k: v for k, v in msg.items() 
-                       if k not in ["id", "message_id", "role", "content", "timestamp", "created_at"]}
+                       if k not in ["id", "role", "content", "timestamp", "created_at"]}
         msg_metadata = json.dumps(extra_fields) if extra_fields else "{}"
         
-        try:
-            conn.execute("""
-                INSERT INTO messages (message_id, session_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                str(msg_id),
-                session_id,
-                role,
-                content,
-                timestamp,
-                msg_metadata
-            ))
-        except sqlite3.IntegrityError:
-            pass  # Message already exists
+        conn.execute("""
+            INSERT INTO messages (session_id, role, content, timestamp, metadata)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            session_id,
+            role,
+            content,
+            timestamp,
+            msg_metadata
+        ))
     
     conn.commit()
     return True
