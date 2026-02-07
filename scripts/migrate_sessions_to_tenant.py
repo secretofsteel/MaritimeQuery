@@ -194,11 +194,26 @@ def main():
     
     conn = get_db_connection(db_path)
     
-    # Show current state
-    print("Current session distribution:")
-    for tenant, count in list_sessions_by_tenant(conn).items():
-        print(f"  {tenant}: {count} sessions")
+    # DEBUG: Show table structure
+    print("DEBUG - Tables in database:")
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    for row in cursor:
+        print(f"  {row[0]}")
     print()
+    
+    # DEBUG: Show sessions table structure
+    print("DEBUG - Sessions table columns:")
+    cursor = conn.execute("PRAGMA table_info(sessions)")
+    for row in cursor:
+        print(f"  {row[1]} ({row[2]})")
+    print()
+    
+    # DEBUG: Show raw count
+    cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+    print(f"DEBUG - Total sessions in table: {cursor.fetchone()[0]}")
+    print()
+    
+    # DEBUG: Show
     
     # Migrate sessions
     session_count = migrate_sessions(
