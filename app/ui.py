@@ -23,7 +23,8 @@ from .constants import (
 from .config import AppConfig
 from .metadata_updates import update_metadata_everywhere, get_correction_status
 from .indexing import build_index_from_library, build_index_from_library_parallel, load_cached_nodes_and_index
-from .query import query_with_confidence, cohere_client
+from .query import query_with_confidence, cohere_client  # legacy fallback
+from .orchestrator import orchestrated_query
 from .state import AppState
 from .logger import LOGGER
 from .session_uploads import MAX_UPLOADS_PER_SESSION
@@ -1756,9 +1757,7 @@ def render_app(
         }
         </style>
         """, unsafe_allow_html=True)
-        
-        st.header("⚙️ Settings")
-        
+                
         if st.button("🔄 Start new chat", use_container_width=True, key="new_chat_btn", type="primary"):
             # Only create new session if current one has messages
             current_messages = app_state.get_current_session_messages()
@@ -1768,56 +1767,7 @@ def render_app(
                 # Current session is empty, just reset it
                 app_state.reset_session()
             _rerun_app()
-        
-        with st.expander("🔍 Retrieval Options", expanded=True):
-            retrieval_type = st.selectbox(
-                "Method",
-                ["hybrid", "vector", "bm25"],
-                key="retrieval_method",
-                help="Hybrid combines vector and keyword search"
-            )
-            
-            rerank_available = cohere_client is not None
-            rerank_option = st.checkbox(
-                "Enable reranking",
-                key="rerank_enabled",
-                disabled=not rerank_available,
-                help="Re-rank results with Cohere (requires API key)"
-            )
-            
-            fortify_option = st.checkbox(
-                "Fortify query",
-                key="fortify_option",
-                help="Enhance query with Gemini before searching"
-            )
-            
-            auto_refine_option = st.checkbox(
-                "Auto-refine queries",
-                key="auto_refine_option",
-                help="Automatically rephrase low-confidence queries"
-            )
-            
-            # NEW: Context-aware conversation toggle
-            use_context = st.checkbox(
-                "💬 Context-aware chat",
-                value=True,
-                key="use_context",
-                help=f"Remember previous exchanges (resets after {MAX_CONTEXT_TURNS} turns)"
-            )
-            
-            # Show context status if enabled
-            if use_context and app_state.context_turn_count > 0:
-                st.caption(f"📍 Turn {app_state.context_turn_count}/{MAX_CONTEXT_TURNS}")
-                if app_state.context_turn_count >= MAX_CONTEXT_TURNS - 1:
-                    st.caption("⚠️ Next query will start fresh")
 
-            # Hierarchical retrieval toggle (A/B testing)
-            use_hierarchical = st.checkbox(
-                "🔍 Hierarchical retrieval",
-                value=True,
-                key="use_hierarchical",
-                help="Use section-level retrieval for procedures"
-            )
 
         # Library management (only if not read-only)
         if not read_only_mode:
@@ -2155,20 +2105,12 @@ def render_app(
                     status = st.status("🔍 Processing your query...", expanded=True)
                     
                     with status:
-                        st.write("🔍 Analyzing query intent...")
-                        result = query_with_confidence(
+                        result = orchestrated_query(
                             app_state,
                             trimmed,
-                            retriever_type=retrieval_type,
-                            auto_refine=auto_refine_option,
-                            fortify=fortify_option,
-                            rerank=rerank_option,
-                            use_conversation_context=use_context,
-                            enable_hierarchical=use_hierarchical,
+                            use_conversation_context=True,
+                            status_callback=lambda msg: st.write(msg),
                         )
-                        
-                        st.write("✅ Documents retrieved")
-                        st.write("✍️ Generating answer...")  # NEW - bridges the gap
                     
                     # Stream the response with typewriter effect
                     answer_stream = result.get("answer_stream")
@@ -3286,9 +3228,15 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                                 (corrections["tenant_id"], source)
                             )
                         # Update metadata JSON for other fields
-                        for node in app_state.nodes:
+                        manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                        repo = NodeRepository(tenant_id=manage_tenant)
+                        managed_nodes = repo.get_all_nodes()
+                        import json
+                        for node in managed_nodes:
                             if node.metadata.get("source") == source:
-                                import json
+                                # Apply corrections to the fresh node metadata
+                                for field, value in corrections.items():
+                                    node.metadata[field] = value
                                 conn.execute(
                                     "UPDATE nodes SET metadata = ? WHERE doc_id = ? AND node_id = ?",
                                     (json.dumps(node.metadata), source, node.node_id)
@@ -3404,8 +3352,12 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                                         save_tenant_id(source, corrections["tenant_id"])
                                     
                                     # Update metadata JSON in SQLite too
-                                    for node in app_state.nodes:
+                                    managed_repo = NodeRepository(tenant_id=manage_tenant)
+                                    batch_managed_nodes = managed_repo.get_all_nodes()
+                                    for node in batch_managed_nodes:
                                         if node.metadata.get("source") == source:
+                                            for field, value in corrections.items():
+                                                node.metadata[field] = value
                                             conn.execute(
                                                 "UPDATE nodes SET metadata = ? WHERE node_id = ?",
                                                 (json.dumps(node.metadata), node.node_id)
@@ -3471,7 +3423,9 @@ def _batch_delete_documents(filenames: List[str], app_state: AppState) -> None:
     # Step 2: Sync library once to clean up database
     if deleted_count > 0:
         with st.spinner("Syncing library to update database..."):
+            manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
             manager = app_state.ensure_manager()
+            manager.tenant_id = manage_tenant
             manager.nodes = app_state.nodes
             
             sync_result, _ = manager.sync_library(
@@ -3500,8 +3454,10 @@ def _delete_document_by_source(source_filename: str, display_title: str, app_sta
         LOGGER.error("Empty source filename for display_title: %s", display_title)
         return False
     
+    manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+    
     with st.spinner(f"Deleting {display_title}..."):
-        result = delete_document_by_source(source_filename, app_state)
+        result = delete_document_by_source(source_filename, app_state, tenant_id=manage_tenant)
     
     if result.success:
         st.success(f"✅ Deleted: {display_title}")
@@ -3511,81 +3467,6 @@ def _delete_document_by_source(source_filename: str, display_title: str, app_sta
     else:
         st.error(f"❌ Failed to delete: {result.error}")
         return False
-
-def _delete_document_by_title(title: str, app_state: AppState, unique_key: str = None) -> bool:
-    """
-    Delete single document (scorched earth) and sync library.
-    
-    Args:
-        title: Document title to delete
-        app_state: Application state
-        unique_key: Unique key for this deletion (for cleanup)
-    
-    Returns:
-        True if deletion succeeded, False otherwise
-    """
-    
-    # Find source filename
-    source_filename = None
-    for node in app_state.nodes:
-        if node.metadata.get("title") == title:
-            source_filename = node.metadata.get("source")
-            break
-    
-    if not source_filename:
-        st.error(f"❌ Could not find source for: {title}")
-        LOGGER.error(f"Failed to find source for title: {title}")
-        return False
-    
-    config = AppConfig.get()
-    source_path = config.paths.docs_path / source_filename
-    
-    with st.spinner(f"Deleting {title}..."):
-        try:
-            manager = app_state.ensure_manager()
-            manager.nodes = app_state.nodes
-            manager._remove_documents({source_filename})
-            
-            # Delete source file
-            if source_path.exists():
-                source_path.unlink()
-                LOGGER.info(f"Deleted source file: {source_path}")
-            
-            # Update app state
-            app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()
-            app_state.vector_retriever = None
-            app_state.bm25_retriever = None
-            
-            st.success(f"✅ Deleted: {title}")
-            LOGGER.info(f"Deleted document: {title}")
-            
-        except Exception as exc:
-            st.error(f"❌ Failed: {exc}")
-            LOGGER.exception(f"Delete failed: {title}")
-            return False
-    
-    # FIX: Run full sync to ensure consistency
-    with st.spinner("Syncing library after deletion..."):
-        try:
-            changes, report = manager.sync_library(app_state.index)
-            LOGGER.info(f"Synced after deletion: +{len(changes.added)}, ~{len(changes.modified)}, -{len(changes.deleted)}")
-            
-            # Update state
-            app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()
-            app_state.vector_retriever = None
-            app_state.bm25_retriever = None
-            app_state.ensure_retrievers()
-            
-        except Exception as exc:
-            LOGGER.warning(f"Sync after deletion failed: {exc}")
-
-    # Remove from confirmations if key provided
-    if unique_key and unique_key in st.session_state.get("delete_confirmations", set()):
-        st.session_state.delete_confirmations.discard(unique_key)
-    
-    return True
 
 
 def _delete_entire_library(app_state: AppState) -> None:

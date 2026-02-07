@@ -835,7 +835,8 @@ class IncrementalIndexManager:
     def _get_files_hash(self, docs_path: Path) -> Dict[str, Dict[str, Any]]:
         return current_files_index(docs_path)
 
-    def _remove_documents(self, filenames: Set[str], tenant_id: str = "shared") -> None:
+    def _remove_documents(self, filenames: Set[str], tenant_id: str = None) -> None:
+        tenant_id = tenant_id or self.tenant_id
         """
         Remove documents from ChromaDB, SQLite, and Gemini cache.
         
@@ -870,9 +871,10 @@ class IncrementalIndexManager:
             LOGGER.debug("Removed %d nodes from SQLite for %s", deleted, filename)
         
         # 3. Remove from Gemini cache
-        if filename in self.gemini_cache:
-            del self.gemini_cache[filename]
-            LOGGER.info("Removed %s from Gemini cache", filename)
+        for filename in filenames:
+            if filename in self.gemini_cache:
+                del self.gemini_cache[filename]
+                LOGGER.info("Removed %s from Gemini cache", filename)
         
         # 4. Update in-memory nodes list (for compatibility during transition)
         self.nodes = [
