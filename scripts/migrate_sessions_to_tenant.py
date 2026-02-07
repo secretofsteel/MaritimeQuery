@@ -7,18 +7,13 @@ to the new SQLite-based multi-tenant system.
 
 Old structure:
     data/cache/sessions/
-    ├── {session_uuid}/
-    │   ├── {message_uuid}.jsonl
-    │   └── ...
-    └── index.json
-
-New structure:
-    SQLite tables: sessions, messages
+    ├── index.json              # Session metadata (titles, dates)
+    ├── {session_id}.jsonl      # Messages for each session
+    └── {session_id}/           # Some old sessions might be folders
 
 Usage:
     python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping
     python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping --dry-run
-    python migrate_file_sessions_to_sqlite.py --target-tenant alpha_shipping --sessions-path data/cache/sessions
 """
 
 import argparse
@@ -37,7 +32,7 @@ def get_db_connection(db_path: Path):
 
 
 def load_index_json(sessions_path: Path) -> Dict[str, Any]:
-    """Load the index.json file if it exists."""
+    """Load the index.json file."""
     index_path = sessions_path / "index.json"
     if index_path.exists():
         try:
@@ -48,70 +43,22 @@ def load_index_json(sessions_path: Path) -> Dict[str, Any]:
     return {}
 
 
-def load_session_messages(session_path: Path) -> List[Dict[str, Any]]:
-    """Load all messages from a session folder."""
+def load_messages_from_jsonl(jsonl_path: Path) -> List[Dict[str, Any]]:
+    """Load messages from a .jsonl file."""
     messages = []
-    
-    for jsonl_file in session_path.glob("*.jsonl"):
-        try:
-            with open(jsonl_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            msg = json.loads(line)
-                            messages.append(msg)
-                        except json.JSONDecodeError:
-                            continue
-        except OSError as e:
-            print(f"  Warning: Could not read {jsonl_file}: {e}")
-    
-    # Also try loading single .json files (some systems use this)
-    for json_file in session_path.glob("*.json"):
-        if json_file.name == "metadata.json":
-            continue  # Skip metadata files
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    messages.extend(data)
-                elif isinstance(data, dict):
-                    messages.append(data)
-        except (json.JSONDecodeError, OSError):
-            continue
-    
-    return messages
-
-
-def get_session_metadata(session_path: Path, index_data: Dict) -> Dict[str, Any]:
-    """Extract session metadata from folder or index."""
-    session_id = session_path.name
-    
-    # Try to get from index.json first
-    if session_id in index_data:
-        return index_data[session_id]
-    
-    # Try metadata.json in session folder
-    metadata_path = session_path / "metadata.json"
-    if metadata_path.exists():
-        try:
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    
-    # Fall back to folder timestamps
     try:
-        stat = session_path.stat()
-        return {
-            "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
-            "last_active": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-        }
-    except OSError:
-        return {
-            "created_at": datetime.now().isoformat(),
-            "last_active": datetime.now().isoformat(),
-        }
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        msg = json.loads(line)
+                        messages.append(msg)
+                    except json.JSONDecodeError as e:
+                        print(f"  Warning: Bad JSON line in {jsonl_path.name}: {e}")
+    except OSError as e:
+        print(f"  Warning: Could not read {jsonl_path}: {e}")
+    return messages
 
 
 def migrate_session(
@@ -130,8 +77,7 @@ def migrate_session(
         (session_id,)
     )
     if cursor.fetchone():
-        print(f"  Skipping {session_id[:8]}... (already exists)")
-        return False
+        return False  # Already exists
     
     if dry_run:
         return True
@@ -140,6 +86,7 @@ def migrate_session(
     title = metadata.get("title", "Imported Session")
     created_at = metadata.get("created_at", datetime.now().isoformat())
     last_active = metadata.get("last_active", created_at)
+    message_count = metadata.get("message_count", len(messages))
     
     # Insert session
     conn.execute("""
@@ -151,23 +98,28 @@ def migrate_session(
         title,
         created_at,
         last_active,
-        len(messages)
+        message_count
     ))
     
     # Insert messages
     for i, msg in enumerate(messages):
-        msg_id = msg.get("id", f"{session_id}_{i}")
+        # Handle different message formats
+        msg_id = msg.get("id") or msg.get("message_id") or f"{session_id}_{i}"
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        timestamp = msg.get("timestamp", created_at)
-        msg_metadata = json.dumps({k: v for k, v in msg.items() if k not in ["id", "role", "content", "timestamp"]})
+        timestamp = msg.get("timestamp") or msg.get("created_at") or created_at
+        
+        # Store extra fields as metadata
+        extra_fields = {k: v for k, v in msg.items() 
+                       if k not in ["id", "message_id", "role", "content", "timestamp", "created_at"]}
+        msg_metadata = json.dumps(extra_fields) if extra_fields else "{}"
         
         try:
             conn.execute("""
                 INSERT INTO messages (message_id, session_id, role, content, timestamp, metadata)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
-                msg_id,
+                str(msg_id),
                 session_id,
                 role,
                 content,
@@ -175,8 +127,7 @@ def migrate_session(
                 msg_metadata
             ))
         except sqlite3.IntegrityError:
-            # Message already exists, skip
-            pass
+            pass  # Message already exists
     
     conn.commit()
     return True
@@ -186,7 +137,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Migrate file-based sessions to SQLite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
     )
     parser.add_argument(
         "--target-tenant",
@@ -229,21 +179,16 @@ def main():
     print(f"Target tenant: {args.target_tenant}")
     print()
     
-    # Load index.json if available
+    # Load index.json
     index_data = load_index_json(sessions_path)
-    if index_data:
-        print(f"Found index.json with {len(index_data)} entries")
+    print(f"Found index.json with {len(index_data)} session entries")
     
-    # Find all session folders (UUID-named directories)
-    session_folders = [
-        p for p in sessions_path.iterdir() 
-        if p.is_dir() and len(p.name) == 36 and "-" in p.name  # UUID format
-    ]
-    
-    print(f"Found {len(session_folders)} session folders")
+    # Find all .jsonl files (these are the sessions)
+    jsonl_files = list(sessions_path.glob("*.jsonl"))
+    print(f"Found {len(jsonl_files)} .jsonl session files")
     print()
     
-    if not session_folders:
+    if not jsonl_files and not index_data:
         print("No sessions to migrate!")
         return 0
     
@@ -262,15 +207,21 @@ def main():
     total_messages = 0
     
     print("Migrating sessions...")
-    for session_folder in session_folders:
-        session_id = session_folder.name
+    
+    for jsonl_file in jsonl_files:
+        session_id = jsonl_file.stem  # filename without .jsonl
         
         try:
-            # Load messages
-            messages = load_session_messages(session_folder)
+            # Load messages from .jsonl file
+            messages = load_messages_from_jsonl(jsonl_file)
             
-            # Get metadata
-            metadata = get_session_metadata(session_folder, index_data)
+            # Get metadata from index.json (or create default)
+            metadata = index_data.get(session_id, {
+                "title": "Imported Session",
+                "created_at": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "message_count": len(messages)
+            })
             
             # Migrate
             success = migrate_session(
@@ -285,7 +236,8 @@ def main():
             if success:
                 migrated += 1
                 total_messages += len(messages)
-                print(f"  ✅ {session_id[:8]}... ({len(messages)} messages)")
+                title = metadata.get("title", "Untitled")[:40]
+                print(f"  ✅ {title} ({len(messages)} msgs)")
             else:
                 skipped += 1
                 
@@ -300,9 +252,12 @@ def main():
     print(f"  Skipped:  {skipped} (already existed)")
     print(f"  Failed:   {failed}")
     
-    if not args.dry_run:
+    if not args.dry_run and migrated > 0:
         # Show final count
-        cursor = conn.execute("SELECT COUNT(*) FROM sessions WHERE tenant_id = ?", (args.target_tenant,))
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?", 
+            (args.target_tenant,)
+        )
         final_count = cursor.fetchone()[0]
         print()
         print(f"Total sessions for '{args.target_tenant}': {final_count}")
