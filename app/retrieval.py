@@ -135,6 +135,107 @@ class SQLiteFTS5Retriever(BaseRetriever):
             LOGGER.error("FTS5 search failed: %s", exc)
             return []
     
+    def retrieve_filtered(
+        self,
+        query_str: str,
+        doc_type_filter: Optional[List[str]] = None,
+        title_filter: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> List[NodeWithScore]:
+        """Retrieve with optional metadata filters.
+
+        Used by the orchestrator's FilteredRetriever for source-specific
+        retrieval.  Falls back to standard behaviour when no filters are
+        provided.
+
+        Args:
+            query_str: Raw search query.
+            doc_type_filter: e.g. ``["REGULATION", "VETTING"]``.
+            title_filter: Substring to match in the document title
+                          (applied post-retrieval on metadata).
+            top_k: Override the instance's ``similarity_top_k``.
+
+        Returns:
+            Filtered list of ``NodeWithScore`` ranked by BM25.
+        """
+        if not query_str.strip():
+            return []
+
+        effective_top_k = top_k or self.similarity_top_k
+
+        # When title filtering is active, retrieve more to compensate for
+        # post-retrieval filtering losses.
+        retrieval_top_k = effective_top_k * 2 if title_filter else effective_top_k
+
+        fts_query = self._prepare_fts_query(query_str)
+
+        try:
+            with db_connection(self.db_path) as conn:
+                # ---- build query dynamically ----
+                conditions = ["nodes_fts MATCH ?"]
+                params: list = [fts_query]
+
+                if self.tenant_id:
+                    conditions.append("(n.tenant_id = ? OR n.tenant_id = 'shared')")
+                    params.append(self.tenant_id)
+
+                if doc_type_filter:
+                    placeholders = ", ".join("?" for _ in doc_type_filter)
+                    conditions.append(
+                        f"json_extract(n.metadata, '$.doc_type') IN ({placeholders})"
+                    )
+                    params.extend(doc_type_filter)
+
+                where_clause = " AND ".join(conditions)
+                params.append(retrieval_top_k)
+
+                sql = f"""
+                    SELECT
+                        n.node_id, n.text, n.metadata,
+                        n.doc_id, n.section_id,
+                        bm25(nodes_fts) AS score
+                    FROM nodes_fts
+                    JOIN nodes n ON nodes_fts.rowid = n.rowid
+                    WHERE {where_clause}
+                    ORDER BY score
+                    LIMIT ?
+                """
+
+                cursor = conn.execute(sql, params)
+                rows = cursor.fetchall()
+
+            LOGGER.info(
+                "FTS5 filtered: %d results (doc_type=%s, title=%s)",
+                len(rows),
+                doc_type_filter,
+                title_filter,
+            )
+
+            results = []
+            for row in rows:
+                node = self._row_to_node(row)
+                score = -row["score"] if row["score"] else 0.0
+                results.append(NodeWithScore(node=node, score=score))
+
+            # Post-retrieval title filter
+            if title_filter:
+                before = len(results)
+                pattern = title_filter.upper()
+                results = [
+                    r for r in results
+                    if pattern in (r.node.metadata.get("title") or "").upper()
+                ]
+                LOGGER.info(
+                    "Title filter '%s': %d → %d results",
+                    title_filter, before, len(results),
+                )
+
+            return results[:effective_top_k]
+
+        except Exception as exc:
+            LOGGER.error("FTS5 filtered search failed: %s", exc)
+            return []
+
     def _prepare_fts_query(self, query: str) -> str:
         """
         Prepare query string for FTS5 MATCH.
@@ -313,6 +414,112 @@ class TenantAwareVectorRetriever(BaseRetriever):
             
         except Exception as exc:
             LOGGER.error("Vector search failed: %s", exc)
+            return []
+
+
+    def retrieve_filtered(
+        self,
+        query_str: str,
+        doc_type_filter: Optional[List[str]] = None,
+        title_filter: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> List[NodeWithScore]:
+        """Retrieve vectors with optional metadata filters.
+
+        Used by the orchestrator's FilteredRetriever for source-specific
+        retrieval.
+
+        Args:
+            query_str: Raw search query.
+            doc_type_filter: e.g. ``["REGULATION", "VETTING"]``.
+                Added to the ChromaDB ``where`` clause via ``$in``.
+            title_filter: Substring to match in document title
+                (applied post-retrieval on metadata).
+            top_k: Override the instance's ``similarity_top_k``.
+
+        Returns:
+            Filtered list of ``NodeWithScore`` ranked by similarity.
+        """
+        if not query_str.strip():
+            return []
+
+        effective_top_k = top_k or self.similarity_top_k
+        retrieval_top_k = effective_top_k * 2 if title_filter else effective_top_k
+
+        try:
+            query_embedding = self.embed_model.get_query_embedding(query_str)
+
+            # ---- build where filter ----
+            filter_parts: List[Dict] = []
+
+            if self.tenant_id:
+                filter_parts.append(
+                    {"$or": [
+                        {"tenant_id": self.tenant_id},
+                        {"tenant_id": "shared"},
+                    ]}
+                )
+
+            if doc_type_filter:
+                if len(doc_type_filter) == 1:
+                    filter_parts.append({"doc_type": doc_type_filter[0]})
+                else:
+                    filter_parts.append({"doc_type": {"$in": doc_type_filter}})
+
+            if len(filter_parts) == 0:
+                where_filter = None
+            elif len(filter_parts) == 1:
+                where_filter = filter_parts[0]
+            else:
+                where_filter = {"$and": filter_parts}
+
+            # ---- query ChromaDB ----
+            query_kwargs = dict(
+                query_embeddings=[query_embedding],
+                n_results=retrieval_top_k,
+                include=["documents", "metadatas", "distances"],
+            )
+            if where_filter:
+                query_kwargs["where"] = where_filter
+
+            results = self.collection.query(**query_kwargs)
+
+            LOGGER.info(
+                "Vector filtered: %d results (doc_type=%s, title=%s)",
+                len(results["ids"][0]) if results["ids"] else 0,
+                doc_type_filter,
+                title_filter,
+            )
+
+            # ---- convert to NodeWithScore ----
+            nodes = []
+            if results["ids"] and results["ids"][0]:
+                for i, node_id in enumerate(results["ids"][0]):
+                    metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+                    text = results["documents"][0][i] if results["documents"] else ""
+                    distance = results["distances"][0][i] if results["distances"] else 0.0
+
+                    node = TextNode(id_=node_id, text=text, metadata=metadata)
+                    score = 1.0 / (1.0 + distance)
+                    nodes.append(NodeWithScore(node=node, score=score))
+
+            # Post-retrieval title filter
+            if title_filter:
+                before = len(nodes)
+                pattern = title_filter.upper()
+                nodes = [
+                    n for n in nodes
+                    if pattern in (n.node.metadata.get("title") or "").upper()
+                ]
+                LOGGER.info(
+                    "Title filter '%s': %d → %d results",
+                    title_filter, before, len(nodes),
+                )
+
+            return nodes[:effective_top_k]
+
+        except Exception as exc:
+            LOGGER.error("Vector filtered search failed: %s", exc)
             return []
 
 
