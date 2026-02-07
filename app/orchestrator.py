@@ -27,7 +27,7 @@ from llama_index.core.schema import NodeWithScore
 from .config import AppConfig
 from .constants import CONTEXT_HISTORY_WINDOW, MAX_CONTEXT_TURNS
 from .logger import LOGGER
-from .query import reciprocal_rank_fusion
+from .query import reciprocal_rank_fusion, calculate_confidence
 
 if TYPE_CHECKING:
     from .state import AppState
@@ -1586,29 +1586,8 @@ Provide the comparison following the structure above."""
     def _calculate_confidence(
         nodes: List[NodeWithScore],
     ) -> Tuple[int, str, str]:
-        """Calculate confidence from reranker scores.
-
-        Mirrors the existing ``calculate_confidence()`` from query.py.
-        """
-        if not nodes:
-            return 0, "LOW 🔴", "No results retrieved"
-
-        scores = [n.score for n in nodes if hasattr(n, "score") and n.score is not None]
-        if not scores:
-            return 50, "MEDIUM 🟡", "Unable to determine confidence"
-
-        # Top-3 average
-        top_scores = sorted(scores, reverse=True)[:3]
-        confidence = sum(top_scores) / len(top_scores)
-
-        confidence_pct = int(min(confidence * 100, 100))
-
-        if confidence_pct >= 80:
-            return confidence_pct, "HIGH 🟢", "Strong document matches"
-        elif confidence_pct >= 60:
-            return confidence_pct, "MEDIUM 🟡", "Moderate matches — verify critical details"
-        else:
-            return confidence_pct, "LOW 🔴", "Weak matches — recommend human verification"
+        """Delegate to the battle-tested calculation from query.py."""
+        return calculate_confidence(nodes)
 
     @staticmethod
     def aggregate_confidence(
