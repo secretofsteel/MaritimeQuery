@@ -22,4 +22,9 @@ __all__ = [
     "ui",
     "logger",
     "metadata_updates",
+    "auth",
+    "database",
+    "services",
+    "nodes",
+    "retrieval"
 ]  # pragma: no cover

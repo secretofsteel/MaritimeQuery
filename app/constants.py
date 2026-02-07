@@ -59,9 +59,13 @@ GEMINI_SCHEMA = {
 # FORM CATEGORIES - Now loaded from JSON with fallback
 # ==============================================================================
 
-def load_form_categories() -> dict[str, str]:
+def load_form_categories(tenant_id: str = None) -> dict[str, str]:
     """
-    Load form categories from JSON file, with fallback to hardcoded constants.
+    Load form categories from JSON file, with fallback to shared/hardcoded.
+    
+    Args:
+        tenant_id: Tenant identifier. None or "shared" loads default file.
+                   Tenant-specific files fall back to shared if not found.
     
     Returns:
         Dictionary mapping form codes to category descriptions
@@ -89,49 +93,56 @@ def load_form_categories() -> dict[str, str]:
         "CS": "Cyber Security",
     }
     
-    # Try to load from JSON
-    config_path = Path(__file__).parent.parent / "config" / "form_categories.json"
+    # Try tenant-specific file first
+    config_path = get_form_categories_path(tenant_id)
     
     if config_path.exists():
         try:
             with config_path.open("r", encoding="utf-8") as f:
                 categories = json.load(f)
             
-            # Validate it's a dict with string keys/values
             if isinstance(categories, dict) and all(
                 isinstance(k, str) and isinstance(v, str) 
                 for k, v in categories.items()
             ):
                 return categories
             else:
-                print(f"WARNING: Invalid format in {config_path}, using fallback")
-                return FALLBACK_CATEGORIES
-        
+                print(f"WARNING: Invalid format in {config_path}, trying fallback")
         except (json.JSONDecodeError, OSError) as exc:
-            print(f"WARNING: Failed to load {config_path}: {exc}, using fallback")
-            return FALLBACK_CATEGORIES
+            print(f"WARNING: Failed to load {config_path}: {exc}, trying fallback")
     
-    # JSON doesn't exist yet, return fallback
+    # If tenant-specific failed/missing, try shared file
+    if tenant_id and tenant_id != "shared":
+        shared_path = get_form_categories_path(None)
+        if shared_path.exists():
+            try:
+                with shared_path.open("r", encoding="utf-8") as f:
+                    categories = json.load(f)
+                if isinstance(categories, dict):
+                    return categories
+            except (json.JSONDecodeError, OSError):
+                pass
+    
+    # Final fallback to hardcoded
     return FALLBACK_CATEGORIES
 
 
-def save_form_categories(categories: dict[str, str]) -> bool:
+def save_form_categories(categories: dict[str, str], tenant_id: str = None) -> bool:
     """
     Save form categories to JSON file.
     
     Args:
         categories: Dictionary mapping form codes to descriptions
+        tenant_id: Tenant identifier. None or "shared" saves to default file.
     
     Returns:
         True if saved successfully, False otherwise
     """
-    config_path = Path(__file__).parent.parent / "config" / "form_categories.json"
+    config_path = get_form_categories_path(tenant_id)
     
     try:
-        # Create config directory if it doesn't exist
         config_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Write JSON with nice formatting
         with config_path.open("w", encoding="utf-8") as f:
             json.dump(categories, f, indent=2, ensure_ascii=False)
         
@@ -142,9 +153,22 @@ def save_form_categories(categories: dict[str, str]) -> bool:
         return False
 
 
-def get_form_categories_path() -> Path:
-    """Get the path to the form categories JSON file."""
-    return Path(__file__).parent.parent / "config" / "form_categories.json"
+def get_form_categories_path(tenant_id: str = None) -> Path:
+    """
+    Get the path to the form categories JSON file.
+    
+    Args:
+        tenant_id: Tenant identifier. None or "shared" uses default file.
+    
+    Returns:
+        Path to form_categories.json or form_categories_{tenant_id}.json
+    """
+    base_path = Path(__file__).parent.parent / "config"
+    
+    if tenant_id and tenant_id != "shared":
+        return base_path / f"form_categories_{tenant_id}.json"
+    else:
+        return base_path / "form_categories.json"
 
 
 # Load form categories (from JSON or fallback)

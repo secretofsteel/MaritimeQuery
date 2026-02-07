@@ -1,5 +1,6 @@
 #Core app
 streamlit
+streamlit-authenticator
 markdown
 
 #LLM and embedding libraries
@@ -22,6 +23,7 @@ spire.doc
 aspose-words
 rapidfuzz
 Pillow
+mammoth
 
 #PDF processing libraries
 pymupdf

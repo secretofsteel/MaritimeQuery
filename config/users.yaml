@@ -1,0 +1,61 @@
+# Maritime RAG Authentication Configuration
+# ==========================================
+#
+# This file controls user access to the application.
+# Location: config/users.yaml
+#
+# IMPORTANT: 
+# - Replace PLACEHOLDER passwords with real bcrypt hashes
+# - Use the generate_password_hash.py script to create hashes
+# - Keep this file secure - it contains password hashes
+#
+# To add a new company:
+# 1. Generate a password hash: python scripts/generate_password_hash.py
+# 2. Add a new entry under credentials.usernames
+# 3. Restart the application
+
+credentials:
+  usernames:
+    # Administrator account (superuser access)
+    admin:
+      name: George
+      password: $2b$12$tRAiMUoJjx3zOds1UXN8RuZMcspAy6T0/oMGWYHzk3E/ihksUxTXa
+      tenant_id: admin
+      role: superuser
+    
+    union:
+      name: Union Marine Enterprises S.A.
+      password: $2b$12$RaccCEB6Q8TJBIJs6thh1ue6mgVn8HmnsDP9QXniRmujfSEJ7UlDm
+      tenant_id: union
+      role: tenant
+
+    astra:
+      name: Astra Shipmanagement Inc.
+      password: $2b$12$g49nT2QP3x8jp/x2f6qvU.J6KteVkWAPSSHfb6OLztT1y8t5PIUrO
+      tenant_id: astra
+      role: tenant
+    
+    # Example tenant accounts (add your companies here)
+    # 
+    # company_alpha:
+    #   name: Alpha Shipping Ltd
+    #   password: $2b$12$...  # Generate with script
+    #   tenant_id: alpha
+    #   role: tenant
+
+
+cookie:
+  # Cookie name (shown in browser dev tools)
+  name: maritime_rag_auth
+  
+  # Secret key for signing cookies
+  # IMPORTANT: Generate a new key for production!
+  # Use: python -c "import secrets; print(secrets.token_hex(16))"
+  key: 67d752393fa6c01adf0afaf60f9b7027
+  
+  # How long the login session lasts (in days)
+  expiry_days: 30
+
+# Pre-authorized emails (not used, but required by library)
+preauthorized:
+  emails: []

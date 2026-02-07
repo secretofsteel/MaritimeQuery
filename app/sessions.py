@@ -1,4 +1,11 @@
-"""Session management for chat history using JSONL storage."""
+"""Session management for chat history using SQLite storage.
+
+This module replaces the JSONL-based session storage with SQLite,
+enabling proper multi-tenancy and better data integrity.
+
+The public interface remains identical to the original implementation,
+ensuring backward compatibility with the rest of the application.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from google.genai import types
 
 from .config import AppConfig
+from .database import db_connection, get_db_path, init_db
 from .logger import LOGGER
 
 
@@ -23,6 +31,7 @@ class Session:
     created_at: datetime
     last_active: datetime
     message_count: int
+    tenant_id: Optional[str] = None  # Added for multi-tenancy
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -32,6 +41,7 @@ class Session:
             "created_at": self.created_at.isoformat(),
             "last_active": self.last_active.isoformat(),
             "message_count": self.message_count,
+            "tenant_id": self.tenant_id,
         }
     
     @classmethod
@@ -43,6 +53,19 @@ class Session:
             created_at=datetime.fromisoformat(data["created_at"]),
             last_active=datetime.fromisoformat(data["last_active"]),
             message_count=data["message_count"],
+            tenant_id=data.get("tenant_id"),
+        )
+    
+    @classmethod
+    def from_row(cls, row) -> "Session":
+        """Create Session from SQLite row."""
+        return cls(
+            session_id=row["session_id"],
+            title=row["title"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            last_active=datetime.fromisoformat(row["last_active"]),
+            message_count=row["message_count"],
+            tenant_id=row["tenant_id"],
         )
 
 
@@ -52,7 +75,7 @@ class Message:
     role: str  # "user" or "assistant"
     content: str
     timestamp: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)  # For confidence, sources, etc.
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -72,47 +95,49 @@ class Message:
             timestamp=datetime.fromisoformat(data["timestamp"]),
             metadata=data.get("metadata", {}),
         )
+    
+    @classmethod
+    def from_row(cls, row) -> "Message":
+        """Create Message from SQLite row."""
+        metadata = {}
+        if row["metadata"]:
+            try:
+                metadata = json.loads(row["metadata"])
+            except json.JSONDecodeError:
+                LOGGER.warning("Failed to parse message metadata")
+        
+        return cls(
+            role=row["role"],
+            content=row["content"],
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            metadata=metadata,
+        )
 
 
 class SessionManager:
-    """Manages chat sessions using JSONL file storage."""
+    """
+    Manages chat sessions using SQLite storage.
     
-    def __init__(self, sessions_dir: Optional[Path] = None):
+    All operations are scoped to the tenant_id provided at initialization,
+    ensuring complete data isolation between tenants.
+    """
+    
+    def __init__(self, tenant_id: str, db_path: Optional[Path] = None):
         """
-        Initialize session manager.
+        Initialize session manager for a specific tenant.
         
         Args:
-            sessions_dir: Directory to store session files. If None, uses config default.
+            tenant_id: Tenant identifier. All queries are scoped to this tenant.
+            db_path: Path to SQLite database. Uses default if None.
         """
-        if sessions_dir is None:
-            config = AppConfig.get()
-            sessions_dir = config.paths.cache_dir / "sessions"
+        self.tenant_id = tenant_id
+        self.db_path = db_path or get_db_path()
         
-        self.sessions_dir = sessions_dir
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.index_file = self.sessions_dir / "index.json"
+        # Ensure database is initialized
+        init_db(self.db_path)
         
-        # Create index if doesn't exist
-        if not self.index_file.exists():
-            self.index_file.write_text("{}")
-        
-        LOGGER.debug("SessionManager initialized: %s", self.sessions_dir)
-    
-    def _load_index(self) -> Dict[str, Dict[str, Any]]:
-        """Load session index from disk."""
-        try:
-            return json.loads(self.index_file.read_text())
-        except (json.JSONDecodeError, FileNotFoundError):
-            LOGGER.warning("Failed to load session index, creating new one")
-            return {}
-    
-    def _save_index(self, index: Dict[str, Dict[str, Any]]) -> None:
-        """Save session index to disk."""
-        self.index_file.write_text(json.dumps(index, indent=2))
-    
-    def _get_session_file(self, session_id: str) -> Path:
-        """Get path to session JSONL file."""
-        return self.sessions_dir / f"{session_id}.jsonl"
+        LOGGER.debug("SessionManager initialized for tenant '%s': %s", 
+                     tenant_id, self.db_path)
     
     def create_session(self, title: str = "New Chat") -> str:
         """
@@ -125,30 +150,23 @@ class SessionManager:
             session_id: Unique session identifier
         """
         session_id = str(uuid.uuid4())
-        now = datetime.now()
+        now = datetime.now().isoformat()
         
-        session = Session(
-            session_id=session_id,
-            title=title,
-            created_at=now,
-            last_active=now,
-            message_count=0,
-        )
+        with db_connection(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (session_id, tenant_id, title, created_at, last_active, message_count)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (session_id, self.tenant_id, title, now, now)
+            )
         
-        # Update index
-        index = self._load_index()
-        index[session_id] = session.to_dict()
-        self._save_index(index)
-        
-        # Create empty session file
-        self._get_session_file(session_id).touch()
-        
-        LOGGER.info("Created session: %s", session_id)
+        LOGGER.info("Created session %s for tenant %s", session_id, self.tenant_id)
         return session_id
     
     def list_sessions(self, limit: Optional[int] = None) -> List[Session]:
         """
-        List all sessions, sorted by last_active (most recent first).
+        List all sessions for this tenant, sorted by last_active (most recent first).
         
         Args:
             limit: Maximum number of sessions to return
@@ -156,16 +174,21 @@ class SessionManager:
         Returns:
             List of Session objects
         """
-        index = self._load_index()
-        sessions = [Session.from_dict(data) for data in index.values()]
+        with db_connection(self.db_path) as conn:
+            query = """
+                SELECT session_id, tenant_id, title, created_at, last_active, message_count
+                FROM sessions
+                WHERE tenant_id = ?
+                ORDER BY last_active DESC
+            """
+            
+            if limit:
+                query += f" LIMIT {int(limit)}"
+            
+            cursor = conn.execute(query, (self.tenant_id,))
+            rows = cursor.fetchall()
         
-        # Sort by last_active descending
-        sessions.sort(key=lambda s: s.last_active, reverse=True)
-        
-        if limit:
-            sessions = sessions[:limit]
-        
-        return sessions
+        return [Session.from_row(row) for row in rows]
     
     def get_session(self, session_id: str) -> Optional[Session]:
         """
@@ -175,13 +198,21 @@ class SessionManager:
             session_id: Session identifier
         
         Returns:
-            Session object or None if not found
+            Session object or None if not found (or wrong tenant)
         """
-        index = self._load_index()
-        session_data = index.get(session_id)
+        with db_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT session_id, tenant_id, title, created_at, last_active, message_count
+                FROM sessions
+                WHERE session_id = ? AND tenant_id = ?
+                """,
+                (session_id, self.tenant_id)
+            )
+            row = cursor.fetchone()
         
-        if session_data:
-            return Session.from_dict(session_data)
+        if row:
+            return Session.from_row(row)
         return None
     
     def load_messages(self, session_id: str) -> List[Message]:
@@ -192,24 +223,27 @@ class SessionManager:
             session_id: Session identifier
         
         Returns:
-            List of Message objects
+            List of Message objects (empty if session doesn't exist or wrong tenant)
         """
-        session_file = self._get_session_file(session_id)
-        
-        if not session_file.exists():
-            LOGGER.warning("Session file not found: %s", session_id)
+        # Verify session belongs to this tenant
+        session = self.get_session(session_id)
+        if session is None:
+            LOGGER.warning("Session not found or access denied: %s", session_id)
             return []
         
-        messages = []
-        for line in session_file.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                try:
-                    messages.append(Message.from_dict(json.loads(line)))
-                except (json.JSONDecodeError, KeyError) as exc:
-                    LOGGER.warning("Failed to parse message in %s: %s", session_id, exc)
-                    continue
+        with db_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT role, content, timestamp, metadata
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,)
+            )
+            rows = cursor.fetchall()
         
-        return messages
+        return [Message.from_row(row) for row in rows]
     
     def add_message(
         self,
@@ -227,25 +261,34 @@ class SessionManager:
             content: Message content
             metadata: Optional metadata (confidence, sources, etc.)
         """
-        message = Message(
-            role=role,
-            content=content,
-            timestamp=datetime.now(),
-            metadata=metadata or {},
-        )
+        # Verify session belongs to this tenant
+        session = self.get_session(session_id)
+        if session is None:
+            LOGGER.error("Cannot add message: session %s not found or access denied", session_id)
+            return
         
-        # Append to JSONL file
-        session_file = self._get_session_file(session_id)
-        with session_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(message.to_dict(), ensure_ascii=False) + "\n")
+        now = datetime.now().isoformat()
+        metadata_json = json.dumps(metadata) if metadata else None
         
-        # Update session metadata
-        index = self._load_index()
-        if session_id in index:
-            session_data = index[session_id]
-            session_data["last_active"] = datetime.now().isoformat()
-            session_data["message_count"] = session_data.get("message_count", 0) + 1
-            self._save_index(index)
+        with db_connection(self.db_path) as conn:
+            # Insert message
+            conn.execute(
+                """
+                INSERT INTO messages (session_id, role, content, timestamp, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_id, role, content, now, metadata_json)
+            )
+            
+            # Update session metadata
+            conn.execute(
+                """
+                UPDATE sessions 
+                SET last_active = ?, message_count = message_count + 1
+                WHERE session_id = ? AND tenant_id = ?
+                """,
+                (now, session_id, self.tenant_id)
+            )
         
         LOGGER.debug("Added %s message to session %s", role, session_id)
     
@@ -257,42 +300,61 @@ class SessionManager:
             session_id: Session identifier
             title: New title
         """
-        index = self._load_index()
-        if session_id in index:
-            index[session_id]["title"] = title
-            self._save_index(index)
-            LOGGER.info("Updated session %s title to: %s", session_id, title)
+        with db_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE sessions 
+                SET title = ?
+                WHERE session_id = ? AND tenant_id = ?
+                """,
+                (title, session_id, self.tenant_id)
+            )
+            
+            if cursor.rowcount == 0:
+                LOGGER.warning("Failed to update title: session %s not found", session_id)
+            else:
+                LOGGER.debug("Updated title for session %s: %s", session_id, title)
     
     def delete_session(self, session_id: str) -> bool:
         """
-        Delete a session and its messages.
+        Delete a session and all its messages.
         
         Args:
             session_id: Session identifier
         
         Returns:
-            True if deleted, False if not found
+            True if session was deleted, False if not found
         """
-        # Remove from index
-        index = self._load_index()
-        if session_id not in index:
+        with db_connection(self.db_path) as conn:
+            # Messages are deleted automatically via ON DELETE CASCADE
+            cursor = conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE session_id = ? AND tenant_id = ?
+                """,
+                (session_id, self.tenant_id)
+            )
+            
+            deleted = cursor.rowcount > 0
+        
+        if deleted:
+            LOGGER.info("Deleted session %s", session_id)
+        else:
             LOGGER.warning("Session not found for deletion: %s", session_id)
-            return False
         
-        del index[session_id]
-        self._save_index(index)
-        
-        # Delete JSONL file
-        session_file = self._get_session_file(session_id)
-        if session_file.exists():
-            session_file.unlink()
-        
-        LOGGER.info("Deleted session: %s", session_id)
-        return True
+        return deleted
     
-    def auto_generate_title(self, session_id: str, first_query: str, first_answer: str) -> str:
+    def auto_generate_title(
+        self, 
+        session_id: str, 
+        first_query: str, 
+        first_answer: str
+    ) -> str:
         """
-        Auto-generate a session title based on first Q&A using Gemini Flash Lite.
+        Generate a descriptive title based on first exchange.
+        
+        Uses Gemini Flash Lite for title generation with fallback
+        to query preview if generation fails.
         
         Args:
             session_id: Session identifier
@@ -329,7 +391,7 @@ Title:"""
             
             title = response.text.strip().strip('"').strip("'")
             
-            # Fallback if generation failed or produced garbage
+            # Fallback if generation produced garbage
             if not title or len(title) < 5 or len(title) > 60:
                 raise ValueError("Generated title invalid")
             
@@ -346,25 +408,42 @@ Title:"""
     
     def clear_all_sessions(self) -> int:
         """
-        Delete all sessions (for testing/reset).
+        Delete all sessions for this tenant (for testing/reset).
         
         Returns:
             Number of sessions deleted
         """
-        index = self._load_index()
-        count = len(index)
+        with db_connection(self.db_path) as conn:
+            # Get count first
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
+                (self.tenant_id,)
+            )
+            count = cursor.fetchone()[0]
+            
+            # Delete all (messages cascade)
+            conn.execute(
+                "DELETE FROM sessions WHERE tenant_id = ?",
+                (self.tenant_id,)
+            )
         
-        # Delete all JSONL files
-        for session_id in index.keys():
-            session_file = self._get_session_file(session_id)
-            if session_file.exists():
-                session_file.unlink()
-        
-        # Clear index
-        self._save_index({})
-        
-        LOGGER.info("Cleared all sessions: %d deleted", count)
+        LOGGER.info("Cleared all sessions for tenant %s: %d deleted", 
+                    self.tenant_id, count)
         return count
+    
+    def get_session_count(self) -> int:
+        """
+        Get total number of sessions for this tenant.
+        
+        Returns:
+            Number of sessions
+        """
+        with db_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
+                (self.tenant_id,)
+            )
+            return cursor.fetchone()[0]
 
 
 __all__ = ["Session", "Message", "SessionManager"]

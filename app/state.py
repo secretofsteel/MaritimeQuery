@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from collections import defaultdict
 
 from llama_index.core import Document, VectorStoreIndex
+from llama_index.core import Settings as LlamaSettings
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.retrievers.bm25 import BM25Retriever
 
@@ -21,137 +22,155 @@ from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
 from .session_uploads import SessionUploadManager, SessionUploadChunk
+from .retrieval import SQLiteFTS5Retriever, SQLiteNodeLoader, TenantAwareVectorRetriever
+from .nodes import NodeRepository
+from .database import get_node_count
+
+
 
 @dataclass
 class AppState:
-    # === Index state ===
+    # Core state
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
     vector_retriever: Optional[VectorIndexRetriever] = None
-    bm25_retriever: Optional[BM25Retriever] = None
-    manager: Optional[IncrementalIndexManager] = None
-    
-    # === Query history (legacy) ===
+    fts5_retriever: Optional[SQLiteFTS5Retriever] = None
+    bm25_retriever: Optional[Any] = None
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
+    manager: Optional[IncrementalIndexManager] = None
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
+
+    # Session upload management
+    session_upload_manager: Optional[SessionUploadManager] = None
+    _session_upload_metadata_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
     
-    # === Context-aware conversation state ===
-    sticky_chunks: List[Any] = field(default_factory=list)
-    context_turn_count: int = 0
-    conversation_active: bool = False
-    last_topic: Optional[str] = None
-    conversation_summary: str = ""
-    last_doc_type_pref: Optional[str] = None
-    last_scope: Optional[str] = None
-    
-    # === Session management ===
+    # Context-aware conversation state
+    sticky_chunks: List[Any] = field(default_factory=list)  # Reused chunks for followups
+    context_turn_count: int = 0  # Track turns in current conversation thread
+    conversation_active: bool = False  # Is context mode enabled?
+    last_topic: Optional[str] = None  # Semantic topic from last query (for inheritance)
+    conversation_summary: str = ""  # Running summary instead of full history
+    last_doc_type_pref: Optional[str] = None  # Last detected doc type preference
+    last_scope: Optional[str] = None  # NEW: Last detected scope (company/regulatory/operational/safety/general)
     session_manager: Optional[SessionManager] = None
     current_session_id: Optional[str] = None
     _session_messages_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    
-    # === Session uploads (per-session temporary files) ===
     session_upload_manager: Optional[SessionUploadManager] = None
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
-    
-    # === Hierarchical retrieval ===
-    _node_map_cache: Optional[Dict[str, Any]] = None
-    hierarchical_enabled: bool = False
+    _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
+    hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
+
+    def ensure_nodes_loaded(self) -> List[Document]:
+        """Load nodes from SQLite if not already in memory."""
+        import streamlit as st
+        from .nodes import NodeRepository
+        
+        if not self.nodes:
+            tenant_id = st.session_state.get("tenant_id", "shared")
+            
+            # Load tenant-specific nodes
+            repo = NodeRepository(tenant_id=tenant_id)
+            tenant_nodes = repo.get_all_nodes()
+            
+            # Also load shared nodes if tenant is not 'shared'
+            if tenant_id != "shared":
+                repo_shared = NodeRepository(tenant_id="shared")
+                shared_nodes = repo_shared.get_all_nodes()
+                self.nodes = tenant_nodes + shared_nodes
+                LOGGER.info("Loaded %d tenant + %d shared nodes", len(tenant_nodes), len(shared_nodes))
+            else:
+                self.nodes = tenant_nodes
+                LOGGER.info("Loaded %d nodes (tenant=%s)", len(self.nodes), tenant_id)
+        
+        return self.nodes
+
+    @property
+    def tenant_id(self) -> Optional[str]:
+        """Get current tenant ID from session state."""
+        import streamlit as st
+        return st.session_state.get("tenant_id")
 
     def ensure_index_loaded(self) -> bool:
-        """
-        Lazy-load the index if not already present.
-
-        Returns:
-            True if index is ready (loaded or already present)
-            False if index could not be loaded
-        """
-        # Import here to avoid circular dependency at module level
-        try:
-            import streamlit as st
-        except ImportError:
-            # Fallback for non-Streamlit contexts (testing, etc.)
-            LOGGER.warning("Streamlit not available, using in-memory flag for index loading")
-            st = None
-
-        # Already loaded and ready
-        if self.nodes and self.index:
-            LOGGER.debug("Index already loaded: %d nodes", len(self.nodes))
-            # Check hierarchical support if not already checked
-            if not self.hierarchical_enabled:
-                self._validate_hierarchical_support()
-            return True
-
-        # Check session state flag (persistent across Streamlit reruns)
-        if st is not None:
-            if "index_load_attempted" not in st.session_state:
-                st.session_state["index_load_attempted"] = False
-
-            # Already tried and failed, don't spam attempts
-            if st.session_state["index_load_attempted"] and not self.nodes:
-                LOGGER.debug("Index load previously failed, skipping retry")
-                return False
-
-            # Mark that we're attempting to load
-            st.session_state["index_load_attempted"] = True
-
-        LOGGER.info("Attempting to load cached index...")
-        try:
-            nodes, index = load_cached_nodes_and_index()
-
-            if nodes and index:
-                self.nodes = nodes
+        """Ensure search index is ready."""
+        import streamlit as st
+        
+        if st.session_state.get("_index_load_attempted"):
+            return self.index is not None
+        
+        st.session_state["_index_load_attempted"] = True
+        
+        # Load ChromaDB index
+        if self.index is None:
+            from .indexing import load_cached_nodes_and_index
+            nodes, index = load_cached_nodes_and_index()  # No tenant_id
+            
+            if index is not None:
                 self.index = index
-                # Force retriever recreation
-                self.vector_retriever = None
-                self.bm25_retriever = None
-                self.ensure_retrievers()
-
-                # Update manager if it exists
-                if self.manager:
-                    self.manager.nodes = nodes
-
-                LOGGER.info("Successfully loaded %d cached nodes", len(nodes))
-
-                # Validate hierarchical support
-                self._validate_hierarchical_support()
-
-                return True
+                # Don't store nodes - FTS5 queries SQLite directly
+                LOGGER.info("Loaded ChromaDB index")
             else:
-                LOGGER.warning("No cached index found. User must build index first.")
+                LOGGER.info("No cached index found")
                 return False
-
-        except Exception as exc:
-            LOGGER.exception("Failed to load cached index: %s", exc)
-            return False
+        
+        # Set up retrievers
+        self.ensure_retrievers()
+        self._validate_hierarchical_support()
+        
+        return self.index is not None
 
     def ensure_retrievers(self) -> None:
-        """Initialise retrievers if nodes and index are ready."""
-        if not self.nodes or not self.index:
-            LOGGER.debug("Skipping retriever init: nodes=%s, index=%s", 
-                        bool(self.nodes), bool(self.index))
-            return
+        """
+        Ensure retriever instances are ready.
         
-        if self.vector_retriever is None:
-            self.vector_retriever = VectorIndexRetriever(index=self.index, similarity_top_k=40)
-            LOGGER.debug("Initialized vector retriever")
+        Creates:
+        - FTS5Retriever - queries SQLite directly (tenant-aware)
+        - TenantAwareVectorRetriever - queries ChromaDB with tenant filter
+        """
+        import streamlit as st
+        import chromadb
+        from .config import AppConfig
+        
+        tenant_id = st.session_state.get("tenant_id", "shared")
+        
+        # FTS5 retriever (tenant-aware keyword search)
+        if self.fts5_retriever is None:
+            self.fts5_retriever = SQLiteFTS5Retriever(
+                tenant_id=tenant_id,
+                similarity_top_k=20,
+            )
+            LOGGER.debug("Created FTS5Retriever for tenant %s", tenant_id)
+        
+        # Point bm25_retriever to fts5 for compatibility
+        self.bm25_retriever = self.fts5_retriever
+        
+        # Tenant-aware vector retriever
+        if self.vector_retriever is None and self.index is not None:
+            config = AppConfig.get()
             
-        if self.bm25_retriever is None:
-            self.bm25_retriever = BM25Retriever.from_defaults(nodes=self.nodes, similarity_top_k=40)
-            LOGGER.debug("Initialized BM25 retriever")
+            # Get ChromaDB collection
+            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
+            collection = client.get_or_create_collection("maritime_docs")
+            
+            # Create tenant-aware retriever
+            self.vector_retriever = TenantAwareVectorRetriever(
+                collection=collection,
+                embed_model=LlamaSettings.embed_model,
+                tenant_id=tenant_id,
+                similarity_top_k=20,
+            )
+            LOGGER.debug("Created TenantAwareVectorRetriever for tenant %s", tenant_id)
 
     def is_ready_for_queries(self) -> bool:
         """Check if the system is ready to handle queries."""
         return (
-            self.nodes is not None 
-            and len(self.nodes) > 0
-            and self.index is not None
+            self.index is not None
             and self.vector_retriever is not None
-            and self.bm25_retriever is not None
+            and self.fts5_retriever is not None  # Changed from bm25_retriever
         )
 
     def ensure_manager(self) -> IncrementalIndexManager:
@@ -170,9 +189,46 @@ class AppState:
         return self.manager
 
     def ensure_session_manager(self) -> SessionManager:
-        """Initialise and cache the chat session manager."""
+        """
+        Get or create SessionManager, scoped to current tenant.
+        
+        Retrieves tenant_id from Streamlit session state (set by auth).
+        Recreates manager if tenant changes (shouldn't happen normally).
+        
+        Returns:
+            SessionManager instance for the current tenant.
+        
+        Raises:
+            RuntimeError: If no tenant_id in session (auth not completed).
+        """
+        import streamlit as st
+        
+        tenant_id = st.session_state.get("tenant_id")
+        
+        if tenant_id is None:
+            # This shouldn't happen if auth gate is working
+            raise RuntimeError(
+                "No tenant_id in session state. "
+                "Ensure authentication completes before accessing sessions."
+            )
+        
+        # Create new manager if none exists or tenant changed
         if self.session_manager is None:
-            self.session_manager = SessionManager()
+            self.session_manager = SessionManager(tenant_id=tenant_id)
+            LOGGER.debug("Created SessionManager for tenant: %s", tenant_id)
+        
+        elif self.session_manager.tenant_id != tenant_id:
+            # Tenant changed (e.g., during testing) - recreate manager
+            LOGGER.warning(
+                "Tenant changed from %s to %s - recreating SessionManager",
+                self.session_manager.tenant_id, tenant_id
+            )
+            self.session_manager = SessionManager(tenant_id=tenant_id)
+            
+            # Also clear session caches since they belong to old tenant
+            self._session_messages_cache.clear()
+            self.current_session_id = None
+        
         return self.session_manager
 
     def ensure_session_upload_manager(self) -> SessionUploadManager:
@@ -615,37 +671,51 @@ class AppState:
 
     def get_node_map(self) -> Dict[str, Any]:
         """
-        Get or build cached node map for hierarchical retrieval.
-
-        Returns:
-            Dictionary mapping node_id -> NodeWithScore
+        Get node map for hierarchical retrieval.
+        
+        Builds a map of node_id -> NodeWithScore for looking up
+        specific chunks by ID.
+        
+        Note: This still loads nodes into memory for the map.
+        Consider refactoring hierarchical retrieval to use
+        SQLiteNodeLoader.get_node_by_id() instead for better scaling.
         """
         if self._node_map_cache is None:
             from llama_index.core.schema import NodeWithScore
-
+            import streamlit as st
+            
+            tenant_id = st.session_state.get("tenant_id", "shared")
+            
+            # Load nodes from SQLite
+            repo = NodeRepository(tenant_id=tenant_id)
+            nodes = repo.get_all_nodes()
+            
             node_map: Dict[str, Any] = {}
-            for item in self.nodes:
-                # Get node_id (handles multiple attribute names)
-                node_id = None
-                if hasattr(item, 'node_id'):
-                    node_id = item.node_id
-                elif hasattr(item, 'id_'):
-                    node_id = item.id_
-                elif hasattr(item, 'doc_id'):
-                    node_id = item.doc_id
-
+            for item in nodes:
+                node_id = getattr(item, 'node_id', None) or getattr(item, 'id_', None)
                 if node_id:
                     node_map[node_id] = NodeWithScore(node=item, score=0.5)
-
+            
             self._node_map_cache = node_map
             LOGGER.info("Built node map cache with %d entries", len(node_map))
-
+        
         return self._node_map_cache
 
     def invalidate_node_map_cache(self) -> None:
-        """Invalidate node map cache when index is rebuilt."""
+        """
+        Invalidate all node-related caches.
+        
+        Call this after index rebuild, document changes, or tenant change.
+        """
         self._node_map_cache = None
-        LOGGER.debug("Node map cache invalidated")
+        self.nodes = []  # Clear lazy-loaded nodes
+        
+        # Clear retrievers so they get recreated with correct tenant
+        self.fts5_retriever = None
+        self.bm25_retriever = None
+        self.vector_retriever = None
+        
+        LOGGER.debug("Node caches and retrievers invalidated")
 
 
 __all__ = ["AppState"]

@@ -36,84 +36,111 @@ from app.document_inspector_helpers import (
     identify_problem_documents,
     get_document_metrics,
 )
-
+from .services import (
+    sync_memory_to_db,
+    rebuild_document_trees,
+    delete_document_by_source,
+    batch_delete_documents,
+    delete_entire_library,
+    copy_uploaded_files,
+    delete_duplicate_files,
+)
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
+def _get_tenant_display_names() -> Dict[str, str]:
+    """Get mapping of tenant_id -> display name from users.yaml."""
+    from pathlib import Path
+    import yaml
+    
+    display_names = {"shared": "Shared (All Tenants)"}
+    
+    config_path = Path("config/users.yaml")
+    if config_path.exists():
+        try:
+            with open(config_path, "r") as f:
+                users_config = yaml.safe_load(f)
+            
+            credentials = users_config.get("credentials", {}).get("usernames", {})
+            for username, user_data in credentials.items():
+                tenant_id = user_data.get("tenant_id")
+                name = user_data.get("name", tenant_id)
+                if tenant_id and tenant_id not in display_names:
+                    display_names[tenant_id] = name
+        except Exception as exc:
+            LOGGER.warning("Failed to load tenant names from users.yaml: %s", exc)
+    
+    return display_names
+
+def _get_tenant_list() -> List[str]:
+    """
+    Get list of available tenants from users.yaml config.
+    
+    Returns list of tenant IDs including 'shared'.
+    """
+    from pathlib import Path
+    import yaml
+    
+    tenants = ["shared"]  # Always include shared
+    
+    # Load from users.yaml
+    config_path = Path("config/users.yaml")
+    if config_path.exists():
+        try:
+            with open(config_path, "r") as f:
+                users_config = yaml.safe_load(f)
+            
+            credentials = users_config.get("credentials", {}).get("usernames", {})
+            for username, user_data in credentials.items():
+                tenant_id = user_data.get("tenant_id")
+                if tenant_id and tenant_id not in tenants:
+                    tenants.append(tenant_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to load tenants from users.yaml: %s", exc)
+    
+    return sorted(tenants)
 
 def _sync_memory_to_db(app_state: AppState) -> None:
-    """
-    Rebuild app_state.nodes from ChromaDB (single source of truth).
-    
-    Use when memory is bloated but ChromaDB is correct.
-    """
-    from llama_index.core.schema import TextNode
-    import chromadb
-    from app.config import AppConfig
-    
-    config = AppConfig.get()
+    """UI wrapper for sync_memory_to_db service."""
     
     with st.spinner("Rebuilding memory from ChromaDB..."):
-        # Get current counts
-        old_count = len(app_state.nodes)
-        
-        # Connect to ChromaDB
-        client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-        collection = client.get_collection("maritime_docs")
-        
-        # Fetch all chunks
-        result = collection.get(
-            include=['documents', 'metadatas', 'embeddings']
+        result = sync_memory_to_db(app_state)
+    
+    if result.success:
+        st.success(
+            f"✅ Synced memory to DB: {result.old_count} → {result.new_count} nodes "
+            f"(removed {result.removed} bloated)"
         )
-        
-        # Rebuild nodes
-        nodes = []
-        for i, chunk_id in enumerate(result['ids']):
-            node = TextNode(
-                id_=chunk_id,
-                text=result['documents'][i],
-                metadata=result['metadatas'][i],
-                embedding=result['embeddings'][i] if result['embeddings'] is not None else None
-            )
-            nodes.append(node)
-        
-        # Update app_state
-        app_state.nodes = nodes
-        app_state.invalidate_node_map_cache()
-        app_state.vector_retriever = None
-        app_state.bm25_retriever = None
-        app_state.ensure_retrievers()
-        
-        # Save to pickle cache
-        import pickle
-        with config.paths.nodes_cache_path.open("wb") as f:
-            pickle.dump(nodes, f)
-        
-        new_count = len(nodes)
-        removed = old_count - new_count
-        
-        st.success(f"✅ Synced memory to DB: {old_count} → {new_count} nodes (removed {removed} bloated)")
-        LOGGER.info(f"Synced memory to DB: removed {removed} bloated nodes")
-        
         st.rerun()
+    else:
+        st.error(f"❌ Sync failed: {result.error}")
 
 def render_document_inspector(app_state):
     """
     Render the Document Inspector section in admin panel.
-    
     """
+    # Get tenant to manage
+    manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
     
-    if not app_state.nodes:
-        st.info("No documents indexed. Build or sync the library first.")
+    # Load nodes for managed tenant ONLY
+    from .nodes import NodeRepository
+    
+    repo = NodeRepository(tenant_id=manage_tenant)
+    managed_nodes = repo.get_all_nodes()
+    
+    if not managed_nodes:
+        st.info(f"No documents indexed for **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**.")
         return
+    
+    st.caption(f"Inspecting: **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**")
     
     st.markdown("""
     Inspect document processing results, view extracted text, document trees, 
     and identify potential issues.
     """)
     
-    # Get all unique sources
-    sources = sorted(set(node.metadata.get("source", "") for node in app_state.nodes if node.metadata.get("source")))
+    # Get all unique sources from managed_nodes
+    sources = sorted(set(node.metadata.get("source", "") for node in managed_nodes if node.metadata.get("source")))
     
     if not sources:
         st.warning("No source documents found in index.")
@@ -128,7 +155,7 @@ def render_document_inspector(app_state):
     if st.button("Identify Problem Documents", type="primary"):
         with st.spinner("Scanning documents..."):
             from app.document_inspector_helpers import identify_problem_documents
-            problems = identify_problem_documents(app_state)
+            problems = identify_problem_documents(managed_nodes)
         
         if problems:
             st.error(f"Found {len(problems)} document(s) with issues:")
@@ -157,7 +184,7 @@ def render_document_inspector(app_state):
     
     # Get metrics for selected document
     from app.document_inspector_helpers import get_document_metrics
-    metrics = get_document_metrics(selected_doc, app_state)
+    metrics = get_document_metrics(selected_doc, managed_nodes)
     
     if not metrics:
         st.error(f"Could not load metrics for: {selected_doc}")
@@ -299,11 +326,13 @@ def render_document_inspector(app_state):
                 doc_type = corrections.get('doc_type') or extraction.get('doc_type', 'N/A')
                 form_num = corrections.get('form_number') or extraction.get('form_number', 'N/A')
                 category = corrections.get('form_category_name') or extraction.get('category', 'N/A')
+                ownership = corrections.get('tenant_id') or extraction.get('tenant_id', 'N/A')
                 
                 st.markdown(f"- **Title:** {title}")
                 st.markdown(f"- **Type:** {doc_type}")
                 st.markdown(f"- **Form #:** {form_num}")
                 st.markdown(f"- **Category:** {category}")
+                st.markdown(f"- **Ownership:** {ownership}")
                 
                 if corrections:
                     st.info("ℹ️ Some fields have been corrected")
@@ -368,126 +397,23 @@ def render_document_inspector(app_state):
             st.error("❌ No Gemini extraction found for this document.")
 
 def rebuild_trees_only(app_state: AppState) -> None:
-    """
-    Rebuild document trees from existing Gemini cache without touching index.
-    
-    This is FAST (~5 seconds) because it:
-    - Doesn't re-extract documents (uses cached Gemini extractions)
-    - Doesn't re-chunk documents
-    - Doesn't re-embed chunks
-    - Just rebuilds tree JSON structure from existing cache
-    
-    Perfect for:
-    - Testing tree building changes
-    - Fixing tree issues without full rebuild
-    - Quick recovery from tree corruption
-    - Development and debugging
-    """
-    from .config import AppConfig
-    from .indexing import (
-        load_jsonl, 
-        load_document_trees,
-        save_document_trees,
-        map_chunks_to_tree_sections
-    )
-    from .extraction import build_document_tree
-    from .logger import LOGGER
+    """UI wrapper for rebuild_document_trees service."""
     
     with st.spinner("🌲 Rebuilding document trees from cache..."):
-        try:
-            config = AppConfig.get()
-            paths = config.paths
-            
-            # Load Gemini cache
-            LOGGER.info("Loading Gemini extraction cache...")
-            cached_records = load_jsonl(paths.gemini_json_cache)
-            
-            if not cached_records:
-                st.error("❌ No Gemini cache found. Please rebuild the index first.")
-                LOGGER.error("Cannot rebuild trees: no Gemini cache")
-                return
-            
-            LOGGER.info("Found %d cached extractions", len(cached_records))
-            
-            # Build trees for all files with valid extractions
-            document_trees = []
-            skipped = 0
-            errors = []
-            
-            for filename, cached_record in cached_records.items():
-                gemini_meta = cached_record.get("gemini", {})
-                
-                # Skip files with extraction errors
-                if "parse_error" in gemini_meta:
-                    LOGGER.debug("Skipping %s (parse error)", filename)
-                    skipped += 1
-                    continue
-                
-                if "extraction_error" in gemini_meta:
-                    LOGGER.debug("Skipping %s (extraction error)", filename)
-                    skipped += 1
-                    continue
-                
-                # Skip files with no sections
-                if not gemini_meta.get("sections"):
-                    LOGGER.debug("Skipping %s (no sections)", filename)
-                    skipped += 1
-                    continue
-                
-                # Build tree for this document
-                doc_path = paths.docs_path / filename
-                doc_id = doc_path.stem  # Filename without extension
-                
-                try:
-                    tree = build_document_tree(gemini_meta, doc_id)
-                    document_trees.append(tree)
-                    LOGGER.debug("Built tree for %s with %d sections", 
-                                doc_id, len(tree.get("sections", [])))
-                except Exception as exc:
-                    LOGGER.exception("Failed to build tree for %s: %s", filename, exc)
-                    errors.append(f"{filename}: {str(exc)}")
-                    skipped += 1
-                    continue
-            
-            LOGGER.info("Built %d document trees (%d files skipped)", 
-                       len(document_trees), skipped)
-            
-            # Map chunks to tree sections (if nodes available)
-            if app_state.nodes:
-                LOGGER.info("Mapping %d chunks to tree sections...", len(app_state.nodes))
-                document_trees = map_chunks_to_tree_sections(app_state.nodes, document_trees)
-                LOGGER.info("Chunk mapping complete")
-            else:
-                LOGGER.warning("No nodes loaded - skipping chunk mapping")
-            
-            # Save trees to JSON
-            trees_path = paths.cache_dir / "document_trees.json"
-            save_document_trees(document_trees, trees_path)
-            LOGGER.info("Saved trees to %s", trees_path)
-            
-            # Reload hierarchical state in app
-            app_state._validate_hierarchical_support()
-            
-            # Success message
-            success_msg = f"✅ Rebuilt {len(document_trees)} document trees!"
-            if skipped > 0:
-                success_msg += f" (Skipped {skipped} files with errors/no sections)"
-            
-            st.success(success_msg)
-            LOGGER.info("Tree rebuild complete: %d trees, %d skipped", 
-                       len(document_trees), skipped)
-            
-            # Show errors if any
-            if errors:
-                with st.expander(f"⚠️ {len(errors)} files had errors", expanded=False):
-                    for error in errors[:20]:  # Limit to first 20
-                        st.text(error)
-                    if len(errors) > 20:
-                        st.text(f"... and {len(errors) - 20} more")
-            
-        except Exception as exc:
-            LOGGER.exception("Failed to rebuild document trees")
-            st.error(f"❌ Failed to rebuild trees: {exc}")
+        result = rebuild_document_trees(app_state)
+    
+    if result.success:
+        success_msg = f"✅ Rebuilt {result.trees_built} document trees!"
+        if result.files_skipped > 0:
+            success_msg += f" ({result.files_skipped} files skipped)"
+        st.success(success_msg)
+        
+        if result.errors:
+            with st.expander("⚠️ Errors during tree building"):
+                for error in result.errors:
+                    st.text(error)
+    else:
+        st.error(f"❌ {result.error}")
 
 
 def _stage_icon(status: StageStatus) -> str:
@@ -1108,7 +1034,7 @@ def rebuild_index(app_state: AppState) -> None:
             LOGGER.exception("Failed to rebuild index")
             st.error(f"❌ Failed to rebuild index: {exc}")
 
-def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool = False) -> None:
+def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool = False, tenant_id: str = "shared") -> None:
     """Execute parallel index rebuild with progress tracking.
     
     Args:
@@ -1120,7 +1046,7 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
     
     phase1_container = st.container()
     phase2_container = st.container()
-    
+
     with phase1_container:
         st.write("**Phase 1:** Extracting documents (Gemini)")
         phase1_progress = st.progress(0.0)
@@ -1155,7 +1081,8 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         # Run parallel processing
         nodes, index, report = build_index_from_library_parallel(
             progress_callback=progress_callback,
-            clear_gemini_cache=clear_gemini_cache
+            clear_gemini_cache=clear_gemini_cache,
+            tenant_id=tenant_id
         )
 
         # Store report in session state
@@ -1167,6 +1094,7 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         app_state.invalidate_node_map_cache()  # Clear stale cache
         app_state.vector_retriever = None
         app_state.bm25_retriever = None
+        app_state.manager = None
         app_state.ensure_retrievers()
         app_state.ensure_manager().nodes = nodes
         
@@ -1194,7 +1122,7 @@ def rebuild_index_parallel(app_state: AppState) -> None:
     """Compatibility wrapper - calls rebuild_index_parallel_execute with default settings."""
     rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
-def sync_library_with_ui(app_state: AppState) -> None:
+def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared") -> None:
     """
     Execute sync_library with progress tracking UI.
     
@@ -1237,6 +1165,7 @@ def sync_library_with_ui(app_state: AppState) -> None:
         
         # Run sync with progress callback
         manager = app_state.ensure_manager()
+        manager.tenant_id = tenant_id
         manager.nodes = app_state.nodes
         
         sync_result, report = manager.sync_library(
@@ -1715,6 +1644,7 @@ def render_app(
 
         st.markdown("---")
 
+
         # Custom CSS for button styling (not feedback buttons)
         st.markdown("""
         <style>
@@ -1870,6 +1800,7 @@ def render_app(
             # NEW: Context-aware conversation toggle
             use_context = st.checkbox(
                 "💬 Context-aware chat",
+                value=True,
                 key="use_context",
                 help=f"Remember previous exchanges (resets after {MAX_CONTEXT_TURNS} turns)"
             )
@@ -2386,12 +2317,30 @@ def render_admin_panel(app_state: AppState) -> None:
     NO CHAT INTERFACE - pure management UI.
     Toggle back to User mode for chat.
     """
+    # === SUPERUSER GATE ===
+    if not st.session_state.get("is_superuser", False):
+        st.error("🚫 Admin panel requires superuser access.")
+        st.markdown("""
+        The admin panel is restricted to system administrators.
+        
+        If you need to:
+        - **Upload documents**: Contact your administrator
+        - **Delete documents**: Contact your administrator  
+        - **Rebuild the index**: Contact your administrator
+        
+        Your chat history and queries are unaffected.
+        """)
+        
+        if st.button("← Back to Chat", type="primary"):
+            st.query_params["read_only"] = "true"
+            st.rerun()
+        
+        # Stop rendering - don't show admin panel
+        return
     
     # Mode toggle in sidebar
     with st.sidebar:
 
-        # FIX: Match button style from User mode
-        # Changed from type="primary" to match exact user mode styling
         if st.button("👤 Back to Chat", use_container_width=True, type="secondary"):
             st.query_params["read_only"] = "true"
             st.rerun()
@@ -2402,49 +2351,72 @@ def render_admin_panel(app_state: AppState) -> None:
         st.caption("Library management and configuration")
         
         st.divider()
+
+        # === TENANT SELECTOR ===
+        st.markdown("#### 👥 Manage Tenant")
+        
+        tenants = _get_tenant_list()
+        tenant_names = _get_tenant_display_names()
+        
+        display_options = [tenant_names.get(t, t) for t in tenants]
+        
+        current_manage_tenant = st.session_state.get("manage_tenant", "shared")
+        try:
+            current_index = tenants.index(current_manage_tenant)
+        except ValueError:
+            current_index = 0
+        
+        selected_display = st.selectbox(
+            "Select tenant to manage",
+            options=display_options,
+            index=current_index,
+            key="manage_tenant_select",
+            label_visibility="collapsed"
+        )
+        
+        # Map display name back to tenant_id
+        selected_tenant = tenants[display_options.index(selected_display)]
+        
+        if st.session_state.get("manage_tenant") != selected_tenant:
+            st.session_state["manage_tenant"] = selected_tenant
+            st.rerun()
+        
+        st.divider()
             
-        # Show quick stats with DB health check
-        if app_state.nodes:
-            unique_sources = set(node.metadata.get("source") for node in app_state.nodes)
-            num_docs = len(unique_sources)
-            chunks_memory = len(app_state.nodes)
+        # Show stats for selected tenant
+        from .nodes import NodeRepository
+        
+        repo = NodeRepository(tenant_id=selected_tenant)
+        tenant_nodes = repo.get_all_nodes()
+        
+        if selected_tenant != "shared":
+            repo_shared = NodeRepository(tenant_id="shared")
+            shared_nodes = repo_shared.get_all_nodes()
+            visible_nodes = tenant_nodes + shared_nodes
+        else:
+            visible_nodes = tenant_nodes
+            shared_nodes = []
+        
+        if visible_nodes:
+            unique_sources = set(node.metadata.get("source") for node in visible_nodes)
+            st.metric("Documents", len(unique_sources))
             
-            st.metric("Documents", num_docs)
-            st.metric("Chunks (memory)", chunks_memory)
+            if selected_tenant != "shared":
+                st.caption(f"📁 {len(tenant_nodes)} tenant chunks")
+                st.caption(f"🌐 {len(shared_nodes)} shared chunks")
+            else:
+                st.metric("Chunks", len(visible_nodes))
             
-            # Check ChromaDB health
             try:
                 manager = app_state.ensure_manager()
-                chunks_db = manager.collection.count()
-                
-                if chunks_db > chunks_memory:
-                    # Database has orphaned chunks - show warning
-                    orphan_count = chunks_db - chunks_memory
-                    st.metric(
-                        "Chunks (DB)", 
-                        f"{chunks_db} ⚠️",
-                        delta=f"+{orphan_count} orphaned",
-                        delta_color="off",
-                        help="ChromaDB has more chunks than memory - orphaned chunks detected"
-                    )
-                elif chunks_db < chunks_memory:
-                    # This should never happen - something is very wrong
-                    st.metric(
-                        "Chunks (DB)", 
-                        f"{chunks_db} ❌",
-                        delta=f"-{chunks_memory - chunks_db} missing",
-                        delta_color="off",
-                        help="ChromaDB has fewer chunks than memory - please investigate!"
-                    )
-                else:
-                    # Perfect match - healthy state
-                    st.metric("Chunks (DB)", f"{chunks_db} ✓", help="Database is in sync with memory")
-            
+                total_db = manager.collection.count()
+                st.caption(f"📊 {total_db} total in DB")
             except Exception as exc:
-                st.metric("Chunks (DB)", "Error", help=f"Failed to query ChromaDB: {exc}")
-                LOGGER.warning("Failed to query ChromaDB count: %s", exc)
+                LOGGER.warning("Failed to get DB count: %s", exc)
         else:
-            st.info("No library loaded")
+            st.info("No documents for this tenant")
+            
+
     
     # Main panel
     st.title("🔧 MA.D.ASS - Admin Panel")
@@ -2736,30 +2708,47 @@ def _render_bulk_upload(app_state: AppState) -> None:
     else:
         st.info("🏗️ Empty library → Will run **full rebuild**")
     
+    st.markdown("---")
+    st.markdown("#### 📁 Document Ownership")
+
+    tenants = _get_tenant_list()
+
+    manage_tenant = st.session_state.get("manage_tenant", "shared")
+    try:
+        default_index = tenants.index(manage_tenant)
+    except ValueError:
+        default_index = 0
+    
+    selected_tenant = st.selectbox(
+        "Upload to",
+        options=tenants,
+        index=default_index,
+        help="'shared' = available to all tenants. Select a specific tenant for company-specific documents.",
+        key="upload_tenant_select"
+    )
+    
+    if selected_tenant == "shared":
+        st.info("📋 These documents will be visible to **all tenants** (regulations, common procedures)")
+    else:
+        st.info(f"🔒 These documents will only be visible to **{selected_tenant}**")
+
     # Upload button
     if st.button("🚀 Upload & Process", type="primary", use_container_width=True):
         _execute_bulk_upload(uploaded_files, app_state, library_exists, 
-                           overwrite_duplicates=list(duplicates) if duplicates and overwrite else [])
+                           overwrite_duplicates=list(duplicates) if duplicates and overwrite else [], tenant_id=selected_tenant)
 
 
 def _execute_bulk_upload(
-    uploaded_files: List, 
-    app_state: AppState, 
+    uploaded_files: List,
+    app_state: AppState,
     library_exists: bool,
-    overwrite_duplicates: List[str] = None
+    overwrite_duplicates: List[str] = None,
+    tenant_id: str = "shared"
 ) -> None:
-    """Execute bulk upload and processing.
-    
-    Args:
-        uploaded_files: Files to upload
-        app_state: Application state
-        library_exists: Whether library already has documents
-        overwrite_duplicates: List of filenames to delete before uploading (for forced re-index)
-    """
+    """Execute bulk upload and processing."""
     
     config = AppConfig.get()
     docs_path = config.paths.docs_path
-    docs_path.mkdir(parents=True, exist_ok=True)
     
     overwrite_duplicates = overwrite_duplicates or []
     
@@ -2767,20 +2756,10 @@ def _execute_bulk_upload(
     if overwrite_duplicates:
         st.write("### 🗑️ Deleting old versions...")
         delete_progress = st.progress(0.0)
-        delete_status = st.empty()
         
-        for idx, filename in enumerate(overwrite_duplicates):
-            delete_status.text(f"Deleting: {filename}")
-            
-            # Delete from filesystem
-            old_path = docs_path / filename
-            if old_path.exists():
-                old_path.unlink()
-            
-            delete_progress.progress((idx + 1) / len(overwrite_duplicates))
-        
+        deleted = delete_duplicate_files(overwrite_duplicates, docs_path)
         delete_progress.progress(1.0)
-        st.success(f"✅ Deleted {len(overwrite_duplicates)} old files")
+        st.success(f"✅ Deleted {deleted} old files")
         
         # Run sync to remove from DB (if library exists)
         if library_exists:
@@ -2800,57 +2779,40 @@ def _execute_bulk_upload(
     progress_bar = st.progress(0.0)
     status_text = st.empty()
     
-    copied_count = 0
-    skipped_count = 0
+    # Use service helper
+    copied_count, skipped_count, failed = copy_uploaded_files(uploaded_files, docs_path)
     
-    for idx, uploaded_file in enumerate(uploaded_files):
-        try:
-            file_path = docs_path / uploaded_file.name
-            status_text.text(f"Copying: {uploaded_file.name}")
-            
-            with file_path.open("wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            copied_count += 1
-        
-        except Exception as exc:
-            LOGGER.exception(f"Failed to copy {uploaded_file.name}")
-            st.error(f"❌ Failed: `{uploaded_file.name}`")
-            skipped_count += 1
-        
-        progress_bar.progress((idx + 1) / len(uploaded_files))
-    
+    # Update progress (files were copied, show completion)
     progress_bar.progress(1.0)
+    status_text.text(f"Copied {copied_count} files")
+    
     st.success(f"✅ Copied {copied_count} new files")
     
     if skipped_count > 0:
         st.warning(f"⚠️ Skipped {skipped_count} files due to errors")
+        for f in failed:
+            st.error(f"❌ Failed: `{f}`")
     
     # Step 3: Process
     st.write("---")
     
     if library_exists:
         st.write("### 🔄 Running incremental sync...")
-        sync_library_with_ui(app_state)
+        sync_library_with_ui(app_state, tenant_id=tenant_id)
     else:
         st.write("### 🔨 Building index...")
-        rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
-
+        rebuild_index_parallel_execute(app_state, clear_gemini_cache=False, tenant_id=tenant_id)
+    
     st.write("---")
     st.write("### 🌲 Updating document trees...")
-
+    
     try:
-        # Call the same function the "Rebuild Trees" button uses
-        # This takes ~5 seconds and updates trees automatically
         rebuild_trees_only(app_state)
         LOGGER.info("✅ Document trees automatically rebuilt after bulk upload")
-        
     except Exception as exc:
-        # Don't fail the entire upload if tree building fails
         LOGGER.warning("⚠️ Tree rebuild failed after bulk upload: %s", exc)
         st.warning(f"⚠️ Tree rebuild failed: {exc}")
         st.info("💡 You can manually rebuild trees using the button in Admin panel")
-
     
     # Clear state
     st.session_state.excluded_files = set()
@@ -2867,10 +2829,21 @@ def _execute_bulk_upload(
 
 def _render_documents_with_delete(app_state: AppState) -> None:
     """Admin document list with edit, delete, and batch operations."""
-    st.markdown("### 📄 Documents on File")
+
+    # Get tenant to manage
+    manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
     
-    if not app_state.nodes:
-        st.info("No documents indexed.")
+    # Load nodes for managed tenant ONLY (shared has its own entry in dropdown)
+    from .nodes import NodeRepository
+    
+    repo = NodeRepository(tenant_id=manage_tenant)
+    managed_nodes = repo.get_all_nodes()
+    
+    st.markdown("### 📄 Documents on File")
+    st.caption(f"Viewing: **{_get_tenant_display_names().get(manage_tenant, manage_tenant)}**")
+    
+    if not managed_nodes:
+        st.info("No documents indexed for this tenant.")
         return
     
     # Check if we need to reset batch mode (from previous operation)
@@ -2880,7 +2853,7 @@ def _render_documents_with_delete(app_state: AppState) -> None:
         st.session_state.batch_selected_docs = set()
         st.session_state["reset_batch_mode_flag"] = False
     
-    # Initialize session states (EXISTING CODE)
+    # Initialize session states
     if "editing_doc" not in st.session_state:
         st.session_state.editing_doc = None
     
@@ -2890,7 +2863,6 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     if "delete_confirmations" not in st.session_state:
         st.session_state.delete_confirmations = set()
     
-    # NEW: Initialize batch mode states
     if "batch_mode_enabled" not in st.session_state:
         st.session_state.batch_mode_enabled = False
     if "batch_selected_docs" not in st.session_state:
@@ -2900,13 +2872,27 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     if "batch_edit_expanded" not in st.session_state:
         st.session_state.batch_edit_expanded = False
     
-    # Clear delete confirmations after successful deletion (EXISTING CODE)
     if st.session_state.get("deletion_completed", False):
         st.session_state.delete_confirmations = set()
         st.session_state.deletion_completed = False
     
-    # Get documents grouped by type 
-    docs_by_type = app_state.documents_grouped_by_type()
+    # Group managed_nodes by doc_type (not app_state.nodes!)
+    from collections import defaultdict
+    docs_by_type: Dict[str, set] = defaultdict(set)
+    for node in managed_nodes:
+        metadata = node.metadata
+        doc_type = str(metadata.get("doc_type", "UNCATEGORIZED")).upper()
+        title = metadata.get("title") or metadata.get("source") or "Untitled"
+        if doc_type == "FORM":
+            form_number = metadata.get("form_number")
+            if form_number:
+                form_normalized = form_number.replace(" ", "").upper()
+                title_start = title.split("-")[0].strip().replace(" ", "").upper()
+                if not title_start.startswith(form_normalized):
+                    title = f"{form_number} - {title}"
+        docs_by_type[doc_type].add(title)
+    docs_by_type = {k: sorted(list(v)) for k, v in docs_by_type.items()}
+    
     total_docs = sum(len(titles) for titles in docs_by_type.values())
     st.caption(f"📚 **{total_docs} documents** in library")
     
@@ -2929,9 +2915,9 @@ def _render_documents_with_delete(app_state: AppState) -> None:
     
     st.markdown("---")
     
-    # Build mapping: display_title -> (source_filename, metadata) (EXISTING CODE)
+    # Build mapping: display_title -> (source_filename, metadata) 
     display_to_meta: Dict[str, tuple] = {}
-    for node in app_state.nodes:
+    for node in managed_nodes:
         metadata = node.metadata
         source = metadata.get("source", "")
         if not source:
@@ -2951,9 +2937,19 @@ def _render_documents_with_delete(app_state: AppState) -> None:
         
         display_to_meta[title] = (source, metadata)
     
+    # Determine which expander should stay open (for editing)
+    editing_doc = st.session_state.get("editing_doc")
+    editing_doc_type = None
+    if editing_doc:
+        for node in managed_nodes:
+            if node.metadata.get("source") == editing_doc:
+                editing_doc_type = str(node.metadata.get("doc_type", "UNCATEGORIZED")).upper()
+                break
+    # FIX: Add "Select All" functionality for batch mode
     # Render by document type (MODIFIED: Add batch mode logic)
     for doc_type, titles in sorted(docs_by_type.items()):
-        with st.expander(f"**{doc_type}** ({len(titles)} docs)", expanded=False):
+        should_expand = (doc_type == editing_doc_type)
+        with st.expander(f"**{doc_type}** ({len(titles)} docs)", expanded=should_expand):
 
             # ============================================================
             # Select All checkbox (only in batch mode)
@@ -3069,7 +3065,8 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                                 st.session_state.editing_doc = source
                                 
                                 # Load current values
-                                form_categories = load_form_categories()
+                                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                                form_categories = load_form_categories(manage_tenant)
                                 category_value = metadata.get("form_category_name", "")
                                 
                                 # Map code to full name if it's a shortcode
@@ -3081,7 +3078,9 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                                     "title": metadata.get("title", ""),
                                     "form_number": metadata.get("form_number", ""),
                                     "form_category_name": category_value,
+                                    "tenant_id": metadata.get("tenant_id", "shared"),
                                 }
+                                st.session_state[f"expander_{doc_type}"] = True
                                 st.rerun()
                         with col3:
                             if st.button("🗑️", key=f"delete_{unique_key}", use_container_width=True):
@@ -3111,7 +3110,7 @@ def _render_documents_with_delete(app_state: AppState) -> None:
                     st.rerun()
         
         with col2:
-            if st.button(f"✏️ Edit Doc Type ({num_selected})", use_container_width=True):
+            if st.button(f"✏️ Edit Type/Ownership ({num_selected})", use_container_width=True):
                 st.session_state.batch_edit_expanded = not st.session_state.batch_edit_expanded
                 st.rerun()
         
@@ -3168,11 +3167,10 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
     pending["title"] = new_title
     
     # Document Type
-    current_doc_type = str(pending.get("doc_type", "DOCUMENT")).upper()  # Normalize case
+    current_doc_type = str(pending.get("doc_type", "DOCUMENT")).upper()
     try:
         type_index = ALLOWED_DOC_TYPES.index(current_doc_type)
     except ValueError:
-        # Fallback to first item if not found
         LOGGER.warning("Unknown doc_type '%s' for %s, defaulting to first option", current_doc_type, source)
         type_index = 0
     
@@ -3184,6 +3182,23 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
     )
     pending["doc_type"] = new_doc_type
     
+    # Ownership (tenant_id)
+    tenants = _get_tenant_list()
+    current_tenant = pending.get("tenant_id", "shared")
+    try:
+        tenant_index = tenants.index(current_tenant)
+    except ValueError:
+        tenant_index = 0
+    
+    new_tenant = st.selectbox(
+        "Ownership",
+        options=tenants,
+        index=tenant_index,
+        key=f"tenant_{source}",
+        help="'shared' = visible to all tenants"
+    )
+    pending["tenant_id"] = new_tenant
+    
     # Form-specific fields (show for FORM and CHECKLIST)
     if new_doc_type in ["FORM", "CHECKLIST"]:
         new_form_number = st.text_input(
@@ -3193,8 +3208,8 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
         )
         pending["form_number"] = new_form_number
         
-        # Form category dropdown
-        form_categories = load_form_categories()
+        manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+        form_categories = load_form_categories(manage_tenant)
         category_options = [""] + sorted(form_categories.values())
         
         current_category = pending.get("form_category_name", "")
@@ -3211,40 +3226,37 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
         )
         pending["form_category_name"] = new_category
     
-    # Update pending edits
     st.session_state.pending_edits[source] = pending
     
-    # Save button
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save Changes", key=f"save_{source}", type="primary", use_container_width=True):
-            # Apply corrections
             corrections = {}
             
             if pending["title"] != metadata.get("title", ""):
                 corrections["title"] = pending["title"]
             
-            # Normalize case for comparison
             old_doc_type = str(metadata.get("doc_type", "")).upper()
             if pending["doc_type"] != old_doc_type:
                 corrections["doc_type"] = pending["doc_type"]
+            
+            # Check tenant change
+            old_tenant = metadata.get("tenant_id", "shared")
+            if pending["tenant_id"] != old_tenant:
+                corrections["tenant_id"] = pending["tenant_id"]
             
             if new_doc_type in ["FORM", "CHECKLIST"]:
                 if pending["form_number"] != metadata.get("form_number", ""):
                     corrections["form_number"] = pending["form_number"]
                 
-                # Convert category full name back to code
                 selected_category = pending["form_category_name"]
                 old_category = metadata.get("form_category_name", "")
                 
-                # Map full name to code
-                form_categories = load_form_categories()
+                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                form_categories = load_form_categories(manage_tenant)
                 reverse_map = {v: k for k, v in form_categories.items()}
                 
-                # Get code for selected category (if it's a full name)
                 category_code = reverse_map.get(selected_category, selected_category)
-                
-                # Check if changed (comparing codes)
                 old_category_code = old_category if old_category in form_categories else reverse_map.get(old_category, old_category)
                 
                 if category_code != old_category_code:
@@ -3253,7 +3265,6 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
             if corrections:
                 config = AppConfig.get()
                 
-                # Apply updates
                 success = update_metadata_everywhere(
                     source,
                     corrections,
@@ -3262,16 +3273,35 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                 )
                 
                 if success:
-                    # Re-pickle nodes
-                    with config.paths.nodes_cache_path.open("wb") as f:
-                        pickle.dump(app_state.nodes, f)
+                    # Update SQLite nodes
+                    from .nodes import NodeRepository
+                    from .database import db_connection
+                    
+                    with db_connection() as conn:
+                        if "tenant_id" in corrections:
+                            from .metadata_updates import save_tenant_id
+                            save_tenant_id(source, corrections["tenant_id"])
+                            conn.execute(
+                                "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
+                                (corrections["tenant_id"], source)
+                            )
+                        # Update metadata JSON for other fields
+                        for node in app_state.nodes:
+                            if node.metadata.get("source") == source:
+                                import json
+                                conn.execute(
+                                    "UPDATE nodes SET metadata = ? WHERE doc_id = ? AND node_id = ?",
+                                    (json.dumps(node.metadata), source, node.node_id)
+                                )
                     
                     st.success("✅ Metadata updated successfully!")
                     st.session_state.editing_doc = None
                     if source in st.session_state.pending_edits:
                         del st.session_state.pending_edits[source]
                     
-                    # Rerun to refresh display
+                    # Force reload nodes on next access
+                    app_state.nodes = []
+                    
                     st.rerun()
                 else:
                     st.error("❌ Failed to update metadata")
@@ -3285,31 +3315,50 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                 del st.session_state.pending_edits[source]
             st.rerun()
 
+
 def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
-    """Render batch edit form for changing doc_type of multiple documents."""
+    """Render batch edit form for changing doc_type and ownership of multiple documents."""
     
     st.markdown(f"**Editing {len(filenames)} document(s)**")
     
     # Doc type dropdown
     new_doc_type = st.selectbox(
         "New Document Type",
-        options=ALLOWED_DOC_TYPES,
+        options=["(no change)"] + ALLOWED_DOC_TYPES,
         key="batch_edit_doc_type"
+    )
+    
+    # Ownership dropdown
+    tenants = _get_tenant_list()
+    new_tenant = st.selectbox(
+        "New Ownership",
+        options=["(no change)"] + tenants,
+        key="batch_edit_tenant",
+        help="'shared' = visible to all tenants"
     )
     
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("💾 Save Changes", type="primary", use_container_width=True, key="batch_save"):
+            if new_doc_type == "(no change)" and new_tenant == "(no change)":
+                st.warning("No changes selected")
+                return
+            
             success_count = 0
             
             with st.spinner(f"Updating {len(filenames)} documents..."):
+                # Load nodes for managed tenant
+                manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+                from .nodes import NodeRepository
+                repo = NodeRepository(tenant_id=manage_tenant)
+                managed_nodes = repo.get_all_nodes()
+                
                 for filename in filenames:
                     try:
-                        # Find the source path for this filename
                         source = None
                         metadata = None
-                        for node in app_state.nodes:
+                        for node in managed_nodes:
                             node_source = node.metadata.get("source", "")
                             if Path(node_source).name == filename:
                                 source = node_source
@@ -3317,9 +3366,22 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                                 break
                         
                         if source and metadata:
-                            corrections = {"doc_type": new_doc_type}
+                            corrections = {}
+                            
+                            # Only add doc_type if actually changing
+                            if new_doc_type != "(no change)":
+                                corrections["doc_type"] = new_doc_type
+                            
+                            # Only add tenant_id if actually changing
+                            if new_tenant != "(no change)":
+                                corrections["tenant_id"] = new_tenant
+                            
+                            if not corrections:
+                                continue
                             
                             config = AppConfig.get()
+                            
+                            # Update in-memory nodes, Gemini cache, and ChromaDB
                             success = update_metadata_everywhere(
                                 source,
                                 corrections,
@@ -3328,6 +3390,27 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                             )
                             
                             if success:
+                                # Update SQLite
+                                from .database import db_connection
+                                import json
+                                
+                                with db_connection() as conn:
+                                    if "tenant_id" in corrections:
+                                        conn.execute(
+                                            "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
+                                            (corrections["tenant_id"], source)
+                                        )
+                                        from .metadata_updates import save_tenant_id
+                                        save_tenant_id(source, corrections["tenant_id"])
+                                    
+                                    # Update metadata JSON in SQLite too
+                                    for node in app_state.nodes:
+                                        if node.metadata.get("source") == source:
+                                            conn.execute(
+                                                "UPDATE nodes SET metadata = ? WHERE node_id = ?",
+                                                (json.dumps(node.metadata), node.node_id)
+                                            )
+                                
                                 success_count += 1
                         else:
                             LOGGER.warning(f"Could not find source for {filename}")
@@ -3337,17 +3420,20 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                         st.error(f"❌ Failed: {filename}")
             
             if success_count > 0:
-                # Re-pickle nodes after all updates
-                config = AppConfig.get()
-                with config.paths.nodes_cache_path.open("wb") as f:
-                    pickle.dump(app_state.nodes, f)
+                changes = []
+                if new_doc_type != "(no change)":
+                    changes.append(f"type={new_doc_type}")
+                if new_tenant != "(no change)":
+                    changes.append(f"owner={new_tenant}")
                 
-                st.success(f"✅ Updated {success_count}/{len(filenames)} documents to {new_doc_type}")
+                st.success(f"✅ Updated {success_count}/{len(filenames)} documents ({', '.join(changes)})")
+                
+                # Force reload nodes
+                app_state.nodes = []
             
-            # Clear batch state
             st.session_state.batch_selected_docs = set()
             st.session_state.batch_edit_expanded = False
-            st.session_state["reset_batch_mode_flag"] = True  # Uncheck the checkbox
+            st.session_state["reset_batch_mode_flag"] = True
             st.rerun()
     
     with col2:
@@ -3407,80 +3493,24 @@ def _batch_delete_documents(filenames: List[str], app_state: AppState) -> None:
         #st.session_state.batch_selected_docs = set()    # Clear selections
 
 def _delete_document_by_source(source_filename: str, display_title: str, app_state: AppState) -> bool:
-    """
-    Delete single document by source filename (scorched earth) and sync library.
-    
-    Uses sync_library() for thorough consistency (user's preference).
-    
-    Args:
-        source_filename: Source filename to delete
-        display_title: Display title for user messages
-        app_state: Application state
-    
-    Returns:
-        True if deletion succeeded, False otherwise
-    """
+    """UI wrapper for delete_document_by_source service."""
     
     if not source_filename:
         st.error(f"❌ Invalid source filename for: {display_title}")
-        LOGGER.error(f"Empty source filename for display_title: {display_title}")
+        LOGGER.error("Empty source filename for display_title: %s", display_title)
         return False
     
-    config = AppConfig.get()
-    source_path = config.paths.docs_path / source_filename
-    
     with st.spinner(f"Deleting {display_title}..."):
-        try:
-            manager = app_state.ensure_manager()
-            manager.nodes = app_state.nodes
-            
-            # Remove from database (ChromaDB, nodes, Gemini cache)
-            manager._remove_documents({source_filename})
-            
-            # Delete source file
-            if source_path.exists():
-                source_path.unlink()
-                LOGGER.info(f"Deleted source file: {source_path}")
-            else:
-                LOGGER.warning(f"Source file not found (already deleted?): {source_path}")
-            
-            # Update app state
-            app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()
-            
-            st.success(f"✅ Deleted: {display_title}")
-            LOGGER.info(f"Deleted document: {display_title} (source: {source_filename})")
-            
-        except Exception as exc:
-            st.error(f"❌ Failed to delete: {exc}")
-            LOGGER.exception(f"Delete failed for {display_title} (source: {source_filename})")
-            return False
+        result = delete_document_by_source(source_filename, app_state)
     
-    # USER'S PREFERENCE: Use sync_library() for thorough consistency
-    with st.spinner("Syncing library after deletion..."):
-        try:
-            # Run full sync to ensure everything is consistent
-            changes, report = manager.sync_library(app_state.index)
-            
-            # Update state with synced data
-            app_state.nodes = manager.nodes
-            app_state.invalidate_node_map_cache()
-            app_state.vector_retriever = None
-            app_state.bm25_retriever = None
-            app_state.ensure_retrievers()
-            
-            LOGGER.info(f"Synced after deletion: +{len(changes.added)}, ~{len(changes.modified)}, -{len(changes.deleted)}")
-            
-        except Exception as exc:
-            LOGGER.warning(f"Sync after deletion failed: {exc}")
-            # Try lightweight retriever rebuild as fallback
-            try:
-                app_state.ensure_retrievers()
-                LOGGER.info("Fell back to retriever rebuild")
-            except Exception as exc2:
-                LOGGER.error(f"Retriever rebuild also failed: {exc2}")
-    
-    return True
+    if result.success:
+        st.success(f"✅ Deleted: {display_title}")
+        if result.error:  # Partial success (sync failed)
+            st.warning(f"⚠️ {result.error}")
+        return True
+    else:
+        st.error(f"❌ Failed to delete: {result.error}")
+        return False
 
 def _delete_document_by_title(title: str, app_state: AppState, unique_key: str = None) -> bool:
     """
@@ -3559,51 +3589,16 @@ def _delete_document_by_title(title: str, app_state: AppState, unique_key: str =
 
 
 def _delete_entire_library(app_state: AppState) -> None:
-    """Nuclear option: delete ALL documents and reset completely."""
-    
-    config = AppConfig.get()
+    """UI wrapper for delete_entire_library service."""
     
     with st.spinner("🔥 Deleting entire library..."):
-        try:
-            # Delete all source files
-            docs_path = config.paths.docs_path
-            deleted_count = 0
-            
-            for file_path in docs_path.glob("*"):
-                if file_path.is_file():
-                    file_path.unlink()
-                    deleted_count += 1
-            
-            # Clear ChromaDB
-            manager = app_state.ensure_manager()
-            manager.collection.delete()
-            manager.collection = manager.chroma_client.get_or_create_collection("maritime_docs")
-            
-            # Clear all caches
-            for cache_file in [
-                config.paths.nodes_cache_path,
-                config.paths.cache_info_path,
-                manager.sync_cache_file,
-                config.paths.gemini_json_cache,
-            ]:
-                if cache_file.exists():
-                    cache_file.unlink()
-            
-            # Reset state completely
-            app_state.nodes = []
-            app_state.index = None
-            app_state.vector_retriever = None
-            app_state.bm25_retriever = None
-            app_state.manager = None
-            app_state.invalidate_node_map_cache()
-            
-            st.success(f"✅ Deleted {deleted_count} files")
-            st.info("💡 Library is now empty. Upload new documents to rebuild.")
-            LOGGER.info(f"Nuclear delete: {deleted_count} files")
-        
-        except Exception as exc:
-            st.error(f"❌ Failed: {exc}")
-            LOGGER.exception("Nuclear delete failed")
+        result = delete_entire_library(app_state)
+    
+    if result.success:
+        st.success(f"✅ Deleted {result.files_deleted} files")
+        st.info("💡 Library is now empty. Upload new documents to rebuild.")
+    else:
+        st.error(f"❌ Failed: {result.error}")
 
 
 # ==============================================================================
@@ -3613,18 +3608,27 @@ def _delete_entire_library(app_state: AppState) -> None:
 def _render_form_schema_editor() -> None:
     """Form schema configuration editor with polished UX."""
     
-    st.markdown("### 🔧 Form Schema Configuration")
-    st.markdown("Edit form codes. Changes saved to `config/form_categories.json`.")
+    # Get tenant to manage
+    manage_tenant = st.session_state.get("manage_tenant", "shared")
+    tenant_display = _get_tenant_display_names().get(manage_tenant, manage_tenant)
     
-    # Always load fresh from JSON
-    current_categories = load_form_categories()
+    st.markdown("### 🔧 Form Schema Configuration")
+    st.caption(f"Editing codes for: **{tenant_display}**")
+    
+    if manage_tenant == "shared":
+        st.info("📋 Shared codes are used as defaults for all tenants.")
+    else:
+        st.info(f"📋 These codes are specific to **{tenant_display}**. Falls back to shared if empty.")
+    
+    # Always load fresh from JSON for managed tenant
+    current_categories = load_form_categories(manage_tenant)
     
     # Initialize state
     if "form_schema_editor" not in st.session_state:
         st.session_state.form_schema_editor = {
             "confirm_delete": set(),
             "last_saved": current_categories.copy(),
-            "input_counter": 0,  # FIX: Counter for unique input keys
+            "input_counter": 0,
         }
     
     editor_state = st.session_state.form_schema_editor
@@ -3633,7 +3637,7 @@ def _render_form_schema_editor() -> None:
     st.caption(f"**{len(categories)} codes**")
     st.markdown("---")
     
-    # Render existing categories (code-based keys)
+    # Render existing categories
     for code, description in sorted(categories.items()):
         col1, col2, col3 = st.columns([1.5, 5, 1])
         
@@ -3660,20 +3664,16 @@ def _render_form_schema_editor() -> None:
             
             if is_confirming:
                 if st.button("✅", key=f"confirm_del_{code}", use_container_width=True, type="primary"):
-                    # Delete
                     if code in categories:
                         del categories[code]
-                        LOGGER.info(f"Deleted form code: {code}")
+                        LOGGER.info(f"Deleted form code: {code} (tenant={manage_tenant})")
                     
-                    # Save immediately
-                    if save_form_categories(categories):
+                    if save_form_categories(categories, manage_tenant):
                         editor_state["last_saved"] = categories.copy()
                         LOGGER.info("Saved after deletion")
                     
-                    # Clear confirmation
                     editor_state["confirm_delete"].discard(code)
                     
-                    # Clean up widget state
                     for key in [f"display_code_{code}", f"display_desc_{code}", 
                                f"delete_btn_{code}", f"confirm_del_{code}"]:
                         if key in st.session_state:
@@ -3690,7 +3690,6 @@ def _render_form_schema_editor() -> None:
     # Add new code section
     st.markdown("#### ➕ Add New Code")
     
-    # FIX: Use counter in key to force new inputs after add
     input_key_suffix = editor_state["input_counter"]
     
     col1, col2, col3 = st.columns([1.5, 5, 1])
@@ -3701,7 +3700,7 @@ def _render_form_schema_editor() -> None:
             placeholder="e.g., X", 
             max_chars=10, 
             label_visibility="collapsed",
-            key=f"new_code_input_{input_key_suffix}"  # FIX: Unique key each time
+            key=f"new_code_input_{input_key_suffix}"
         )
     
     with col2:
@@ -3709,7 +3708,7 @@ def _render_form_schema_editor() -> None:
             "Description", 
             placeholder="e.g., Example", 
             label_visibility="collapsed",
-            key=f"new_desc_input_{input_key_suffix}"  # FIX: Unique key each time
+            key=f"new_desc_input_{input_key_suffix}"
         )
     
     with col3:
@@ -3724,23 +3723,18 @@ def _render_form_schema_editor() -> None:
         elif new_code_clean in categories:
             st.error(f"⚠️ `{new_code_clean}` exists!")
         else:
-            # Add to dict
             categories[new_code_clean] = new_desc_clean
-            LOGGER.info(f"Added form code: {new_code_clean}")
+            LOGGER.info(f"Added form code: {new_code_clean} (tenant={manage_tenant})")
             
-            # Save immediately
-            if save_form_categories(categories):
+            if save_form_categories(categories, manage_tenant):
                 editor_state["last_saved"] = categories.copy()
                 LOGGER.info("Saved after addition")
             
-            # FIX: Increment counter to create fresh inputs on next render
             editor_state["input_counter"] += 1
-            
             st.rerun()
     
     st.markdown("---")
     
-    # FIX: Replaced Save button with Clear All button
     col1, col2 = st.columns([3, 1])
     
     with col1:
@@ -3751,21 +3745,18 @@ def _render_form_schema_editor() -> None:
             st.session_state["confirm_clear_all"] = True
             st.rerun()
     
-    # Clear All confirmation
     if st.session_state.get("confirm_clear_all", False):
         st.warning("⚠️ **Delete ALL form codes?** This will clear the entire schema!")
         col1, col2 = st.columns(2)
         
         with col1:
             if st.button("✅ Yes, Clear All", type="primary", use_container_width=True, key="confirm_clear_all_yes"):
-                # Clear all codes
                 empty_schema = {}
-                if save_form_categories(empty_schema):
+                if save_form_categories(empty_schema, manage_tenant):
                     editor_state["last_saved"] = {}
                     st.success("✅ All codes cleared!")
-                    LOGGER.info("Cleared all form codes")
+                    LOGGER.info(f"Cleared all form codes (tenant={manage_tenant})")
                 
-                # Clear confirmation
                 del st.session_state["confirm_clear_all"]
                 st.rerun()
         
