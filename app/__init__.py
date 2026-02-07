@@ -26,5 +26,6 @@ __all__ = [
     "database",
     "services",
     "nodes",
-    "retrieval"
+    "retrieval",
+    "orchestrator"
 ]  # pragma: no cover
