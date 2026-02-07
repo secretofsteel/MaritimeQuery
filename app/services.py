@@ -313,7 +313,8 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
 
 def delete_document_by_source(
     source_filename: str,
-    app_state: "AppState"
+    app_state: "AppState",
+    tenant_id: str = None
 ) -> DeleteDocumentResult:
     """
     Delete a single document by source filename.
@@ -343,6 +344,8 @@ def delete_document_by_source(
     
     try:
         manager = app_state.ensure_manager()
+        if tenant_id:
+            manager.tenant_id = tenant_id
         manager.nodes = app_state.nodes
         
         # Remove from database (ChromaDB, nodes, Gemini cache)
