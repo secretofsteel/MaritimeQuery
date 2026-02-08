@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from collections import defaultdict
 
@@ -554,27 +554,38 @@ class AppState:
                 titles[source] = title
         return titles
 
-    def documents_grouped_by_type(self) -> Dict[str, List[str]]:
-        grouped: Dict[str, set] = defaultdict(set)
+    def documents_grouped_by_type(self) -> Dict[str, List[Tuple[str, str]]]:
+        """Return {doc_type: [(display_title, source_filename), ...]} sorted by title."""
+        grouped: Dict[str, Dict[str, str]] = defaultdict(dict)  # {type: {source: title}}
         for node in self.nodes:
             metadata = node.metadata
+            source = metadata.get("source", "")
+            if not source or source in grouped.get(
+                str(metadata.get("doc_type", "UNCATEGORIZED")).upper(), {}
+            ):
+                continue
+
             doc_type = str(metadata.get("doc_type", "UNCATEGORIZED")).upper()
-            title = metadata.get("title") or metadata.get("source") or "Untitled"
+            title = metadata.get("title") or source or "Untitled"
+
             # Handle FORM documents - avoid double form numbers
             if doc_type == "FORM":
                 form_number = metadata.get("form_number")
                 if form_number:
-                    # FIX: Check if title already starts with form number
-                    # Normalize for comparison (remove spaces, case-insensitive)
                     form_normalized = form_number.replace(" ", "").upper()
                     title_start = title.split("-")[0].strip().replace(" ", "").upper()
-                    
-                    # Only prepend if title doesn't already start with form number
                     if not title_start.startswith(form_normalized):
                         title = f"{form_number} - {title}"
-                    # Else: title already has form number, use as-is
-            grouped[doc_type].add(title)
-        return {doc_type: sorted(list(titles)) for doc_type, titles in grouped.items()}
+
+            grouped[doc_type][source] = title
+
+        return {
+            doc_type: sorted(
+                [(title, source) for source, title in sources.items()],
+                key=lambda t: t[0],
+            )
+            for doc_type, sources in grouped.items()
+        }
 
     def reset_session(self) -> None:
         """Clear the in-memory conversation without touching the persisted log."""
