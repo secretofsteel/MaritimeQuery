@@ -384,10 +384,16 @@ FIELD DEFINITIONS:
 1. "intent" — What the user wants:
   - "greeting": Hello, hi, good morning, etc.
   - "goodbye": Bye, thanks that's all, see you, etc.
-  - "thank_you": Thanks, got it, perfect, roger that, cool beans, etc.
+  - "thank_you": User is acknowledging, closing, or expressing gratitude — NOT asking a new question.
+    Examples: "Thanks!", "Got it", "Perfect, roger that", "Cool, I'll check that", "Great, let me verify",
+    "Wow, that's detailed! I'll go review it", "Thanks, I'll check our IMS to verify",
+    "Ok I'll forward this to the captain". Key signal: user says they will go DO something themselves.
   - "off_topic": Non-maritime question (weather, jokes, personal questions, etc.)
   - "incomplete": Message appears cut off mid-sentence or is unintelligible fragments.
   - "new_query": New maritime question needing document search.
+  IMPORTANT: If the user says "thanks" or expresses they will go do something themselves
+  (verify, check, review, forward, print, share), that is "thank_you" or "goodbye" — NOT a new query,
+  even if they mention specific documents, systems (IMS, PMS), or maritime terms.
 {follow_up_instruction}
 
 2. "query_type" — Classification of the information need (null if non-retrieval intent):
