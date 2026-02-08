@@ -18,6 +18,25 @@ from .database import db_connection, get_db_path
 from .logger import LOGGER
 
 
+def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
+    """Expand doc_type filter values to cover common case variants.
+
+    Production data contains mixed casing (e.g. ``"Form"`` vs ``"FORM"``,
+    ``"Procedure"`` vs ``"PROCEDURE"``).  Rather than requiring a full
+    reindex, this helper emits both UPPER and Title variants for each
+    requested type so that DB/ChromaDB filters match regardless of how
+    the metadata was stored.
+
+    Duplicates are removed to keep filter lists clean.
+    """
+    expanded: set = set()
+    for dt in doc_type_filter:
+        expanded.add(dt)             # original
+        expanded.add(dt.upper())     # FORM, PROCEDURE
+        expanded.add(dt.title())     # Form, Procedure
+    return sorted(expanded)
+
+
 # =============================================================================
 # FTS5 RETRIEVER (Phase 3)
 # =============================================================================
@@ -180,11 +199,12 @@ class SQLiteFTS5Retriever(BaseRetriever):
                     params.append(self.tenant_id)
 
                 if doc_type_filter:
-                    placeholders = ", ".join("?" for _ in doc_type_filter)
+                    expanded = _expand_doc_type_case(doc_type_filter)
+                    placeholders = ", ".join("?" for _ in expanded)
                     conditions.append(
                         f"json_extract(n.metadata, '$.doc_type') IN ({placeholders})"
                     )
-                    params.extend(doc_type_filter)
+                    params.extend(expanded)
 
                 where_clause = " AND ".join(conditions)
                 params.append(retrieval_top_k)
@@ -461,10 +481,11 @@ class TenantAwareVectorRetriever(BaseRetriever):
                 )
 
             if doc_type_filter:
-                if len(doc_type_filter) == 1:
-                    filter_parts.append({"doc_type": doc_type_filter[0]})
+                expanded = _expand_doc_type_case(doc_type_filter)
+                if len(expanded) == 1:
+                    filter_parts.append({"doc_type": expanded[0]})
                 else:
-                    filter_parts.append({"doc_type": {"$in": doc_type_filter}})
+                    filter_parts.append({"doc_type": {"$in": expanded}})
 
             if len(filter_parts) == 0:
                 where_filter = None
