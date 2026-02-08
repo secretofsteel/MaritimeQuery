@@ -49,6 +49,107 @@ from .services import (
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
 
+
+@st.dialog("Document Viewer", width="large")
+def _view_document_dialog(source_filename: str, display_title: str) -> None:
+    """Render a document preview in a modal dialog."""
+    import base64
+    import pandas as pd
+
+    st.caption(display_title)
+
+    docs_path = AppConfig.get().paths.docs_path
+    file_path = docs_path / source_filename
+
+    if not file_path.exists():
+        st.error(f"File not found: {source_filename}")
+        return
+
+    ext = file_path.suffix.lower()
+    size_mb = file_path.stat().st_size / (1024 * 1024)
+
+    if ext == ".pdf":
+        if size_mb > 30:
+            st.warning(f"PDF too large to preview ({size_mb:.1f} MB). Max ~30 MB for in-browser viewing.")
+            return
+        b64 = base64.b64encode(file_path.read_bytes()).decode()
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{b64}" '
+            f'width="100%" height="690" style="border:none; border-radius:4px;"></iframe>',
+            unsafe_allow_html=True,
+        )
+
+    elif ext in (".xlsx", ".xls"):
+        try:
+            xls = pd.ExcelFile(file_path)
+            sheet = (
+                st.selectbox("Sheet", xls.sheet_names, key="docview_sheet_select")
+                if len(xls.sheet_names) > 1
+                else xls.sheet_names[0]
+            )
+            df = pd.read_excel(file_path, sheet_name=sheet)
+            # Fix mixed-type columns that break Arrow serialization
+            df = df.astype({col: str for col in df.select_dtypes(include=["object"]).columns})
+            st.dataframe(df, width="stretch", height=700)
+        except Exception as exc:
+            st.error(f"Failed to read spreadsheet: {exc}")
+
+    elif ext == ".docx":
+        try:
+            import mammoth
+            with open(file_path, "rb") as f:
+                result = mammoth.convert_to_html(f)
+            if result.value.strip():
+                with st.container(height=650):
+                    st.html(result.value)
+                if result.messages:
+                    with st.expander("⚠️ Conversion warnings"):
+                        for msg in result.messages:
+                            st.caption(str(msg))
+            else:
+                st.info("Document appears empty or could not be converted.")
+        except ImportError:
+            # Fallback to cached text if mammoth not installed
+            text = load_cached_text(source_filename)
+            if text:
+                with st.container(height=700):
+                    st.markdown(text)
+            else:
+                st.info("No preview available for this document.")
+        except Exception as exc:
+            st.error(f"Failed to render document: {exc}")
+
+    elif ext == ".doc":
+        text = load_cached_text(source_filename)
+        if text:
+            with st.container(height=650):
+                st.markdown(text)
+        else:
+            st.info("No extracted text cached for this document.")
+
+    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
+        st.image(str(file_path))
+
+    else:
+        # Fallback: try reading as plain text
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            with st.container(height=600):
+                st.code(text[:50_000])
+        except Exception:
+            st.warning(f"Cannot preview {ext} files.")
+
+    # Download button
+    if file_path.exists():
+        st.download_button(
+            label="Download File",
+            data=file_path.read_bytes(),
+            file_name=source_filename,
+            key="docview_download",
+            type="primary",
+        )
+
+
 def _get_tenant_display_names() -> Dict[str, str]:
     """Get mapping of tenant_id -> display name from users.yaml."""
     from pathlib import Path
@@ -1646,9 +1747,22 @@ def render_app(
         st.markdown("---")
 
 
-        # Custom CSS for button styling (not feedback buttons)
+        # Custom CSS
         st.markdown("""
         <style>
+
+        /* Download button in dialog */
+        [data-testid="stDialog"] .stDownloadButton button {
+            background: rgba(10, 132, 255, 0.3) !important;
+            border: 1px solid rgba(10, 132, 255, 0.5) !important;
+            color: white !important;
+        }
+
+        [data-testid="stDialog"] .stDownloadButton button:hover {
+            background: rgba(10, 132, 255, 0.5) !important;
+        }
+
+
         /* Restore button styling for sidebar buttons only */
         section[data-testid="stSidebar"] button[kind="primary"],
         section[data-testid="stSidebar"] button[kind="secondary"] {
@@ -1662,6 +1776,57 @@ def render_app(
         section[data-testid="stSidebar"] button[kind="secondary"]:hover {
             background: rgba(10, 132, 255, 0.2) !important;
             border-color: rgba(10, 132, 255, 0.5) !important;
+        }
+
+        /* ── Doc file list: tertiary buttons as text links ── */
+        section[data-testid="stSidebar"] button[kind="tertiary"] {
+            border: none !important;
+            background: transparent !important;
+            padding: 0px 15px !important;
+            box-shadow: none !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 2 !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
+            width: 100% !important;
+            border-radius: 4px !important;
+        }
+
+        section[data-testid="stSidebar"] button[kind="tertiary"]:hover {
+            color: rgba(143, 211, 255, 0.95) !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+        }
+
+        section[data-testid="stSidebar"] button[kind="tertiary"] div,
+        section[data-testid="stSidebar"] button[kind="tertiary"] p {
+            display: block !important;
+            text-align: left !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            font-size: 0.85rem !important;
+            white-space: normal !important;
+        }
+
+        /* Kill the gap: target the CONTAINER wrapping each tertiary button */
+        section[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(button[kind="tertiary"]) {
+            margin-top: -0.7rem !important;
+            margin-bottom: 0 !important;
+            padding: 0 !important;
+        }
+
+        /* Bullet via ::before with hanging indent */
+        section[data-testid="stSidebar"] button[kind="tertiary"] p {
+            padding-left: 1em !important;
+            text-indent: -1em !important;
+        }
+
+        section[data-testid="stSidebar"] button[kind="tertiary"] p::before {
+            content: "●" !important;
+            font-size: 0.55em !important;
+            vertical-align: middle !important;
+            display: inline-block !important;
+            width: 1em !important;
         }
         
         /* Fix session button height and prevent text wrapping - AGGRESSIVE */
@@ -1740,21 +1905,14 @@ def render_app(
             max-height: 320px;
         }
         
-        .sidebar-panel.docs .doc-type {
-            margin-bottom: 0.75rem;
-        }
-        
-        .sidebar-panel.docs .doc-type h4 {
-            margin: 0 0 0.3rem;
-            font-size: 0.95rem;
-            color: rgba(143, 211, 255, 0.9);
+        /* ── Document file-list: clickable items ── */
+        .doc-type-heading {
+            margin: 0.6rem 0 0.2rem !important;
+            font-size: 0.95rem !important;
+            color: rgba(143, 211, 255, 0.9) !important;
             letter-spacing: 0.02em;
         }
-        
-        .sidebar-panel.docs .doc-type li {
-            list-style: disc;
-            margin-bottom: 0.2rem;
-        }
+
         </style>
         """, unsafe_allow_html=True)
                 
@@ -1797,35 +1955,40 @@ def render_app(
                     sync_library_with_ui(app_state)  # Use version with progress!
         
 
-        # Documents on file - using original HTML approach with scrollable panel
+        # Documents on file - clickable with viewer dialog
         grouped = app_state.documents_grouped_by_type()
         with st.expander("📄 Documents on file", expanded=False):
             if grouped:
                 order = ["FORM", "CHECKLIST", "PROCEDURE", "MANUAL", "POLICY", "REGULATION"]
                 heading_map = {
-                    "FORM": "Forms",
-                    "CHECKLIST": "Checklists",
-                    "PROCEDURE": "Procedures",
-                    "MANUAL": "Manuals",
-                    "POLICY": "Policies",
-                    "REGULATION": "Regulations",
+                    "FORM": "Forms", "CHECKLIST": "Checklists",
+                    "PROCEDURE": "Procedures", "MANUAL": "Manuals",
+                    "POLICY": "Policies", "REGULATION": "Regulations",
                 }
-                sections = []
-                for doc_type in sorted(grouped, key=lambda d: (order.index(d) if d in order else len(order), d)):
-                    titles = grouped[doc_type]
-                    if not titles:
-                        continue
-                    heading = heading_map.get(doc_type, doc_type.title())
-                    items = "".join(f"<li>{title}</li>" for title in titles)
-                    sections.append(f"<div class='doc-type'><h4>{heading}</h4><ul>{items}</ul></div>")
-                docs_html = "".join(sections)
-                st.markdown(
-                    f"<div class='sidebar-panel docs'>{docs_html}</div>",
-                    unsafe_allow_html=True,
-                )
+
+                with st.container(height=320, border=False):
+                    for doc_type in sorted(
+                        grouped,
+                        key=lambda d: (order.index(d) if d in order else len(order), d),
+                    ):
+                        docs = grouped[doc_type]
+                        if not docs:
+                            continue
+                        heading = heading_map.get(doc_type, doc_type.title())
+                        st.markdown(
+                            f"<h4 class='doc-type-heading'>{heading}</h4>",
+                            unsafe_allow_html=True,
+                        )
+                        for display_title, source_filename in docs:
+                            if st.button(
+                                display_title,
+                                key=f"docview_{source_filename}",
+                                use_container_width=True,
+                                type="tertiary",
+                            ):
+                                _view_document_dialog(source_filename, display_title)
             else:
                 st.caption("No documents indexed yet.")
-
 
         # Sessions list
         with st.expander("💬 Sessions", expanded=True):
