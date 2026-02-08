@@ -205,7 +205,7 @@ class QueryAnalyzer:
     decomposition need, regulatory standard detection) in Python.
     """
 
-    MODEL = "gemini-flash-lite-latest"
+    MODEL = "gemini-2.5-flash-lite"
 
     # -----------------------------------------------------------------
     # Public API
@@ -401,8 +401,9 @@ FIELD DEFINITIONS:
     Examples: "Compare our D&A policy with Rightship", "Gap analysis on hot works: IMS vs RISQ"
     Also: "Difference between ISM and ISPS codes" (regulation vs regulation comparison)
 
-3. "topic" — The broad operational subject in 2-4 words. Be broad, not specific.
-   Examples: "bunkering operations", "drug and alcohol", "fire safety", "ice navigation"
+3. "topic" — The query subject in 2-5 words.
+   Examples: "bunkering operations", "drug and alcohol", "fire safety", "ice navigation", etc.
+   If the query asks about specific forms of checklists, include their codes.
    Return null if no clear maritime topic.
 
 4. "detected_sources" — Specific document sources mentioned or implied in the query.
@@ -424,7 +425,7 @@ FIELD DEFINITIONS:
   - "filtered_parallel": Comparison/compliance queries needing balanced multi-source retrieval.
 
 8. "doc_type_hint" — If the user explicitly asks for a specific type:
-   "Form", "Checklist", "Procedure", "Policy", "Manual", "Regulation", or null.
+   "Form", "Checklist", "Procedure", "Regulation", "Circular", "Vetting" or null.
 
 RULES:
 - Return ONLY valid JSON, no markdown code blocks, no explanation.
@@ -1011,7 +1012,7 @@ class QueryDecomposer:
             SubQuery(
                 text=analysis.original_query,
                 source_label=analysis.topic or "general query",
-                doc_type_filter=doc_type_filter,
+                doc_type_filter=None,
                 title_filter=None,
                 is_standard=False,
                 top_k=top_k,
@@ -2057,7 +2058,7 @@ def orchestrated_query(
         sub_answers: List[SubAnswer] = []
         for i, rr in enumerate(retrieval_results, 1):
             _status(
-                f"✍️ Answering sub-question {i} of {len(retrieval_results)}: "
+                f"✍️ Checking for... "
                 f"{rr.source_label}..."
             )
             sa = synthesizer.generate_sub_answer(rr.sub_query, rr.nodes)
