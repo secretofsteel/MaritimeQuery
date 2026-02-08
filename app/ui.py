@@ -1797,88 +1797,6 @@ def render_app(
                     sync_library_with_ui(app_state)  # Use version with progress!
         
 
-        # Sessions list
-        with st.expander("💬 Sessions", expanded=True):
-            manager = app_state.ensure_session_manager()
-            sessions = manager.list_sessions(limit=20)
-            
-            if sessions:
-                for session in sessions:
-                    # Create unique key for each session button
-                    button_key = f"session_{session.session_id}"
-                    
-                    # Show active indicator
-                    is_current = session.session_id == app_state.current_session_id
-                    prefix = "▶ " if is_current else "  "
-                    
-                    # Format title and message count
-                    title_preview = session.title[:35] + "..." if len(session.title) > 35 else session.title
-                    button_label = f"{prefix}{title_preview} ({session.message_count})"
-                    
-                    col1, col2, col3 = st.columns([3.5, 0.75, 0.75])
-                    
-                    with col1:
-                        if st.button(button_label, key=button_key, use_container_width=True):
-                            if not is_current:
-                                app_state.switch_session(session.session_id)
-                                _rerun_app()
-                    
-                    with col2:
-                        # Export button - direct download without nested button
-                        session_messages = manager.load_messages(session.session_id)
-                        
-                        # Convert to display format
-                        messages_for_export = [
-                            {
-                                "role": msg.role,
-                                "content": msg.content,
-                                "confidence_pct": msg.metadata.get("confidence_pct", 0),
-                                "confidence_level": msg.metadata.get("confidence_level", "N/A"),
-                                "confidence_note": msg.metadata.get("confidence_note", ""),
-                                "sources": msg.metadata.get("sources", []),
-                                "num_sources": msg.metadata.get("num_sources", 0),
-                                "retriever_type": msg.metadata.get("retriever_type", "unknown"),
-                            }
-                            for msg in session_messages
-                        ]
-                        
-                        # Generate HTML
-                        export_html = build_session_export_html(messages_for_export, session.title)
-                        
-                        # Direct download button
-                        st.download_button(
-                            label="📥",
-                            data=export_html,
-                            file_name=f"{session.title[:30].replace(' ', '_')}_session.html",
-                            mime="text/html",
-                            key=f"export_{session.session_id}",
-                            help="Export session",
-                            use_container_width=True,
-                        )
-                    
-                    with col3:
-                        if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session", use_container_width=True):
-                            app_state.delete_session_with_uploads(session.session_id)
-                            if is_current:
-                                # If deleting current session, create new one
-                                app_state.create_new_session()
-                            _rerun_app()
-            else:
-                st.caption("No sessions yet")
-            
-            # Clear all sessions button
-            if sessions:
-                st.markdown("---")
-                if st.button("🗑️ Clear all sessions", use_container_width=True, type="primary"):
-                    if st.session_state.get("confirm_clear_all"):
-                        app_state.clear_all_sessions()
-                        app_state.create_new_session()
-                        st.session_state["confirm_clear_all"] = False
-                        _rerun_app()
-                    else:
-                        st.session_state["confirm_clear_all"] = True
-                        st.warning("⚠️ Click again to confirm deletion of ALL sessions")
-        
         # Documents on file - using original HTML approach with scrollable panel
         grouped = app_state.documents_grouped_by_type()
         with st.expander("📄 Documents on file", expanded=False):
@@ -1907,11 +1825,94 @@ def render_app(
                 )
             else:
                 st.caption("No documents indexed yet.")
+
+
+        # Sessions list
+        with st.expander("💬 Sessions", expanded=True):
+            with st.container(height=400, border=False):
+                manager = app_state.ensure_session_manager()
+                sessions = manager.list_sessions(limit=200)
+                
+                if sessions:
+                    for session in sessions:
+                        # Create unique key for each session button
+                        button_key = f"session_{session.session_id}"
+                        
+                        # Show active indicator
+                        is_current = session.session_id == app_state.current_session_id
+                        prefix = "▶ " if is_current else "  "
+                        
+                        # Format title and message count
+                        title_preview = session.title[:35] + "..." if len(session.title) > 35 else session.title
+                        button_label = f"{prefix}{title_preview} ({session.message_count})"
+                        
+                        col1, col2, col3 = st.columns([3.5, 0.75, 0.75])
+                        
+                        with col1:
+                            if st.button(button_label, key=button_key, use_container_width=True):
+                                if not is_current:
+                                    app_state.switch_session(session.session_id)
+                                    _rerun_app()
+                        
+                        with col2:
+                            # Export button - direct download without nested button
+                            session_messages = manager.load_messages(session.session_id)
+                            
+                            # Convert to display format
+                            messages_for_export = [
+                                {
+                                    "role": msg.role,
+                                    "content": msg.content,
+                                    "confidence_pct": msg.metadata.get("confidence_pct", 0),
+                                    "confidence_level": msg.metadata.get("confidence_level", "N/A"),
+                                    "confidence_note": msg.metadata.get("confidence_note", ""),
+                                    "sources": msg.metadata.get("sources", []),
+                                    "num_sources": msg.metadata.get("num_sources", 0),
+                                    "retriever_type": msg.metadata.get("retriever_type", "unknown"),
+                                }
+                                for msg in session_messages
+                            ]
+                            
+                            # Generate HTML
+                            export_html = build_session_export_html(messages_for_export, session.title)
+                            
+                            # Direct download button
+                            st.download_button(
+                                label="📥",
+                                data=export_html,
+                                file_name=f"{session.title[:30].replace(' ', '_')}_session.html",
+                                mime="text/html",
+                                key=f"export_{session.session_id}",
+                                help="Export session",
+                                use_container_width=True,
+                            )
+                        
+                        with col3:
+                            if st.button("🗑️", key=f"delete_{session.session_id}", help="Delete session", use_container_width=True):
+                                app_state.delete_session_with_uploads(session.session_id)
+                                if is_current:
+                                    # If deleting current session, create new one
+                                    app_state.create_new_session()
+                                _rerun_app()
+                else:
+                    st.caption("No sessions yet")
+
+            with st.container(border=False):    
+                # Clear all sessions button
+                if sessions:
+                    st.markdown("---")
+                    if st.button("🗑️ Clear all sessions", use_container_width=True, type="primary"):
+                        if st.session_state.get("confirm_clear_all"):
+                            app_state.clear_all_sessions()
+                            app_state.create_new_session()
+                            st.session_state["confirm_clear_all"] = False
+                            _rerun_app()
+                        else:
+                            st.session_state["confirm_clear_all"] = True
+                            st.warning("⚠️ Click again to confirm deletion of ALL sessions")
         
-        # Feedback stats (ONLY for admin, not viewer)
-        if not read_only_mode:
-            with st.expander("📊 Feedback stats", expanded=False):
-                render_feedback_stats_panel(app_state)
+
+        
 
     # Main chat interface
     st.markdown("---")
