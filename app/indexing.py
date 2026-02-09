@@ -994,9 +994,9 @@ class IncrementalIndexManager:
             for filename in current_files:
                 if filename in self.gemini_cache:
                     gemini_meta = self.gemini_cache[filename].get("gemini", {})
-                    if "parse_error" in gemini_meta:
+                    if "parse_error" in gemini_meta or "extraction_error" in gemini_meta:
                         modified_files.add(filename)
-                        LOGGER.info("Will retry %s (has parse_error in cache)", filename)
+                        LOGGER.info("Will retry %s (has parse/extraction error in cache)", filename)
 
         # Create processing report
         total_files_to_process = len(new_files) + len(modified_files)
