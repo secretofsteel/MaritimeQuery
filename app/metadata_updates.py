@@ -337,7 +337,26 @@ def transfer_document_ownership(
         # 3. Move JSONL record: remove from old cache, add to new cache
         record = old_records.pop(filename)
         record["tenant_id"] = new_tenant_id
+
+        # 4. Update sync caches so next sync doesn't re-index this file
+        from .files import file_fingerprint
         
+        # Add to new tenant's sync cache
+        new_sync_file = config.paths.cache_dir / f"sync_cache_{new_tenant_id}.json"
+        new_sync = json.loads(new_sync_file.read_text()) if new_sync_file.exists() else {"files_hash": {}}
+        if new_file_path.exists():
+            new_sync["files_hash"][filename] = file_fingerprint(new_file_path)
+        new_sync_file.write_text(json.dumps(new_sync, indent=2))
+        
+        # Remove from old tenant's sync cache
+        old_sync_file = config.paths.cache_dir / f"sync_cache_{old_tenant_id}.json"
+        if old_sync_file.exists():
+            old_sync = json.loads(old_sync_file.read_text())
+            old_sync.get("files_hash", {}).pop(filename, None)
+            old_sync_file.write_text(json.dumps(old_sync, indent=2))
+        
+        LOGGER.info("Updated sync caches for ownership transfer: %s → %s", old_tenant_id, new_tenant_id)
+
         # Write old cache without this record
         ordered_old = [old_records[key] for key in sorted(old_records.keys())]
         write_jsonl(old_cache_path, ordered_old)
