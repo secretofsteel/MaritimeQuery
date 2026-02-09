@@ -1022,7 +1022,7 @@ class IncrementalIndexManager:
         # Process additions/modifications WITH progress callback
         successfully_added_or_modified: Set[str] = set()
         if new_files or modified_files:
-            successfully_added_or_modified, processing_statuses = self.(
+            successfully_added_or_modified, processing_statuses = self._add_or_update_documents_parallel(
                 new_files | modified_files, 
                 index,
                 progress_callback  # NEW: Pass callback through!
