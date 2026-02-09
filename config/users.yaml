@@ -18,7 +18,7 @@ credentials:
   usernames:
     # Administrator account (superuser access)
     admin:
-      name: George
+      name: Administrator
       password: $2b$12$tRAiMUoJjx3zOds1UXN8RuZMcspAy6T0/oMGWYHzk3E/ihksUxTXa
       tenant_id: admin
       role: superuser
