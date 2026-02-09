@@ -606,7 +606,7 @@ def render_processing_status_table(report: ProcessingReport) -> None:
                     "Extract": _stage_icon(status.extraction.status),
                     "Validate": _stage_icon(status.validation.status),
                     "Embed": _stage_icon(status.embedding.status),
-                    "Chunks": status.chunks_created if status.chunks_created else "-",
+                    "Chunks": str(status.chunks_created) if status.chunks_created else "-",
                     "Size": _format_file_size(status.file_size_bytes) if status.file_size_bytes else "-",
                 }
                 

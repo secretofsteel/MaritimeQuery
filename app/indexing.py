@@ -455,11 +455,6 @@ def build_index_from_library_parallel(
         total_files=len(total_files_index),
     )
     
-    # Add cached file statuses to report
-    for filename, status in all_file_statuses.items():
-        if filename not in {p.name for p in all_docs_to_extract}:
-            report.add_status(status)
-    
     # Phase 1: Parallel extraction for uncached files
     if all_docs_to_extract:
         LOGGER.info("Phase 1: Parallel extraction of %d documents...", len(all_docs_to_extract))
@@ -533,11 +528,6 @@ def build_index_from_library_parallel(
             if status:
                 status.extraction = StageResult(StageStatus.FAILED, f"Extraction error: {result.error}")
             LOGGER.error("Skipping %s due to extraction error: %s", result.filename, result.error)
-        
-        # Add extraction statuses to report
-        for filename in {p.name for p in all_docs_to_extract}:
-            if filename in all_file_statuses:
-                report.add_status(all_file_statuses[filename])
         
         LOGGER.info("Phase 1 complete: %d successful, %d failed",
                    extraction_results.success_count, extraction_results.failure_count)
@@ -626,17 +616,20 @@ def build_index_from_library_parallel(
     index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, show_progress=True)
     LOGGER.info("ChromaDB indexing complete")
     
-    # Update sync cache
-    manager = IncrementalIndexManager(
-        paths.docs_path, 
-        paths.gemini_json_cache, 
-        paths.nodes_cache_path, 
-        paths.cache_info_path, 
-        paths.chroma_path
-    )
-    manager.sync_cache["files_hash"] = manager._get_files_hash(paths.docs_path)
-    manager._save_sync_cache()
-    LOGGER.info("Sync cache updated")
+    # Update sync cache for each tenant processed
+    for tid in tenant_ids:
+        tenant_docs_path = config.docs_path_for(tid)
+        tenant_mgr = IncrementalIndexManager(
+            tenant_docs_path,
+            config.gemini_cache_for(tid),
+            paths.nodes_cache_path,
+            paths.cache_info_path,
+            paths.chroma_path,
+            tenant_id=tid,
+        )
+        tenant_mgr.sync_cache["files_hash"] = tenant_mgr._get_files_hash(tenant_docs_path)
+        tenant_mgr._save_sync_cache()
+        LOGGER.info("Updated sync cache for tenant '%s'", tid)
     
     # Finalize report
     elapsed_time = time.time() - start_time
