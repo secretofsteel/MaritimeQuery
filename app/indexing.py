@@ -1022,7 +1022,7 @@ class IncrementalIndexManager:
         # Process additions/modifications WITH progress callback
         successfully_added_or_modified: Set[str] = set()
         if new_files or modified_files:
-            successfully_added_or_modified, processing_statuses = self._add_or_update_documents_parallel(
+            successfully_added_or_modified, processing_statuses = self.(
                 new_files | modified_files, 
                 index,
                 progress_callback  # NEW: Pass callback through!
@@ -1262,7 +1262,7 @@ class IncrementalIndexManager:
         
         chunk_texts = [node.get_content() for node in new_nodes]
         
-        embedding_gen = ParallelEmbeddingGenerator(max_workers=10)
+        embedding_gen = ParallelEmbeddingGenerator(max_workers=5)
         embedding_batch = embedding_gen.generate_batch(chunk_texts, progress_callback)
         
         LOGGER.info("Generated %d embeddings in %.2fs", 
