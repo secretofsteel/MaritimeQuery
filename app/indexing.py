@@ -313,19 +313,14 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 def build_index_from_library_parallel(
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
     clear_gemini_cache: bool = False,
-    tenant_id: str = "shared",
+    tenant_id: str = None,  # None = all tenants
 ) -> Tuple[List[Document], VectorStoreIndex, ProcessingReport]:
-    """Process the full document library with parallel extraction and embedding generation.
-    
-    This parallel version:
-    1. Identifies uncached files that need Gemini extraction
-    2. Extracts those files in parallel (10 workers)
-    3. Generates embeddings in parallel (10 workers)  
-    4. Writes to ChromaDB sequentially (required - not thread-safe)
+    """Process the full document library with parallel extraction and embedding.
     
     Args:
         progress_callback: Optional callback(phase, current, total, item_desc)
         clear_gemini_cache: If True, force re-extraction of all files
+        tenant_id: Process specific tenant only, or None for all tenants
     
     Returns:
         Tuple of (nodes, index, processing_report)
@@ -334,191 +329,215 @@ def build_index_from_library_parallel(
     paths = config.paths
     
     start_time = time.time()
-
     LOGGER.info("=== Starting Parallel Processing ===")
     
-    # Clear ALL nodes before rebuild (all tenants)
-    clear_all_nodes_for_rebuild()
+    # Clear nodes for rebuild — scoped by tenant if specified
+    if tenant_id:
+        repo = NodeRepository(tenant_id=tenant_id)
+        repo.clear_all()
+        LOGGER.info("Cleared nodes for tenant '%s' before rebuild", tenant_id)
+    else:
+        clear_all_nodes_for_rebuild()
     
-    # Track tenant_id per file (read from Gemini cache)
+    # Determine which tenants to process
+    if tenant_id:
+        tenant_ids = [tenant_id]
+    else:
+        tenant_ids = [
+            d.name for d in paths.docs_path.iterdir() 
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+        if not tenant_ids:
+            LOGGER.warning("No tenant folders found in %s", paths.docs_path)
+            tenant_ids = ["shared"]
+    
+    LOGGER.info("Processing tenants: %s", tenant_ids)
+    
+    # Accumulate across all tenants
+    all_documents: List[Document] = []
+    all_file_statuses: Dict[str, DocumentProcessingStatus] = {}
+    all_docs_to_extract: List[Path] = []
     file_tenant_map: Dict[str, str] = {}
+    total_files_index: Dict[str, Dict[str, Any]] = {}
+    all_cached_records: Dict[str, Any] = {}
+    
+    # Phase 0: Scan all tenant folders and check caches
+    LOGGER.info("Phase 0: Analyzing document library across %d tenants...", len(tenant_ids))
+    
+    for tid in tenant_ids:
+        tenant_docs_path = config.docs_path_for(tid)
+        tenant_cache_path = config.gemini_cache_for(tid)
+        
+        files_index = current_files_index(tenant_docs_path)
+        
+        if clear_gemini_cache:
+            cached_records = {}
+        else:
+            cached_records = load_jsonl(tenant_cache_path)
+        
+        LOGGER.info("Tenant '%s': %d files on disk, %d cached extractions",
+                    tid, len(files_index), len(cached_records))
+        
+        for filename, fingerprint in files_index.items():
+            doc_path = tenant_docs_path / filename
+            cached = cached_records.get(filename)
+            
+            # Track file status
+            status = DocumentProcessingStatus(
+                filename=filename,
+                file_size_bytes=fingerprint["size"],
+            )
+            all_file_statuses[filename] = status
+            total_files_index[filename] = fingerprint
+            file_tenant_map[filename] = tid
+            
+            status.parsing = StageResult(StageStatus.SUCCESS, "File parsed successfully")
+            
+            needs_extraction = clear_gemini_cache or not (
+                cached 
+                and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1 
+                and cached.get("size") == fingerprint["size"]
+            )
+            
+            if not needs_extraction and cached and "gemini" in cached:
+                meta = cached["gemini"]
+                status.used_cache = True
+                all_cached_records[filename] = cached
+                
+                # Apply corrections if they exist
+                if "corrections" in cached:
+                    meta = apply_corrections_to_gemini_record(meta, cached["corrections"])
+                    LOGGER.debug("Applied corrections to %s", filename)
+                
+                if "parse_error" in meta or "extraction_error" in meta:
+                    error_msg = meta.get("parse_error") or meta.get("extraction_error")
+                    status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
+                    LOGGER.error("Skipping %s due to cached extraction error", filename)
+                    continue
+                
+                # Set validation status from cache
+                if "validation_error" in meta:
+                    validation_data = meta.get("validation", {})
+                    coverage = validation_data.get("ngram_coverage", 0)
+                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
+                    status.validation = StageResult(
+                        StageStatus.WARNING,
+                        f"Low quality extraction (coverage: {coverage:.1%})",
+                        details=validation_data
+                    )
+                else:
+                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
+                    validation_data = meta.get("validation", {})
+                    if validation_data:
+                        coverage = validation_data.get("ngram_coverage", 0)
+                        status.validation = StageResult(
+                            StageStatus.SUCCESS,
+                            f"Validation passed (coverage: {coverage:.1%})",
+                            details=validation_data
+                        )
+                    else:
+                        status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
+                
+                status.embedding = StageResult(StageStatus.SUCCESS, "Embeddings cached")
+                
+                # Convert to documents
+                documents_from_cache = to_documents_from_gemini(doc_path, meta)
+                all_documents.extend(documents_from_cache)
+            else:
+                all_docs_to_extract.append(doc_path)
+    
+    LOGGER.info("Using %d cached extractions, need to extract %d files",
+               len(total_files_index) - len(all_docs_to_extract), len(all_docs_to_extract))
     
     # Create processing report
-    files_index = current_files_index(paths.docs_path)
     report = ProcessingReport(
         timestamp=datetime.now().isoformat(),
-        total_files=len(files_index),
+        total_files=len(total_files_index),
     )
-        
-    # Track status for each file
-    file_statuses: Dict[str, DocumentProcessingStatus] = {}
-    for filename in files_index.keys():
-        file_statuses[filename] = DocumentProcessingStatus(
-            filename=filename,
-            file_size_bytes=files_index[filename]["size"],
-        )
     
-    # Phase 0: Determine which files need extraction
-    LOGGER.info("Phase 0: Analyzing document library...")
-    cached_records = load_jsonl(paths.gemini_json_cache)
-    
-    # Clear cache if requested
-    if clear_gemini_cache:
-        LOGGER.warning("Clearing Gemini extraction cache - all files will be re-extracted")
-        cached_records = {}
-    
-    docs_to_extract: List[Path] = []
-    all_documents: List[Document] = []
-    
-    # Check each file
-    for filename, fingerprint in files_index.items():
-        doc_path = paths.docs_path / filename
-        cached = cached_records.get(filename)
-        status = file_statuses[filename]
-        
-        # Mark parsing as success (file exists and is readable)
-        status.parsing = StageResult(StageStatus.SUCCESS, "File parsed successfully")
-        
-        needs_extraction = clear_gemini_cache or not (
-            cached 
-            and abs(cached.get("mtime", 0) - fingerprint["mtime"]) < 1 
-            and cached.get("size") == fingerprint["size"]
-        )
-        
-        if not needs_extraction and cached and "gemini" in cached:
-            meta = cached["gemini"]
-            status.used_cache = True
-            # Track tenant from cache
-            file_tenant_map[filename] = cached.get("tenant_id", "shared")
-            #LOGGER.info("DEBUG: %s -> tenant_id from cache = %s", filename, file_tenant_map[filename])
-            # Apply corrections if they exist
-            if "corrections" in cached:
-                meta = apply_corrections_to_gemini_record(meta, cached["corrections"])
-                LOGGER.debug("Applied corrections to %s", filename)
-        else:
-            # Need to extract
-            docs_to_extract.append(doc_path)
-            continue
-        
-        # Use cached extraction
-        if "parse_error" in meta or "extraction_error" in meta:
-            error_msg = meta.get("parse_error") or meta.get("extraction_error")
-            status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
-            LOGGER.error("Skipping %s due to cached extraction error: %s", filename, error_msg)
+    # Add cached file statuses to report
+    for filename, status in all_file_statuses.items():
+        if filename not in {p.name for p in all_docs_to_extract}:
             report.add_status(status)
-            continue
-        
-        # Check validation from cache
-        if "validation_error" in meta:
-            validation_data = meta.get("validation", {})
-            coverage = validation_data.get("ngram_coverage", 0)
-            status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
-            status.validation = StageResult(
-                StageStatus.WARNING,
-                f"Low quality extraction (coverage: {coverage:.1%})",
-                details=validation_data
-            )
-        else:
-            status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded (cached)")
-            validation_data = meta.get("validation", {})
-            if validation_data:
-                coverage = validation_data.get("ngram_coverage", 0)
-                status.validation = StageResult(
-                    StageStatus.SUCCESS,
-                    f"Validation passed (coverage: {coverage:.1%})",
-                    details=validation_data
-                )
-            else:
-                status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
-
-        # Mark embedding as success from cache
-        status.embedding = StageResult(StageStatus.SUCCESS, "Embeddings cached")
-        # Add to report
-        report.add_status(status)
-        # Convert cached extraction to documents
-        documents_from_cache = to_documents_from_gemini(doc_path, meta)
-        all_documents.extend(documents_from_cache)
-    
-    LOGGER.info("Using %d cached extractions, need to extract %d files", 
-               len(files_index) - len(docs_to_extract), len(docs_to_extract))
     
     # Phase 1: Parallel extraction for uncached files
-    if docs_to_extract:
-        LOGGER.info("Phase 1: Parallel extraction of %d documents...", len(docs_to_extract))
+    if all_docs_to_extract:
+        LOGGER.info("Phase 1: Parallel extraction of %d documents...", len(all_docs_to_extract))
         
         processor = ParallelDocumentProcessor(max_workers=10)
-        extraction_results = processor.extract_batch(docs_to_extract, progress_callback)
+        extraction_results = processor.extract_batch(all_docs_to_extract, progress_callback)
         
-        # Update JSONL cache and statuses with results
+        # Update per-tenant JSONL caches with results
         for result in extraction_results.successful + extraction_results.failed:
             filename = result.filename
-            fingerprint = files_index[filename]
-            status = file_statuses[filename]
+            fingerprint = total_files_index.get(filename, {})
+            status = all_file_statuses.get(filename)
+            tid = file_tenant_map.get(filename, "shared")
             
             if result.record:
-                # Preserve existing tenant_id from cache (don't overwrite manual edits)
-                existing_tenant = "shared"
-                if filename in cached_records:
-                    existing_tenant = cached_records[filename].get("tenant_id", "shared")
+                # Preserve existing tenant_id from cache
+                existing_tenant = tid
                 
-                # Update cache
+                # Upsert to the correct tenant's JSONL
+                tenant_cache_path = config.gemini_cache_for(tid)
                 upsert_jsonl_record(
-                    paths.gemini_json_cache,
+                    tenant_cache_path,
                     {
                         "filename": filename,
-                        "mtime": fingerprint["mtime"],
-                        "size": fingerprint["size"],
+                        "mtime": fingerprint.get("mtime", 0),
+                        "size": fingerprint.get("size", 0),
                         "gemini": result.record,
                         "tenant_id": existing_tenant,
                     },
                 )
-                #LOGGER.info("DEBUG: %s -> preserving tenant_id = %s", filename, existing_tenant)   
-
-                # Update status based on extraction result
-                if "parse_error" in result.record or "extraction_error" in result.record:
-                    error_msg = result.record.get("parse_error") or result.record.get("extraction_error")
-                    status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
-                else:
-                    status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded")
-                    
-                    # Check validation
-                    if "validation_error" in result.record:
-                        validation_data = result.record.get("validation", {})
-                        coverage = validation_data.get("ngram_coverage", 0)
-                        status.validation = StageResult(
-                            StageStatus.WARNING,
-                            f"Low quality extraction (coverage: {coverage:.1%})",
-                            details=validation_data
-                        )
+                
+                # Update status
+                if status:
+                    if "parse_error" in result.record or "extraction_error" in result.record:
+                        error_msg = result.record.get("parse_error") or result.record.get("extraction_error")
+                        status.extraction = StageResult(StageStatus.FAILED, f"Extraction failed: {error_msg}")
                     else:
-                        validation_data = result.record.get("validation", {})
-                        if validation_data:
+                        status.extraction = StageResult(StageStatus.SUCCESS, "Extraction succeeded")
+                        
+                        if "validation_error" in result.record:
+                            validation_data = result.record.get("validation", {})
                             coverage = validation_data.get("ngram_coverage", 0)
                             status.validation = StageResult(
-                                StageStatus.SUCCESS,
-                                f"Validation passed (coverage: {coverage:.1%})",
+                                StageStatus.WARNING,
+                                f"Low quality extraction (coverage: {coverage:.1%})",
                                 details=validation_data
                             )
                         else:
-                            status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
+                            validation_data = result.record.get("validation", {})
+                            if validation_data:
+                                coverage = validation_data.get("ngram_coverage", 0)
+                                status.validation = StageResult(
+                                    StageStatus.SUCCESS,
+                                    f"Validation passed (coverage: {coverage:.1%})",
+                                    details=validation_data
+                                )
+                            else:
+                                status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
         
-        # Track tenant for newly extracted files (default to shared)
-        for result in extraction_results.successful:
-            file_tenant_map[result.filename] = "shared"
-
         # Convert successful extractions to documents
         for result in extraction_results.successful:
-            # Only add if no parse/extraction errors and record exists
             if result.record and "parse_error" not in result.record and "extraction_error" not in result.record:
-                doc_path = paths.docs_path / result.filename
+                tid = file_tenant_map.get(result.filename, "shared")
+                doc_path = config.docs_path_for(tid) / result.filename
                 documents_from_extraction = to_documents_from_gemini(doc_path, result.record)
                 all_documents.extend(documents_from_extraction)
         
-        # Log failures
+        # Mark failures
         for result in extraction_results.failed:
-            status = file_statuses[result.filename]
-            status.extraction = StageResult(StageStatus.FAILED, f"Extraction error: {result.error}")
+            status = all_file_statuses.get(result.filename)
+            if status:
+                status.extraction = StageResult(StageStatus.FAILED, f"Extraction error: {result.error}")
             LOGGER.error("Skipping %s due to extraction error: %s", result.filename, result.error)
+        
+        # Add extraction statuses to report
+        for filename in {p.name for p in all_docs_to_extract}:
+            if filename in all_file_statuses:
+                report.add_status(all_file_statuses[filename])
         
         LOGGER.info("Phase 1 complete: %d successful, %d failed",
                    extraction_results.success_count, extraction_results.failure_count)
@@ -527,12 +546,12 @@ def build_index_from_library_parallel(
     
     LOGGER.info("Total documents loaded: %d", len(all_documents))
     
-    # Phase 2: Chunking
+    # Phase 2: Chunking (unchanged logic)
     LOGGER.info("Phase 2: Chunking documents...")
     nodes = chunk_documents(all_documents)
     LOGGER.info("Created %d chunks", len(nodes))
     
-    # Track chunks per file and assign tenant_id
+    # Assign tenant_id to chunks
     chunks_per_file: Dict[str, int] = {}
     for node in nodes:
         source = node.metadata.get("source", "")
@@ -542,12 +561,12 @@ def build_index_from_library_parallel(
             chunks_per_file[filename] = chunks_per_file.get(filename, 0) + 1
         else:
             node.metadata["tenant_id"] = "shared"
-    LOGGER.info("Assigned tenant_id to %d nodes from cache mapping", len(nodes))
-
+    LOGGER.info("Assigned tenant_id to %d nodes", len(nodes))
+    
     # Update chunk counts in statuses
     for filename, count in chunks_per_file.items():
-        if filename in file_statuses:
-            file_statuses[filename].chunks_created = count
+        if filename in all_file_statuses:
+            all_file_statuses[filename].chunks_created = count
     
     # Phase 3: Parallel embedding generation
     LOGGER.info("Phase 3: Parallel embedding generation...")
@@ -582,8 +601,8 @@ def build_index_from_library_parallel(
     
     # Mark all files with chunks as having successful embedding
     for filename in chunks_per_file.keys():
-        if filename in file_statuses:
-            file_statuses[filename].embedding = StageResult(
+        if filename in all_file_statuses:
+            all_file_statuses[filename].embedding = StageResult(
                 StageStatus.SUCCESS,
                 f"Embedded {chunks_per_file[filename]} chunks"
             )
@@ -624,7 +643,7 @@ def build_index_from_library_parallel(
     report.total_duration_sec = elapsed_time
     
     # Add all file statuses to report
-    for status in file_statuses.values():
+    for status in all_file_statuses.values():
         report.add_status(status)
     
     # Save report
@@ -775,7 +794,7 @@ class IncrementalIndexManager:
         self.tenant_id = tenant_id
         self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
         self.collection = self.chroma_client.get_or_create_collection("maritime_docs")
-        self.sync_cache_file = cache_info_path.parent / "sync_cache.json"
+        self.sync_cache_file = cache_info_path.parent / f"sync_cache_{tenant_id}.json"
         self.sync_cache = self._load_sync_cache()
         self.gemini_cache = load_jsonl(gemini_cache_path)
         self.nodes: List[Document] = []
@@ -870,11 +889,17 @@ class IncrementalIndexManager:
             deleted = repo.delete_by_doc(filename)
             LOGGER.debug("Removed %d nodes from SQLite for %s", deleted, filename)
         
-        # 3. Remove from Gemini cache
+        # 3. Remove from Gemini cache (in-memory AND on disk)
+        cache_modified = False
         for filename in filenames:
             if filename in self.gemini_cache:
                 del self.gemini_cache[filename]
+                cache_modified = True
                 LOGGER.info("Removed %s from Gemini cache", filename)
+        
+        if cache_modified:
+            write_jsonl(self.gemini_cache_path, self.gemini_cache.values())
+            LOGGER.info("Persisted Gemini cache after removing %d entries", len(filenames))
         
         # 4. Update in-memory nodes list (for compatibility during transition)
         self.nodes = [

@@ -58,10 +58,9 @@ def _view_document_dialog(source_filename: str, display_title: str) -> None:
 
     st.caption(display_title)
 
-    docs_path = AppConfig.get().paths.docs_path
-    file_path = docs_path / source_filename
+    file_path = AppConfig.get().find_doc_file(source_filename)
 
-    if not file_path.exists():
+    if not file_path:
         st.error(f"File not found: {source_filename}")
         return
 
@@ -727,7 +726,8 @@ def render_admin_index_management(app_state) -> None:
             use_container_width=True,
             help="Process all documents and rebuild the search index"
         ):
-            rebuild_index_parallel_execute(app_state, clear_cache)
+            logged_in_tenant = st.session_state.get("tenant_id", "shared")
+            rebuild_index_parallel_execute(app_state, clear_cache, tenant_id=logged_in_tenant)
 
     st.divider()
     
@@ -1946,7 +1946,8 @@ def render_app(
                 
                 # Rebuild section with checkbox
                 if st.button("🔨 Rebuild index", use_container_width=True, key="rebuild_btn", type="primary"):
-                    rebuild_index_parallel_execute(app_state, clear_cache)        
+                    logged_in_tenant = st.session_state.get("tenant_id", "shared")
+                    rebuild_index_parallel_execute(app_state, clear_cache, tenant_id=logged_in_tenant)        
                 
                 st.divider()
                 
@@ -2558,7 +2559,8 @@ def render_admin_panel(app_state: AppState) -> None:
             rebuild_clicked = st.button("🔨 Rebuild Index", type="primary", use_container_width=True)
 
         if rebuild_clicked:
-            rebuild_index_parallel_execute(app_state, clear_cache)
+            manage_tenant = st.session_state.get("manage_tenant", "shared")
+            rebuild_index_parallel_execute(app_state, clear_cache, tenant_id=manage_tenant)
 
         col1, col2 = st.columns([2, 1])
 
@@ -2701,7 +2703,8 @@ def _render_bulk_upload(app_state: AppState) -> None:
     
     # Check for duplicates
     config = AppConfig.get()
-    docs_path = config.paths.docs_path
+    manage_tenant = st.session_state.get("manage_tenant", "shared")
+    docs_path = config.docs_path_for(manage_tenant)
     existing_files = {f.name for f in docs_path.glob("*") if f.is_file()}
     duplicates = {f.name for f in uploaded_files if f.name in existing_files}
     
@@ -2806,10 +2809,14 @@ def _render_bulk_upload(app_state: AppState) -> None:
         else:
             st.info("✓ Will delete old files completely, then upload and index new ones")
     
-    # Show what will happen
-    library_exists = len(list(docs_path.glob("*"))) > 0
+    # Check if ANY documents exist in the system (not just this tenant's folder)
+    try:
+        manager = app_state.ensure_manager()
+        system_has_index = manager.collection.count() > 0
+    except Exception:
+        system_has_index = False
     
-    if library_exists:
+    if system_has_index:
         st.info("📚 Library exists → Will run **incremental sync**")
     else:
         st.info("🏗️ Empty library → Will run **full rebuild**")
@@ -2840,21 +2847,21 @@ def _render_bulk_upload(app_state: AppState) -> None:
 
     # Upload button
     if st.button("🚀 Upload & Process", type="primary", use_container_width=True):
-        _execute_bulk_upload(uploaded_files, app_state, library_exists, 
+        _execute_bulk_upload(uploaded_files, app_state, system_has_index, 
                            overwrite_duplicates=list(duplicates) if duplicates and overwrite else [], tenant_id=selected_tenant)
 
 
 def _execute_bulk_upload(
     uploaded_files: List,
     app_state: AppState,
-    library_exists: bool,
+    system_has_index: bool,
     overwrite_duplicates: List[str] = None,
     tenant_id: str = "shared"
 ) -> None:
     """Execute bulk upload and processing."""
     
     config = AppConfig.get()
-    docs_path = config.paths.docs_path
+    docs_path = config.docs_path_for(tenant_id)
     
     overwrite_duplicates = overwrite_duplicates or []
     
@@ -2868,7 +2875,7 @@ def _execute_bulk_upload(
         st.success(f"✅ Deleted {deleted} old files")
         
         # Run sync to remove from DB (if library exists)
-        if library_exists:
+        if system_has_index:
             st.write("Cleaning up database...")
             manager = app_state.ensure_manager()
             manager.nodes = app_state.nodes
@@ -2902,7 +2909,7 @@ def _execute_bulk_upload(
     # Step 3: Process
     st.write("---")
     
-    if library_exists:
+    if system_has_index:
         st.write("### 🔄 Running incremental sync...")
         sync_library_with_ui(app_state, tenant_id=tenant_id)
     else:
@@ -3385,8 +3392,14 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                     
                     with db_connection() as conn:
                         if "tenant_id" in corrections:
-                            from .metadata_updates import save_tenant_id
+                            from .metadata_updates import save_tenant_id, transfer_document_ownership
+                            
+                            # Transfer physical file and JSONL record to new tenant
+                            transfer_document_ownership(source, corrections["tenant_id"])
+                            
+                            # Update tenant_id in JSONL record (now in new tenant's cache)
                             save_tenant_id(source, corrections["tenant_id"])
+                            
                             conn.execute(
                                 "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
                                 (corrections["tenant_id"], source)
@@ -3512,7 +3525,8 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                                             "UPDATE nodes SET tenant_id = ? WHERE doc_id = ?",
                                             (corrections["tenant_id"], source)
                                         )
-                                        from .metadata_updates import save_tenant_id
+                                        from .metadata_updates import save_tenant_id, transfer_document_ownership
+                                        transfer_document_ownership(source, corrections["tenant_id"])
                                         save_tenant_id(source, corrections["tenant_id"])
                                     
                                     # Update metadata JSON in SQLite too
@@ -3564,7 +3578,9 @@ def _batch_delete_documents(filenames: List[str], app_state: AppState) -> None:
     from .config import AppConfig
     
     config = AppConfig.get()
-    docs_path = config.paths.docs_path
+    manage_tenant = st.session_state.get("manage_tenant", 
+                    st.session_state.get("tenant_id", "shared"))
+    docs_path = config.docs_path_for(manage_tenant)
     
     # Step 1: Delete all files from disk
     deleted_count = 0

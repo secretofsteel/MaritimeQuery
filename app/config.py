@@ -138,6 +138,46 @@ class AppConfig:
         )
         LOGGER.info("Updated runtime paths: docs=%s chroma=%s cache=%s", docs_path, chroma_path, cache_dir)
 
+    def update_llama_settings(self, api_key: str) -> None:
+        """Allow runtime overrides of LlamaIndex settings."""
+        configure_llama_settings(api_key)    
+    
+    def docs_path_for(self, tenant_id: str) -> Path:
+        """Get the docs directory for a specific tenant.
+        
+        Creates the directory if it doesn't exist.
+        Example: data/docs/shared/, data/docs/union/
+        """
+        return ensure_directory(self.paths.docs_path / tenant_id)
+
+    def gemini_cache_for(self, tenant_id: str) -> Path:
+        """Get the Gemini extraction cache path for a specific tenant.
+        
+        Example: data/cache/gemini_extract_cache_shared.jsonl
+        """
+        return self.paths.cache_dir / f"gemini_extract_cache_{tenant_id}.jsonl"
+
+    def find_doc_file(self, source_filename: str) -> Optional[Path]:
+        """Search all tenant folders for a document file.
+        
+        Used by document viewer and inspector where the tenant context
+        may not be known. Returns the first match found.
+        
+        Args:
+            source_filename: Just the filename (e.g. 'ISM_Code.pdf')
+            
+        Returns:
+            Full path to the file, or None if not found.
+        """
+        for tenant_dir in self.paths.docs_path.iterdir():
+            if tenant_dir.is_dir():
+                candidate = tenant_dir / source_filename
+                if candidate.exists():
+                    return candidate
+        # Legacy fallback: file directly in docs/ (pre-migration)
+        legacy = self.paths.docs_path / source_filename
+        return legacy if legacy.exists() else None
+
     @classmethod
     def get(cls) -> "AppConfig":
         if cls._instance is None:

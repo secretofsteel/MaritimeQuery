@@ -174,16 +174,35 @@ class AppState:
         )
 
     def ensure_manager(self) -> IncrementalIndexManager:
-        """Provide an incremental manager bound to the current state."""
+        """Provide an incremental manager bound to the current tenant.
+        
+        Uses manage_tenant (admin context) if set, otherwise falls back
+        to the logged-in user's tenant_id.
+        
+        Recreates the manager if the tenant context has changed.
+        """
+        import streamlit as st
+
+        tenant_id = st.session_state.get(
+            "manage_tenant",
+            st.session_state.get("tenant_id", "shared")
+        )
+
+        # Recreate if tenant changed
+        if self.manager is not None and self.manager.tenant_id != tenant_id:
+            LOGGER.info("Tenant changed to '%s' — recreating IncrementalIndexManager", tenant_id)
+            self.manager = None
+
         if self.manager is None:
             config = AppConfig.get()
             paths = config.paths
             self.manager = IncrementalIndexManager(
-                docs_path=paths.docs_path,
-                gemini_cache_path=paths.gemini_json_cache,
+                docs_path=config.docs_path_for(tenant_id),
+                gemini_cache_path=config.gemini_cache_for(tenant_id),
                 nodes_cache_path=paths.nodes_cache_path,
                 cache_info_path=paths.cache_info_path,
                 chroma_path=paths.chroma_path,
+                tenant_id=tenant_id,
             )
             self.manager.nodes = self.nodes
         return self.manager

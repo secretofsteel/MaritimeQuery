@@ -15,6 +15,40 @@ from .config import AppConfig
 from .files import load_jsonl, write_jsonl
 from .logger import LOGGER
 
+def _find_tenant_cache_for_file(filename: str) -> tuple[Path, str, dict]:
+    """Find which per-tenant JSONL contains a given file's record.
+    
+    Searches all gemini_extract_cache_{tenant}.jsonl files.
+    
+    Args:
+        filename: Source filename to look up
+        
+    Returns:
+        Tuple of (cache_path, tenant_id, records_dict)
+        
+    Raises:
+        FileNotFoundError: If file not found in any tenant cache
+    """
+    config = AppConfig.get()
+    cache_dir = config.paths.cache_dir
+    
+    for jsonl_path in cache_dir.glob("gemini_extract_cache_*.jsonl"):
+        records = load_jsonl(jsonl_path)
+        if filename in records:
+            # Extract tenant_id from filename pattern: gemini_extract_cache_{tenant}.jsonl
+            tenant_id = jsonl_path.stem.replace("gemini_extract_cache_", "")
+            return jsonl_path, tenant_id, records
+    
+    # Fallback: check legacy single cache (pre-migration)
+    legacy = config.paths.gemini_json_cache
+    if legacy.exists():
+        records = load_jsonl(legacy)
+        if filename in records:
+            tenant_id = records[filename].get("tenant_id", "shared")
+            return legacy, tenant_id, records
+    
+    raise FileNotFoundError(f"File '{filename}' not found in any Gemini cache")
+
 
 def apply_corrections_to_gemini_record(
     gemini_record: Dict[str, Any],
@@ -66,11 +100,10 @@ def save_correction(filename: str, field: str, value: Any) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    config = AppConfig.get()
-    cache_path = config.paths.gemini_json_cache
-    
-    if not cache_path.exists():
-        LOGGER.error("Gemini cache not found: %s", cache_path)
+    try:
+        cache_path, tenant_id, records = _find_tenant_cache_for_file(filename)
+    except FileNotFoundError:
+        LOGGER.error("File not found in any tenant cache: %s", filename)
         return False
     
     try:
@@ -118,11 +151,10 @@ def save_tenant_id(filename: str, tenant_id: str) -> bool:
     Returns:
         True if successful
     """
-    config = AppConfig.get()
-    cache_path = config.paths.gemini_json_cache
-    
-    if not cache_path.exists():
-        LOGGER.error("Gemini cache not found: %s", cache_path)
+    try:
+        cache_path, current_tenant, records = _find_tenant_cache_for_file(filename)
+    except FileNotFoundError:
+        LOGGER.error("File not found in any tenant cache: %s", filename)
         return False
     
     try:
@@ -237,21 +269,91 @@ def get_correction_status(filename: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dictionary of corrections if any exist, None otherwise
     """
-    config = AppConfig.get()
-    cache_path = config.paths.gemini_json_cache
-    
-    if not cache_path.exists():
-        return None
-    
     try:
-        records = load_jsonl(cache_path)
+        cache_path, tenant_id, records = _find_tenant_cache_for_file(filename)
         record = records.get(filename)
-        
-        if record and "corrections" in record:
-            return record["corrections"]
-        
+    except FileNotFoundError:
         return None
-        
     except Exception as exc:
         LOGGER.error("Failed to read corrections: %s", exc)
         return None
+
+    if record and "corrections" in record:
+        return record["corrections"]
+    
+    return None
+
+def transfer_document_ownership(
+    filename: str,
+    new_tenant_id: str,
+) -> bool:
+    """Transfer a document's physical file and JSONL record to a new tenant.
+    
+    Performs three operations:
+    1. Moves the file from old tenant folder to new tenant folder
+    2. Removes the JSONL record from old tenant's cache
+    3. Adds the JSONL record to new tenant's cache (with updated tenant_id)
+    
+    Does NOT update ChromaDB or SQLite — the caller handles that separately
+    via update_metadata_everywhere() and direct SQL updates (existing flow).
+    
+    Args:
+        filename: Source filename (e.g. 'ISM_Code.pdf')
+        new_tenant_id: Target tenant identifier
+        
+    Returns:
+        True if all file operations succeeded
+    """
+    import shutil
+    
+    config = AppConfig.get()
+    
+    try:
+        # 1. Find current location
+        old_cache_path, old_tenant_id, old_records = _find_tenant_cache_for_file(filename)
+    except FileNotFoundError:
+        LOGGER.error("Cannot transfer %s — not found in any tenant cache", filename)
+        return False
+    
+    if old_tenant_id == new_tenant_id:
+        LOGGER.info("File %s already belongs to tenant '%s', skipping transfer", filename, new_tenant_id)
+        return True
+    
+    try:
+        # 2. Move physical file
+        old_file_path = config.docs_path_for(old_tenant_id) / filename
+        new_file_path = config.docs_path_for(new_tenant_id) / filename  # docs_path_for auto-creates dir
+        
+        if old_file_path.exists():
+            shutil.move(str(old_file_path), str(new_file_path))
+            LOGGER.info("Moved file: %s → %s/", filename, new_tenant_id)
+        else:
+            # File might already be in new location (partial previous transfer)
+            if new_file_path.exists():
+                LOGGER.warning("File already at destination: %s/%s", new_tenant_id, filename)
+            else:
+                LOGGER.warning("Source file not found: %s/%s", old_tenant_id, filename)
+        
+        # 3. Move JSONL record: remove from old cache, add to new cache
+        record = old_records.pop(filename)
+        record["tenant_id"] = new_tenant_id
+        
+        # Write old cache without this record
+        ordered_old = [old_records[key] for key in sorted(old_records.keys())]
+        write_jsonl(old_cache_path, ordered_old)
+        LOGGER.info("Removed %s from %s", filename, old_cache_path.name)
+        
+        # Add to new tenant's cache
+        new_cache_path = config.gemini_cache_for(new_tenant_id)
+        new_records = load_jsonl(new_cache_path) if new_cache_path.exists() else {}
+        new_records[filename] = record
+        ordered_new = [new_records[key] for key in sorted(new_records.keys())]
+        write_jsonl(new_cache_path, ordered_new)
+        LOGGER.info("Added %s to %s", filename, new_cache_path.name)
+        
+        LOGGER.info("✅ Transferred %s: %s → %s", filename, old_tenant_id, new_tenant_id)
+        return True
+        
+    except Exception as exc:
+        LOGGER.exception("Failed to transfer ownership for %s", filename)
+        return False
