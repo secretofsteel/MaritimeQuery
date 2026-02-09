@@ -67,13 +67,11 @@ def load_cached_text(source_filename: str) -> Optional[str]:
         Extracted text or None if not found
     """
     config = AppConfig.get()
-    docs_path = config.paths.docs_path
     cache_dir = config.paths.cache_dir
     
-    # Find the file in docs directory
-    file_path = docs_path / source_filename
-    if not file_path.exists():
-        LOGGER.warning("File not found: %s", source_filename)
+    file_path = config.find_doc_file(source_filename) 
+    if not file_path: 
+        LOGGER.warning("File not found across tenant folders: %s", source_filename) 
         return None
     
     try:
@@ -137,34 +135,28 @@ def load_extraction_data(filename: str) -> Optional[Dict[str, Any]]:
     Returns:
         Extraction dict (the gemini nested object) or None if not found
     """
-    config = AppConfig.get()
-    gemini_cache = config.paths.cache_dir / "gemini_extract_cache.jsonl"
-    
-    if not gemini_cache.exists():
-        LOGGER.warning("Gemini cache not found")
-        return None
+    from .metadata_updates import _find_tenant_cache_for_file
     
     try:
-        with open(gemini_cache, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                data = json.loads(line)
-                if data.get('filename') == filename:
-                    # Return the gemini nested object, not the wrapper
-                    gemini_data = data.get('gemini', {})
-                    # Also merge corrections if present
-                    corrections = data.get('corrections', {})
-                    if corrections:
-                        gemini_data['corrections'] = corrections
-                    # Add top-level validation error if present
-                    if data.get('validation_error'):
-                        gemini_data['validation_error'] = data['validation_error']
-                    return gemini_data
+        cache_path, tenant_id, records = _find_tenant_cache_for_file(filename)
+        data = records.get(filename)
+        if not data:
+            LOGGER.warning("No extraction found for: %s", filename)
+            return None
+        # Return the gemini nested object, not the wrapper
+        gemini_data = data.get('gemini', {})
+        # Also merge corrections if present
+        corrections = data.get('corrections', {})
+        if corrections:
+            gemini_data['corrections'] = corrections
+        # Add top-level validation error if present
+        if data.get('validation_error'):
+            gemini_data['validation_error'] = data['validation_error']
+        return gemini_data
         
+    except FileNotFoundError:
         LOGGER.warning("No extraction found for: %s", filename)
         return None
-    
     except Exception as exc:
         LOGGER.error("Failed to load extraction for %s: %s", filename, exc)
         return None
@@ -361,8 +353,8 @@ def get_document_metrics(source: str, nodes: List) -> Optional[DocumentMetrics]:
     doc_id = Path(source).stem
     
     # Get file path and size
-    file_path = config.paths.docs_path / source
-    if not file_path.exists():
+    file_path = config.find_doc_file(source)
+    if not file_path:
         return None
     
     file_size = file_path.stat().st_size

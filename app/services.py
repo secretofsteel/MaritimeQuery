@@ -195,19 +195,10 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
 
 def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
     """
-    Rebuild document trees from existing Gemini cache without touching index.
+    Rebuild document trees from existing Gemini caches across all tenants.
     
-    This is FAST (~5 seconds) because it:
-    - Doesn't re-extract documents (uses cached Gemini extractions)
-    - Doesn't re-chunk documents
-    - Doesn't re-embed chunks
-    - Just rebuilds tree JSON structure from existing cache
-    
-    Args:
-        app_state: Application state (for nodes mapping)
-    
-    Returns:
-        RebuildTreesResult with counts and status
+    Loads cached extractions from all per-tenant JSONL files and builds
+    hierarchical tree structures for navigation and retrieval.
     """
     from .indexing import (
         load_jsonl,
@@ -220,9 +211,19 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
     paths = config.paths
     
     try:
-        # Load Gemini cache
-        LOGGER.info("Loading Gemini extraction cache...")
-        cached_records = load_jsonl(paths.gemini_json_cache)
+        # Load Gemini cache from ALL per-tenant JSONLs
+        LOGGER.info("Loading Gemini extraction caches...")
+        cached_records = {}
+        
+        for jsonl_path in paths.cache_dir.glob("gemini_extract_cache_*.jsonl"):
+            tenant_records = load_jsonl(jsonl_path)
+            cached_records.update(tenant_records)
+            LOGGER.info("Loaded %d records from %s", len(tenant_records), jsonl_path.name)
+        
+        # Also try legacy single cache as fallback
+        if not cached_records and paths.gemini_json_cache.exists():
+            cached_records = load_jsonl(paths.gemini_json_cache)
+            LOGGER.info("Loaded %d records from legacy cache", len(cached_records))
         
         if not cached_records:
             return RebuildTreesResult(
@@ -233,7 +234,7 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
                 error="No Gemini cache found. Please rebuild the index first."
             )
         
-        LOGGER.info("Found %d cached extractions", len(cached_records))
+        LOGGER.info("Found %d cached extractions across all tenants", len(cached_records))
         
         # Build trees for all files with valid extractions
         document_trees = []
@@ -243,21 +244,22 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
         for filename, cached_record in cached_records.items():
             gemini_meta = cached_record.get("gemini", {})
             
-            # Skip files with extraction errors
             if "parse_error" in gemini_meta or "extraction_error" in gemini_meta:
                 LOGGER.debug("Skipping %s (extraction error)", filename)
                 skipped += 1
                 continue
             
-            # Skip files with no sections
             if not gemini_meta.get("sections"):
                 LOGGER.debug("Skipping %s (no sections)", filename)
                 skipped += 1
                 continue
             
-            # Build tree for this document
-            doc_path = paths.docs_path / filename
-            doc_id = doc_path.stem  # Filename without extension
+            # Resolve doc path through tenant folders
+            doc_path = config.find_doc_file(filename)
+            if not doc_path:
+                doc_path = paths.docs_path / filename  # fallback for tree building
+            
+            doc_id = doc_path.stem
             
             try:
                 tree = build_document_tree(gemini_meta, doc_id)
@@ -273,7 +275,6 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
         LOGGER.info("Built %d document trees (%d files skipped)",
                     len(document_trees), skipped)
         
-        # Map chunks to tree sections (if nodes available)
         if app_state.nodes:
             LOGGER.info("Mapping %d chunks to tree sections...", len(app_state.nodes))
             document_trees = map_chunks_to_tree_sections(app_state.nodes, document_trees)
@@ -281,12 +282,10 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
         else:
             LOGGER.warning("No nodes loaded - skipping chunk mapping")
         
-        # Save trees to JSON
         trees_path = paths.cache_dir / "document_trees.json"
         save_document_trees(document_trees, trees_path)
         LOGGER.info("Saved trees to %s", trees_path)
         
-        # Reload hierarchical state in app
         app_state._validate_hierarchical_support()
         
         return RebuildTreesResult(
@@ -307,9 +306,20 @@ def rebuild_document_trees(app_state: "AppState") -> RebuildTreesResult:
         )
 
 
+
 # ==============================================================================
 # DELETE DOCUMENT
 # ==============================================================================
+
+def _resolve_tenant_for_file(source_filename: str, app_state: "AppState") -> str:
+    """Look up which tenant owns a file by checking node metadata.
+    
+    Falls back to 'shared' if no node found (e.g. file failed extraction).
+    """
+    for node in app_state.nodes:
+        if node.metadata.get("source") == source_filename:
+            return node.metadata.get("tenant_id", "shared")
+    return "shared"
 
 def delete_document_by_source(
     source_filename: str,
@@ -340,7 +350,12 @@ def delete_document_by_source(
         )
     
     config = AppConfig.get()
-    source_path = config.paths.docs_path / source_filename
+     
+    # Resolve tenant to find correct subfolder
+    if not tenant_id:
+        tenant_id = _resolve_tenant_for_file(source_filename, app_state)
+     
+    source_path = config.docs_path_for(tenant_id) / source_filename
     
     try:
         manager = app_state.ensure_manager()
@@ -423,13 +438,13 @@ def batch_delete_documents(
         Tuple of (deleted_count, db_entries_removed, error_message)
     """
     config = AppConfig.get()
-    docs_path = config.paths.docs_path
     
     # Step 1: Delete all files from disk
     deleted_count = 0
     for filename in filenames:
-        file_path = docs_path / filename
-        if file_path.exists():
+        # Resolve path via tenant metadata or find across folders
+        file_path = config.find_doc_file(filename)
+        if file_path and file_path.exists():
             try:
                 file_path.unlink()
                 deleted_count += 1
@@ -477,55 +492,68 @@ def batch_delete_documents(
 
 def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
     """
-    Nuclear option: delete ALL documents and reset completely.
+    Nuclear option: delete ALL documents across ALL tenants and reset completely.
     
     This operation:
-    1. Deletes all source files from docs directory
+    1. Deletes all source files from ALL tenant subfolders
     2. Clears ChromaDB collection
-    3. Clears SQLite nodes table
-    4. Deletes all cache files
+    3. Clears ALL SQLite nodes (all tenants)
+    4. Deletes all cache files (including per-tenant JSONLs)
     5. Resets app_state completely
-    
-    Args:
-        app_state: Application state to reset
-    
-    Returns:
-        DeleteLibraryResult with status
     """
-    import streamlit as st
     from .nodes import NodeRepository
+    from .indexing import clear_all_nodes_for_rebuild
     
     config = AppConfig.get()
-    tenant_id = st.session_state.get("tenant_id", "shared")
     
     try:
-        # Delete all source files
-        docs_path = config.paths.docs_path
+        docs_base = config.paths.docs_path
         deleted_count = 0
         
-        for file_path in docs_path.glob("*"):
+        # Delete files from ALL tenant subfolders
+        for tenant_dir in docs_base.iterdir():
+            if tenant_dir.is_dir():
+                for file_path in tenant_dir.glob("*"):
+                    if file_path.is_file():
+                        file_path.unlink()
+                        deleted_count += 1
+        
+        # Also clean up any legacy files directly in docs/ (pre-migration)
+        for file_path in docs_base.glob("*"):
             if file_path.is_file():
                 file_path.unlink()
                 deleted_count += 1
         
-        # Clear ChromaDB
+        # Clear ChromaDB (all tenants — single collection)
         manager = app_state.ensure_manager()
         manager.collection.delete()
         manager.collection = manager.chroma_client.get_or_create_collection("maritime_docs")
         
-        # Clear SQLite nodes
-        repo = NodeRepository(tenant_id=tenant_id)
-        repo.clear_all()
+        # Clear ALL SQLite nodes (all tenants)
+        clear_all_nodes_for_rebuild()
         
-        # Clear all cache files
-        cache_files = [
-            config.paths.nodes_cache_path,  # Legacy pickle (may not exist)
+        # Delete all per-tenant Gemini caches
+        cache_dir = config.paths.cache_dir
+        for jsonl in cache_dir.glob("gemini_extract_cache_*.jsonl"):
+            jsonl.unlink()
+            LOGGER.info("Deleted cache: %s", jsonl.name)
+        
+        # Delete legacy single cache if present
+        if config.paths.gemini_json_cache.exists():
+            config.paths.gemini_json_cache.unlink()
+        
+        # Delete per-tenant sync caches
+        for sync_cache in cache_dir.glob("sync_cache_*.json"):
+            sync_cache.unlink()
+            LOGGER.info("Deleted sync cache: %s", sync_cache.name)
+        
+        # Delete other cache files
+        other_caches = [
+            config.paths.nodes_cache_path,   # Legacy pickle
             config.paths.cache_info_path,
-            manager.sync_cache_file,
-            config.paths.gemini_json_cache,
+            cache_dir / "sync_cache.json",   # Legacy single sync cache
         ]
-        
-        for cache_file in cache_files:
+        for cache_file in other_caches:
             if cache_file.exists():
                 cache_file.unlink()
         
@@ -538,7 +566,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
         app_state.manager = None
         app_state.invalidate_node_map_cache()
         
-        LOGGER.info("Nuclear delete: %d files", deleted_count)
+        LOGGER.info("Nuclear delete: %d files across all tenants", deleted_count)
         
         return DeleteLibraryResult(
             files_deleted=deleted_count,
@@ -552,6 +580,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
             success=False,
             error=str(exc)
         )
+
 
 
 # ==============================================================================
