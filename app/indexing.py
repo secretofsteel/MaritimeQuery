@@ -600,14 +600,23 @@ def build_index_from_library_parallel(
     # Initialize ChromaDB
     chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
 
-    try:
-        chroma_client.delete_collection("maritime_docs")
-        LOGGER.info("Deleted old ChromaDB collection")
-    except Exception:
-        # Collection doesn't exist or other issue - that's fine for fresh start
-        LOGGER.info("No existing ChromaDB collection to delete")
+    if tenant_id:
+        # Scoped rebuild — only remove this tenant's chunks
+        collection = chroma_client.get_or_create_collection("maritime_docs")
+        tenant_chunks = collection.get(where={"tenant_id": tenant_id}, include=[])
+        if tenant_chunks and tenant_chunks["ids"]:
+            collection.delete(ids=tenant_chunks["ids"])
+            LOGGER.info("Deleted %d chunks for tenant '%s' from ChromaDB", 
+                        len(tenant_chunks["ids"]), tenant_id)
+    else:
+        # Full rebuild — nuke and recreate
+        try:
+            chroma_client.delete_collection("maritime_docs")
+            LOGGER.info("Deleted old ChromaDB collection")
+        except Exception:
+            LOGGER.info("No existing ChromaDB collection to delete")
+        collection = chroma_client.create_collection("maritime_docs")
 
-    collection = chroma_client.create_collection("maritime_docs")
     vector_store = ChromaVectorStore(chroma_collection=collection)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     
