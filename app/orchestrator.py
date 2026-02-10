@@ -717,7 +717,7 @@ class FilteredRetriever:
     Multiple sub-queries run in parallel via ThreadPoolExecutor.
     """
 
-    RERANK_MODEL = "rerank-v3.5"
+    RERANK_MODEL = "rerank-v4.0-pro"
     MAX_WORKERS = 4
 
     def __init__(self, app_state: "AppState"):
@@ -1150,7 +1150,7 @@ Example:
 Query: "Compare our hot work procedures with RISQ requirements"
 → Two sub-queries:
   1. text="hot work safety procedures and requirements", source_label="Company hot work procedures",
-     doc_type_filter=["PROCEDURE", "POLICY"], is_standard=false
+     doc_type_filter=["PROCEDURE"], is_standard=false
   2. text="hot work safety requirements and standards", source_label="RISQ hot work requirements",
      doc_type_filter=["VETTING"], is_standard=true
 
@@ -1554,7 +1554,10 @@ SOURCE FINDINGS:
 
 ORIGINAL QUESTION: {query}
 
-Provide the gap analysis following the structure above."""
+Provide the gap analysis following the structure above.
+
+NOTE: If this is a follow up question to a previous compliance / gap analysis then disregard the above strict format and reply directly to the user's question
+using the above findings as context. """
 
     @staticmethod
     def _synthesis_prompt_comparison(query: str, sub_answers_text: str) -> str:
