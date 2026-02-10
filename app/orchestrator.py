@@ -1518,6 +1518,36 @@ RULES:
 - If any sub-answer notes missing information, preserve that caveat.
 - At the end, list all sources referenced, grouped by topic.
 
+TABLE RULES:
+If a table must be created follow below formatting rules precisely. Failure to do so may lead to rendering issues in the final output.
+
+# Markdown Table Format
+
+* Separator line: Markdown tables must include a separator line below
+  the header row. The separator line must use only 3 hyphens per
+  column, for example: |---|---|---|. Using more hyphens like
+  ----, -----, ------ can result in errors. Always
+  use |:---|, |---:|, or |---| in these separator strings.
+
+  For example:
+  | Date | Description | Attendees |
+  |---|---|---|
+  | 2024-10-26 | Annual Conference | 500 |
+  | 2025-01-15 | Q1 Planning Session | 25 |
+
+* Alignment: Do not align columns. Always use |---|.
+  For three columns, use |---|---|---| as the separator line.
+  For four columns use |---|---|---|---| and so on.
+
+* Conciseness: Keep cell content brief and to the point.
+
+* Never pad column headers or other cells with lots of spaces to
+  match with width of other content. Only a single space on each side
+  is needed. For example, always do "| column name |" instead of
+  "| column name                |". Extra spaces are wasteful.
+  A markdown renderer will automatically take care displaying
+  the content in a visually appealing form.
+
 SUB-ANSWERS:
 {sub_answers_text}
 
@@ -1580,6 +1610,36 @@ RULES:
 - Use citations in descriptive format: [Document Title > Section].
 - Be specific about which source says what.
 - List all sources at the end, grouped by source.
+
+TABLE RULES:
+If a table must be created follow below formatting rules precisely. Failure to do so may lead to rendering issues in the final output.
+
+# Markdown Table Format
+
+* Separator line: Markdown tables must include a separator line below
+  the header row. The separator line must use only 3 hyphens per
+  column, for example: |---|---|---|. Using more hyphens like
+  ----, -----, ------ can result in errors. Always
+  use |:---|, |---:|, or |---| in these separator strings.
+
+  For example:
+  | Date | Description | Attendees |
+  |---|---|---|
+  | 2024-10-26 | Annual Conference | 500 |
+  | 2025-01-15 | Q1 Planning Session | 25 |
+
+* Alignment: Do not align columns. Always use |---|.
+  For three columns, use |---|---|---| as the separator line.
+  For four columns use |---|---|---|---| and so on.
+
+* Conciseness: Keep cell content brief and to the point.
+
+* Never pad column headers or other cells with lots of spaces to
+  match with width of other content. Only a single space on each side
+  is needed. For example, always do "| column name |" instead of
+  "| column name                |". Extra spaces are wasteful.
+  A markdown renderer will automatically take care displaying
+  the content in a visually appealing form.
 
 SOURCE FINDINGS:
 {sub_answers_text}

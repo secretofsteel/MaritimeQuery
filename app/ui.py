@@ -2304,17 +2304,25 @@ def render_app(
                             if len(initial_buffer) > 500 and not table_detected:
                                 break
                         
+                        import time
+
                         if table_detected:
                             LOGGER.info("Buffering complete response due to table content")
                             
                             MAX_RESPONSE_LEN = 30_000
+                            MAX_BUFFER_SECONDS = 30
                             total_len = sum(len(c) for c in chunks_collected)
+                            buffer_start = time.time()
                             
                             for chunk in answer_stream:
                                 chunks_collected.append(chunk)
                                 total_len += len(chunk)
+                                
                                 if total_len > MAX_RESPONSE_LEN:
                                     LOGGER.warning("Response exceeded max length — truncating")
+                                    break
+                                if time.time() - buffer_start > MAX_BUFFER_SECONDS:
+                                    LOGGER.warning("Buffering timeout — likely degenerate output, truncating")
                                     break
                             
                             full_answer = "".join(chunks_collected)
