@@ -2307,22 +2307,14 @@ def render_app(
                         if table_detected:
                             LOGGER.info("Buffering complete response due to table content")
                             
-                            MAX_RESPONSE_LEN = 50_000  # sane ceiling for any response
+                            MAX_RESPONSE_LEN = 30_000
+                            total_len = sum(len(c) for c in chunks_collected)
+                            
                             for chunk in answer_stream:
                                 chunks_collected.append(chunk)
-                                full_so_far = "".join(chunks_collected)
-                                
-                                # Bail out if response is suspiciously large
-                                if len(full_so_far) > MAX_RESPONSE_LEN:
-                                    LOGGER.warning("Response exceeded max length, likely degenerate — truncating")
-                                    break
-                                
-                                # Bail out if we detect a degenerate line being built
-                                # (any single line longer than 1000 chars is almost certainly broken)
-                                last_newline = full_so_far.rfind('\n')
-                                current_line = full_so_far[last_newline + 1:]
-                                if len(current_line) > 1000 and current_line.count('-') > 500:
-                                    LOGGER.warning("Degenerate table separator detected — truncating stream")
+                                total_len += len(chunk)
+                                if total_len > MAX_RESPONSE_LEN:
+                                    LOGGER.warning("Response exceeded max length — truncating")
                                     break
                             
                             full_answer = "".join(chunks_collected)
