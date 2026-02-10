@@ -1136,7 +1136,7 @@ def rebuild_index(app_state: AppState) -> None:
             LOGGER.exception("Failed to rebuild index")
             st.error(f"❌ Failed to rebuild index: {exc}")
 
-def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool = False, tenant_id: str = "shared") -> None:
+def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool = False, tenant_id: str = "shared", doc_type_override: str | None = None) -> None:
     """Execute parallel index rebuild with progress tracking.
     
     Args:
@@ -1184,7 +1184,8 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         nodes, index, report = build_index_from_library_parallel(
             progress_callback=progress_callback,
             clear_gemini_cache=clear_gemini_cache,
-            tenant_id=tenant_id
+            tenant_id=tenant_id,
+            doc_type_override=doc_type_override
         )
 
         # Store report in session state
@@ -1224,7 +1225,7 @@ def rebuild_index_parallel(app_state: AppState) -> None:
     """Compatibility wrapper - calls rebuild_index_parallel_execute with default settings."""
     rebuild_index_parallel_execute(app_state, clear_gemini_cache=False)
 
-def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared") -> None:
+def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared", doc_type_override: str | None = None) -> None:
     """
     Execute sync_library with progress tracking UI.
     
@@ -1273,7 +1274,8 @@ def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared") -> None
         sync_result, report = manager.sync_library(
             app_state.index,
             force_retry_errors=True,
-            progress_callback=progress_callback  # Pass callback!
+            progress_callback=progress_callback,
+            doc_type_override=doc_type_override
         )
         
         # Store report in session state
@@ -1724,7 +1726,7 @@ def render_app(
     
     # Session state defaults
     st.session_state.setdefault("retrieval_method", "hybrid")
-    st.session_state.setdefault("rerank_enabled", cohere_client is not None)
+    st.session_state.setdefault("rerank_enabled", True)
     st.session_state.setdefault("fortify_option", False)
     st.session_state.setdefault("auto_refine_option", False)
     st.session_state.setdefault("use_context", True)  # Default ON for context-aware chat
@@ -2845,18 +2847,42 @@ def _render_bulk_upload(app_state: AppState) -> None:
     else:
         st.info(f"🔒 These documents will only be visible to **{selected_tenant}**")
 
+    st.markdown("---")
+    st.markdown("#### 🏷️ Document Type")
+
+    doc_type_options = ["Automatic"] + ALLOWED_DOC_TYPES
+    selected_doc_type = st.selectbox(
+        "Classify as",
+        options=doc_type_options,
+        index=0,
+        help="'Automatic' lets the AI classify each document. Select a specific type to override for ALL files in this batch.",
+        key="upload_doc_type_select"
+    )
+
+    if selected_doc_type == "Automatic":
+        st.caption("🤖 Each document will be classified individually by Gemini during extraction.")
+    else:
+        st.warning(f"⚠️ All documents in this batch will be tagged as **{selected_doc_type}**, regardless of AI classification.")
+
+    # Map UI value to code value (None = automatic)
+    doc_type_override = None if selected_doc_type == "Automatic" else selected_doc_type
+
     # Upload button
     if st.button("🚀 Upload & Process", type="primary", use_container_width=True):
-        _execute_bulk_upload(uploaded_files, app_state, system_has_index, 
-                           overwrite_duplicates=list(duplicates) if duplicates and overwrite else [], tenant_id=selected_tenant)
-
+        _execute_bulk_upload(
+            uploaded_files, app_state, system_has_index,
+            overwrite_duplicates=list(duplicates) if duplicates and overwrite else [],
+            tenant_id=selected_tenant,
+            doc_type_override=doc_type_override
+        )
 
 def _execute_bulk_upload(
     uploaded_files: List,
     app_state: AppState,
     system_has_index: bool,
     overwrite_duplicates: List[str] = None,
-    tenant_id: str = "shared"
+    tenant_id: str = "shared",
+    doc_type_override: str | None = None
 ) -> None:
     """Execute bulk upload and processing."""
     
@@ -2911,10 +2937,10 @@ def _execute_bulk_upload(
     
     if system_has_index:
         st.write("### 🔄 Running incremental sync...")
-        sync_library_with_ui(app_state, tenant_id=tenant_id)
+        sync_library_with_ui(app_state, tenant_id=tenant_id, doc_type_override=doc_type_override)
     else:
         st.write("### 🔨 Building index...")
-        rebuild_index_parallel_execute(app_state, clear_gemini_cache=False, tenant_id=tenant_id)
+        rebuild_index_parallel_execute(app_state, clear_gemini_cache=False, tenant_id=tenant_id, doc_type_override=doc_type_override)
     
     st.write("---")
     st.write("### 🌲 Updating document trees...")
