@@ -640,6 +640,51 @@ def delete_duplicate_files(
             deleted += 1
     return deleted
 
+import re
+
+def sanitize_markdown_tables(text: str) -> str:
+    """
+    Fix degenerate markdown tables from LLM output.
+    
+    Handles:
+    - Separator rows with hundreds of dashes (truncate to sane width)
+    - Cell content with runaway repeated characters
+    """
+    lines = text.split('\n')
+    sanitized = []
+    
+    for line in lines:
+        if not line.strip().startswith('|'):
+            sanitized.append(line)
+            continue
+        
+        # Split into cells
+        cells = line.split('|')
+        fixed_cells = []
+        
+        for cell in cells:
+            stripped = cell.strip()
+            
+            # Fix separator cells: :--...-- or ---...--- (more than 20 dashes)
+            sep_match = re.match(r'^(:?)-{4,}(:?)$', stripped)
+            if sep_match:
+                left = sep_match.group(1)   # ':' or ''
+                right = sep_match.group(2)  # ':' or ''
+                fixed_cells.append(f' {left}---{right} ')
+                continue
+            
+            # Fix runaway repeated characters in content cells (>200 chars of same char)
+            if len(stripped) > 200:
+                collapsed = re.sub(r'(.)\1{50,}', lambda m: m.group(1) * 3, stripped)
+                if len(collapsed) < len(stripped):
+                    fixed_cells.append(f' {collapsed} ')
+                    continue
+            
+            fixed_cells.append(cell)
+        
+        sanitized.append('|'.join(fixed_cells))
+    
+    return '\n'.join(sanitized)
 
 __all__ = [
     # Result types
@@ -656,4 +701,5 @@ __all__ = [
     "delete_entire_library",
     "copy_uploaded_files",
     "delete_duplicate_files",
+    "sanitize_markdown_tables",
 ]

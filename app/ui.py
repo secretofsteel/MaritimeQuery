@@ -45,6 +45,7 @@ from .services import (
     delete_entire_library,
     copy_uploaded_files,
     delete_duplicate_files,
+    sanitize_markdown_tables
 )
 
 _DEF_EXTS = ["extra", "tables", "fenced_code", "sane_lists"]
@@ -2308,6 +2309,7 @@ def render_app(
                             LOGGER.info("Buffering complete response due to table content")
                             remaining_chunks = list(answer_stream)  # Collect rest of stream
                             full_answer = "".join(chunks_collected + remaining_chunks)
+                            full_answer = sanitize_markdown_tables(full_answer)
                             st.markdown(full_answer)
                             result["answer"] = full_answer
                         else:
