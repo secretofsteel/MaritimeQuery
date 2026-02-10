@@ -46,6 +46,7 @@ class Intent(str, Enum):
     INCOMPLETE = "incomplete"
     FOLLOW_UP_SAME = "follow_up_same"   # Same topic, same facet (drill-down)
     FOLLOW_UP_NEW = "follow_up_new"     # Same topic, different facet
+    ACTION_ON_PREVIOUS = "action_on_previous"  # Create/draft/revise based on prior answer
     NEW_QUERY = "new_query"
 
 
@@ -55,6 +56,7 @@ class QueryType(str, Enum):
     PROCEDURAL = "procedural"
     MULTI_PART = "multi_part"
     COMPLIANCE = "compliance"
+    CONTENT_GENERATION = "content_generation"
 
 
 class ScopeAssessment(str, Enum):
@@ -76,6 +78,7 @@ class MergeStrategy(str, Enum):
     DIRECT = "direct"
     SYNTHESIZE = "synthesize"
     COMPLIANCE = "compliance"
+    GENERATIVE = "generative"
 
 
 # =============================================================================
@@ -278,6 +281,7 @@ class QueryAnalyzer:
         if not topic and has_context and intent in (
             Intent.FOLLOW_UP_SAME,
             Intent.FOLLOW_UP_NEW,
+            Intent.ACTION_ON_PREVIOUS,
         ):
             # The LLM couldn't extract a topic from "What forms for that?"
             # but we know the conversation is about the previous topic.
@@ -295,8 +299,8 @@ class QueryAnalyzer:
         merge_strategy = self._derive_merge_strategy(query_type)
         requires_decomposition = self._needs_decomposition(query_type, scope)
 
-        # Override retrieval strategy for compliance queries
-        if query_type == QueryType.COMPLIANCE and requires_decomposition:
+        # Override retrieval strategy for compliance and generative queries
+        if query_type in (QueryType.COMPLIANCE, QueryType.CONTENT_GENERATION) and requires_decomposition:
             retrieval_strategy = RetrievalStrategy.FILTERED_PARALLEL
             LOGGER.info(
                 "QueryAnalyzer: COMPLIANCE override → retrieval_strategy=FILTERED_PARALLEL",
@@ -358,6 +362,14 @@ Assistant answered: "{last_answer_preview}"
   - "follow_up_new": User stays on the same TOPIC but asks about a DIFFERENT facet.
     Examples: After asking about bunkering procedure → "What forms do I need for that?"
     After asking about drug testing → "What does RISQ say about this?"
+  - "action_on_previous": User wants to CREATE, DRAFT, REVISE, or REFORMULATE something
+    based on the previous answer. The task type changes — they don't want more analysis,
+    they want a deliverable or transformation of what was already provided.
+    Examples: After a gap analysis → "Now create revised procedures to close the gaps"
+    After a comparison → "Draft a circular addressing these findings"
+    After any answer → "Rewrite that as a table", "Summarize this into bullet points"
+    After a gap analysis → "Update the procedure to match the Rightship requirements you identified"
+    Key signal: verbs like create, draft, write, revise, update, rewrite, produce, generate, prepare.
   - "new_query": Completely different topic or operational area."""
         else:
             follow_up_instruction = """
@@ -406,6 +418,11 @@ FIELD DEFINITIONS:
   - "compliance": Compares, checks, or analyzes documents against each other.
     Examples: "Compare our D&A policy with Rightship", "Gap analysis on hot works: IMS vs RISQ"
     Also: "Difference between ISM and ISPS codes" (regulation vs regulation comparison)
+  - "content_generation": User wants to CREATE, DRAFT, or REVISE a document or procedure
+    based on previous analysis or conversation. NOT a lookup — a creative/drafting task.
+    Examples: "Draft revised UKC procedures based on the gaps", "Write a circular about these findings"
+    "Create an updated procedure that matches Rightship requirements"
+    This is typically paired with "action_on_previous" intent.
 
 3. "topic" — The query subject in 2-5 words.
    Examples: "bunkering operations", "drug and alcohol", "fire safety", "ice navigation", etc.
@@ -579,6 +596,7 @@ JSON Response:"""
             "follow_up_new": Intent.FOLLOW_UP_NEW,
             "follow_up": Intent.FOLLOW_UP_SAME,  # legacy alias → default to same
             "clarification": Intent.FOLLOW_UP_SAME,  # legacy alias
+            "action_on_previous": Intent.ACTION_ON_PREVIOUS,
             "new_query": Intent.NEW_QUERY,
         }
         intent = mapping.get(raw_intent.lower().strip())
@@ -588,7 +606,7 @@ JSON Response:"""
             return Intent.NEW_QUERY
 
         # Guard: follow-up intents only make sense with context
-        if intent in (Intent.FOLLOW_UP_SAME, Intent.FOLLOW_UP_NEW) and not has_context:
+        if intent in (Intent.FOLLOW_UP_SAME, Intent.FOLLOW_UP_NEW, Intent.ACTION_ON_PREVIOUS) and not has_context:
             LOGGER.info("Follow-up intent without context, treating as NEW_QUERY")
             return Intent.NEW_QUERY
 
@@ -601,6 +619,7 @@ JSON Response:"""
             "procedural": QueryType.PROCEDURAL,
             "multi_part": QueryType.MULTI_PART,
             "compliance": QueryType.COMPLIANCE,
+            "content_generation": QueryType.CONTENT_GENERATION,
         }
         qt = mapping.get(raw_type.lower().strip() if raw_type else "simple_factual")
         if qt is None:
@@ -652,6 +671,8 @@ JSON Response:"""
             return MergeStrategy.COMPLIANCE
         if query_type == QueryType.MULTI_PART:
             return MergeStrategy.SYNTHESIZE
+        if query_type == QueryType.CONTENT_GENERATION:
+            return MergeStrategy.GENERATIVE
         return MergeStrategy.DIRECT
 
     @staticmethod
@@ -662,7 +683,7 @@ JSON Response:"""
         """Decomposition needed for complex types, unless scope blocks it."""
         if scope == ScopeAssessment.TOO_BROAD:
             return False  # Blocked — will push back on scope instead
-        return query_type in (QueryType.MULTI_PART, QueryType.COMPLIANCE)
+        return query_type in (QueryType.MULTI_PART, QueryType.COMPLIANCE, QueryType.CONTENT_GENERATION)
 
     # -----------------------------------------------------------------
     # Fallback classification (no LLM)
@@ -1380,6 +1401,7 @@ Please provide a clear, concise answer with proper citations."""
         sub_answers: List[SubAnswer],
         merge_strategy: MergeStrategy,
         has_regulatory_standard: bool = False,
+        conversation_history: str = "",
     ) -> Generator[str, None, None]:
         """Stream the final synthesized answer from multiple sub-answers.
 
@@ -1388,11 +1410,12 @@ Please provide a clear, concise answer with proper citations."""
         """
         prompt = self._build_synthesis_prompt(
             original_query, sub_answers, merge_strategy, has_regulatory_standard,
+            conversation_history,
         )
 
-        # Gap analysis gets more thinking budget
+        # Gap analysis and content generation get more thinking budget
         thinking_budget = self.THINKING_BUDGET_STANDARD
-        if merge_strategy == MergeStrategy.COMPLIANCE:
+        if merge_strategy in (MergeStrategy.COMPLIANCE, MergeStrategy.GENERATIVE):
             thinking_budget = self.THINKING_BUDGET_GAP_ANALYSIS
 
         LOGGER.info(
@@ -1479,6 +1502,7 @@ Provide a focused, thorough answer based on the documents above."""
         sub_answers: List[SubAnswer],
         merge_strategy: MergeStrategy,
         has_regulatory_standard: bool,
+        conversation_history: str = "",
     ) -> str:
         """Build the strategy-specific synthesis prompt."""
 
@@ -1491,11 +1515,17 @@ Provide a focused, thorough answer based on the documents above."""
             )
         joined_answers = "\n\n".join(sub_answer_blocks)
 
-        if merge_strategy == MergeStrategy.SYNTHESIZE:
+        if merge_strategy == MergeStrategy.GENERATIVE:
+            return self._synthesis_prompt_generative(
+                original_query, joined_answers, conversation_history,
+            )
+        elif merge_strategy == MergeStrategy.SYNTHESIZE:
             return self._synthesis_prompt_multi_part(original_query, joined_answers)
         elif merge_strategy == MergeStrategy.COMPLIANCE:
             if has_regulatory_standard:
-                return self._synthesis_prompt_gap_analysis(original_query, joined_answers)
+                return self._synthesis_prompt_gap_analysis(
+                    original_query, joined_answers, conversation_history,
+                )
             else:
                 return self._synthesis_prompt_comparison(original_query, joined_answers)
         else:
@@ -1556,10 +1586,17 @@ ORIGINAL QUESTION: {query}
 Provide a unified, well-structured response that addresses all parts of the question."""
 
     @staticmethod
-    def _synthesis_prompt_gap_analysis(query: str, sub_answers_text: str) -> str:
+    def _synthesis_prompt_gap_analysis(query: str, sub_answers_text: str, conversation_history: str = "") -> str:
+        history_block = ""
+        if conversation_history:
+            history_block = f"""
+PREVIOUS CONVERSATION:
+{conversation_history}
+
+"""
         return f"""You are a maritime compliance expert performing a gap analysis.
 
-The user wants to check company documentation against a regulatory standard.
+{history_block}The user wants to check company documentation against a regulatory standard.
 Below are the findings from each source. The source marked (REGULATORY STANDARD)
 is the benchmark — the company's documents should be checked against it.
 
@@ -1647,6 +1684,55 @@ SOURCE FINDINGS:
 ORIGINAL QUESTION: {query}
 
 Provide the comparison following the structure above."""
+
+    @staticmethod
+    def _synthesis_prompt_generative(
+        query: str, sub_answers_text: str, conversation_history: str = "",
+    ) -> str:
+        history_block = ""
+        if conversation_history:
+            history_block = f"""
+PREVIOUS CONVERSATION (the user is building on this):
+{conversation_history}
+
+"""
+
+        return f"""You are a maritime documentation expert. The user wants you to CREATE,
+DRAFT, or REVISE content based on previous analysis and the source documents below.
+
+{history_block}This is NOT a lookup or comparison task — the user wants you to PRODUCE a deliverable.
+Use the source documents below as authoritative reference material, and use the previous
+conversation (if provided) as context for what the user has already seen and what gaps
+or issues were identified.
+
+YOUR TASK: Follow the user's instructions to create/draft/revise the requested content.
+
+RULES:
+- Produce the requested content directly — do NOT repeat a previous analysis or comparison.
+- Ground your output in the source documents: use their structure, section numbering, and
+  terminology as the foundation, but adapt and extend as needed.
+- When the user asks to "revise" or "update" a procedure, produce the FULL revised text,
+  not just a list of changes. The output should be ready to use.
+- Preserve document conventions: section numbering schemes, form references, role titles.
+- Cite sources where relevant using [Document Title > Section] format.
+- If you lack sufficient source material to fully complete the request, clearly state
+  what sections you could complete and what requires additional input.
+- Be thorough. This is a professional maritime document.
+
+TABLE RULES:
+If a table must be created follow below formatting rules precisely.
+
+* Separator line: use only 3 hyphens per column: |---|---|---|
+* Alignment: Do not align columns. Always use |---|.
+* Conciseness: Keep cell content brief.
+* Never pad cells with extra spaces.
+
+SOURCE DOCUMENTS:
+{sub_answers_text}
+
+USER REQUEST: {query}
+
+Produce the requested content based on the sources and context above."""
 
     # -----------------------------------------------------------------
     # Confidence and source collection
@@ -2098,9 +2184,7 @@ def orchestrated_query(
         )
 
         conversation_history = ""
-        if use_conversation_context and analysis.intent in (
-            Intent.FOLLOW_UP_SAME, Intent.FOLLOW_UP_NEW,
-        ):
+        if use_conversation_context and app_state.query_history:
             conversation_history = _build_conversation_history(app_state)
 
         answer_stream = synthesizer.generate_direct_stream(
@@ -2137,12 +2221,18 @@ def orchestrated_query(
             synthesizer.aggregate_confidence(sub_answers)
         )
 
+        # Build conversation history for all paths
+        conversation_history = ""
+        if use_conversation_context and app_state.query_history:
+            conversation_history = _build_conversation_history(app_state)
+
         _status("🔗 Synthesizing final response...")
         answer_stream = synthesizer.generate_synthesis_stream(
             original_query=query_text,
             sub_answers=sub_answers,
             merge_strategy=analysis.merge_strategy,
             has_regulatory_standard=analysis.has_regulatory_standard,
+            conversation_history=conversation_history,
         )
 
         all_nodes = []
