@@ -311,9 +311,10 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
 
 
 def build_index_from_library_parallel(
-    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    progress_callback=None,
     clear_gemini_cache: bool = False,
     tenant_id: str = None,  # None = all tenants
+    doc_type_override: str | None = None,
 ) -> Tuple[List[Document], VectorStoreIndex, ProcessingReport]:
     """Process the full document library with parallel extraction and embedding.
     
@@ -440,6 +441,21 @@ def build_index_from_library_parallel(
                 
                 status.embedding = StageResult(StageStatus.SUCCESS, "Embeddings cached")
                 
+                # Apply doc_type override if set
+                if doc_type_override:
+                    meta["doc_type"] = doc_type_override
+                    # Persist override to JSONL cache
+                    upsert_jsonl_record(
+                        tenant_cache_path,
+                        {
+                            "filename": filename,
+                            "mtime": fingerprint.get("mtime", 0),
+                            "size": fingerprint.get("size", 0),
+                            "gemini": meta,
+                            "tenant_id": tid,
+                        },
+                    )
+
                 # Convert to documents
                 documents_from_cache = to_documents_from_gemini(doc_path, meta)
                 all_documents.extend(documents_from_cache)
@@ -448,7 +464,10 @@ def build_index_from_library_parallel(
     
     LOGGER.info("Using %d cached extractions, need to extract %d files",
                len(total_files_index) - len(all_docs_to_extract), len(all_docs_to_extract))
-    
+
+    if doc_type_override:
+        LOGGER.info("Doc type override active: all documents tagged as '%s'", doc_type_override)
+
     # Create processing report
     report = ProcessingReport(
         timestamp=datetime.now().isoformat(),
@@ -470,6 +489,10 @@ def build_index_from_library_parallel(
             tid = file_tenant_map.get(filename, "shared")
             
             if result.record:
+                # Apply doc_type override if set
+                if doc_type_override:
+                    result.record["doc_type"] = doc_type_override
+
                 # Preserve existing tenant_id from cache
                 existing_tenant = tid
                 
@@ -959,7 +982,8 @@ class IncrementalIndexManager:
         self, 
         index: Optional[VectorStoreIndex], 
         force_retry_errors: bool = True,
-        progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+        progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+        doc_type_override: str | None = None
     ) -> Tuple[SyncResult, Optional[ProcessingReport]]:
         """
         Sync library with parallel extraction and embedding generation.
@@ -1022,16 +1046,15 @@ class IncrementalIndexManager:
             self._remove_documents(modified_files)
         
         # Process additions/modifications WITH progress callback
-        successfully_added_or_modified: Set[str] = set()
-        if new_files or modified_files:
-            successfully_added_or_modified, processing_statuses = self._add_or_update_documents_parallel(
-                new_files | modified_files, 
-                index,
-                progress_callback  # NEW: Pass callback through!
-            )
-            
-            # Merge processing statuses into report
-            file_statuses.update(processing_statuses)
+        successfully_added_or_modified, processing_statuses = self._add_or_update_documents_parallel(
+            new_files | modified_files, 
+            index,
+            progress_callback,
+            doc_type_override=doc_type_override
+        )
+        
+        # Merge processing statuses into report
+        file_statuses.update(processing_statuses)
         
         # Update sync cache
         self.sync_cache["files_hash"] = current_files
@@ -1074,7 +1097,8 @@ class IncrementalIndexManager:
         self, 
         filenames: Set[str], 
         index: Optional[VectorStoreIndex],
-        progress_callback: Optional[Callable[[str, int, int, str], None]] = None
+        progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+        doc_type_override: str | None = None
     ) -> Tuple[Set[str], Dict[str, DocumentProcessingStatus]]:
         """
         Parallel version with parallel extraction and embedding generation.
@@ -1086,7 +1110,11 @@ class IncrementalIndexManager:
         
         Returns:
             Tuple of (successfully_processed_filenames, file_statuses)
-        """        
+        """
+
+        if doc_type_override:
+            LOGGER.info("Doc type override active: '%s' for %d files", doc_type_override, len(filenames))
+
         config = AppConfig.get()
         paths = config.paths
         
@@ -1144,6 +1172,13 @@ class IncrementalIndexManager:
                             status.validation = StageResult(StageStatus.SUCCESS, "Validation passed")
                     
                     try:
+                        # Apply doc_type override if set
+                        if doc_type_override:
+                            gemini_meta["doc_type"] = doc_type_override
+                            # Persist override to JSONL cache
+                            cached_record["gemini"] = gemini_meta
+                            upsert_jsonl_record(self.gemini_cache_path, cached_record)
+
                         docs = to_documents_from_gemini(doc_path, gemini_meta)
                         all_documents.extend(docs)
                         successfully_processed.add(filename)
@@ -1168,6 +1203,10 @@ class IncrementalIndexManager:
                 filename = result.filename
                 status = file_statuses[filename]
                 
+                # Apply doc_type override if set
+                if doc_type_override and result.record:
+                    result.record["doc_type"] = doc_type_override
+
                 # Update Gemini cache
                 files_hash = self._get_files_hash(self.docs_path)
                 fingerprint = files_hash.get(filename, {})
