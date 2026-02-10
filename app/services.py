@@ -88,42 +88,30 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     """
     Verify and repair consistency between SQLite and ChromaDB.
     
-    In Phase 3+, SQLite is the source of truth for text/metadata.
-    ChromaDB is the source of truth for vectors.
-    
-    This function:
-    1. Compares node counts between SQLite and ChromaDB
-    2. If mismatched, rebuilds SQLite from ChromaDB (vectors are expensive)
-    3. Rebuilds FTS5 index
-    
-    Use when you suspect data inconsistency.
-    
-    Args:
-        app_state: Application state (for ChromaDB access)
-    
-    Returns:
-        SyncMemoryResult with counts and status
+    ChromaDB is source of truth for vectors. SQLite mirrors text/metadata.
+    Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
     import streamlit as st
     from llama_index.core.schema import TextNode
     import chromadb
     
-    from .database import rebuild_fts_index, get_node_count
+    from .database import rebuild_fts_index, get_node_count, db_connection
     from .nodes import NodeRepository, bulk_insert_nodes
+    from .indexing import clear_all_nodes_for_rebuild
     
     config = AppConfig.get()
-    tenant_id = st.session_state.get("tenant_id", "shared")
     
     try:
-        # Get counts
-        sqlite_count = get_node_count(tenant_id)
+        # Get TOTAL SQLite count (all tenants)
+        with db_connection() as conn:
+            sqlite_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         
-        # Get ChromaDB count
+        # Get TOTAL ChromaDB count
         client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
         collection = client.get_collection("maritime_docs")
         chroma_count = collection.count()
         
-        LOGGER.info("Sync check: SQLite=%d, ChromaDB=%d", sqlite_count, chroma_count)
+        LOGGER.info("Sync check: SQLite=%d (all tenants), ChromaDB=%d", sqlite_count, chroma_count)
         
         # If counts match (within tolerance), just rebuild FTS
         if abs(sqlite_count - chroma_count) <= 5:
@@ -135,29 +123,40 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
                 success=True
             )
         
-        # Counts don't match - rebuild SQLite from ChromaDB
-        LOGGER.warning("Count mismatch - rebuilding SQLite from ChromaDB")
+        # Counts don't match — rebuild SQLite from ChromaDB
+        LOGGER.warning("Count mismatch (%d vs %d) — rebuilding SQLite from ChromaDB",
+                       sqlite_count, chroma_count)
         
         # Fetch everything from ChromaDB
         result = collection.get(
-            include=['documents', 'metadatas', 'embeddings']
+            include=['documents', 'metadatas']
         )
         
-        # Build nodes
+        # Clear ALL SQLite nodes
+        clear_all_nodes_for_rebuild()
+        
+        # Rebuild with correct tenant_id per node
         nodes = []
         for i, chunk_id in enumerate(result['ids']):
+            metadata = result['metadatas'][i]
             node = TextNode(
                 id_=chunk_id,
                 text=result['documents'][i],
-                metadata=result['metadatas'][i],
-                # Note: embeddings stay in ChromaDB, not SQLite
+                metadata=metadata,
             )
             nodes.append(node)
         
-        # Clear and rebuild SQLite
-        repo = NodeRepository(tenant_id=tenant_id)
-        repo.clear_all()
-        inserted = bulk_insert_nodes(nodes, tenant_id=tenant_id)
+        # Group by tenant and insert
+        nodes_by_tenant = {}
+        for node in nodes:
+            tid = node.metadata.get("tenant_id", "shared")
+            nodes_by_tenant.setdefault(tid, []).append(node)
+        
+        total_inserted = 0
+        for tid, tenant_nodes in nodes_by_tenant.items():
+            inserted = bulk_insert_nodes(tenant_nodes, tenant_id=tid)
+            total_inserted += inserted
+            LOGGER.info("Inserted %d nodes for tenant '%s'", inserted, tid)
         
         # Rebuild FTS
         rebuild_fts_index()
@@ -167,14 +166,12 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         app_state.fts5_retriever = None
         app_state.ensure_retrievers()
         
-        new_count = get_node_count(tenant_id)
-        
-        LOGGER.info("Synced SQLite to ChromaDB: %d → %d nodes", sqlite_count, new_count)
+        LOGGER.info("Synced SQLite to ChromaDB: %d → %d nodes", sqlite_count, total_inserted)
         
         return SyncMemoryResult(
             old_count=sqlite_count,
-            new_count=new_count,
-            removed=sqlite_count - new_count if sqlite_count > new_count else 0,
+            new_count=total_inserted,
+            removed=sqlite_count - total_inserted if sqlite_count > total_inserted else 0,
             success=True
         )
         
