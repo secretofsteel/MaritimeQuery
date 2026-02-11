@@ -1930,12 +1930,11 @@ def decompose_query(analysis: QueryAnalysis) -> List[SubQuery]:
 # Orchestrated Query (Phase 5e) — main entry point
 # =============================================================================
 
-def _build_conversation_history(app_state: "AppState") -> str:
-    """Build concise conversation history for prompt injection.
-
-    Mirrors the existing _build_conversation_history_context() from query.py
-    but uses the updated CONTEXT_HISTORY_WINDOW (4 turns).
-    """
+def _build_conversation_history(
+    app_state: "AppState",
+    full_last_answer: bool = False,
+    older_answer_limit: int = 1000,
+) -> str:
     if not app_state.query_history:
         return ""
 
@@ -1944,7 +1943,12 @@ def _build_conversation_history(app_state: "AppState") -> str:
     for idx, entry in enumerate(recent, 1):
         query = entry.get("query", "")
         answer = entry.get("answer", "")
-        preview = answer[:300] + "..." if len(answer) > 300 else answer
+        is_last = idx == len(recent)
+        if is_last and full_last_answer:
+            preview = answer  # No truncation
+        else:
+            limit = 2000 if is_last else older_answer_limit
+            preview = answer[:limit] + "..." if len(answer) > limit else answer
         parts.append(f"\nTurn {idx}:")
         parts.append(f"User: {query}")
         parts.append(f"Assistant: {preview}")
@@ -2207,7 +2211,10 @@ def orchestrated_query(
 
         conversation_history = ""
         if use_conversation_context and app_state.query_history:
-            conversation_history = _build_conversation_history(app_state)
+            full_last = analysis.intent == Intent.ACTION_ON_PREVIOUS
+            conversation_history = _build_conversation_history(
+                app_state, full_last_answer=full_last,
+            )
 
         answer_stream = synthesizer.generate_direct_stream(
             query=query_text,
@@ -2246,7 +2253,10 @@ def orchestrated_query(
         # Build conversation history for all paths
         conversation_history = ""
         if use_conversation_context and app_state.query_history:
-            conversation_history = _build_conversation_history(app_state)
+            full_last = analysis.intent == Intent.ACTION_ON_PREVIOUS
+            conversation_history = _build_conversation_history(
+                app_state, full_last_answer=full_last,
+            )
 
         _status("🔗 Synthesizing final response...")
         answer_stream = synthesizer.generate_synthesis_stream(

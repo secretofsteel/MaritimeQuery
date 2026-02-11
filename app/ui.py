@@ -2392,6 +2392,8 @@ def render_app(
 
                         # Extract metadata for assistant message
                     assistant_metadata = {
+                        "query": trimmed,
+                        "topic_extracted": result.get("topic_extracted"),
                         "confidence_pct": result.get("confidence_pct"),
                         "confidence_level": result.get("confidence_level"),
                         "confidence_note": result.get("confidence_note"),
