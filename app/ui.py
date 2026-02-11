@@ -12,6 +12,7 @@ from markdown import markdown as md
 import streamlit as st
 import shutil
 import pickle
+import re
 
 from .constants import (
     load_form_categories, 
