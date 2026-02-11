@@ -848,6 +848,7 @@ hr { border: 0; border-top: 1px solid rgba(102,180,255,.25); margin: 2rem 0; }
 .chat-upload-chips { margin-left: 3.6rem; margin-bottom: 0.35rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .chat-upload-chips.empty { color: rgba(190, 221, 255, 0.55); font-size: 0.75rem; }
 .upload-limit-note { font-size: 0.75rem; color: rgba(190, 221, 255, 0.55); margin-left: 3.6rem; margin-bottom: 0.4rem; }
+.result-markdown .inline-citation { font-size: 0.78em; font-style: italic; opacity: 0.55; }
 """
 
 _HTML_SHELL = """
@@ -946,6 +947,11 @@ def compose_result_markdown(result: Dict) -> str:
     parts.append("<section class='result-answer'>")
     parts.append("<h4>Answer</h4>")
     answer_html = md(answer, extensions=_DEF_EXTS) if answer else "<p>No answer available.</p>"
+    answer_html = re.sub(
+        r'\[([^\]]+)\]',
+        r"<span class='inline-citation'>[\1]</span>",
+        answer_html,
+    )
     parts.append(f"<div class='answer-body'>{answer_html}</div>")
     parts.append("</section>")
 
