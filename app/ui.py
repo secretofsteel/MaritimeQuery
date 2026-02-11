@@ -947,6 +947,7 @@ def compose_result_markdown(result: Dict) -> str:
 
     parts.append("<section class='result-answer'>")
     parts.append("<h4>Answer</h4>")
+    answer = re.sub(r'([^\n])\n(\s*[\*\-] )', r'\1\n\n\2', answer)
     answer_html = md(answer, extensions=_DEF_EXTS) if answer else "<p>No answer available.</p>"
     answer_html = re.sub(
         r'\[([^\]]+)\]',
