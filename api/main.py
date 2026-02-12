@@ -74,6 +74,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Tighten in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from api.routes.auth import router as auth_router
 from api.routes.query import router as query_router
 from api.routes.sessions import router as sessions_router
