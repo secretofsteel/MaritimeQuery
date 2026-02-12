@@ -2,6 +2,8 @@
 streamlit
 streamlit-authenticator
 markdown
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
 
 #LLM and embedding libraries
 google-genai

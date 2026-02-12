@@ -40,7 +40,7 @@ class AppState:
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
-    manager: Optional[IncrementalIndexManager] = None
+    _managers: Dict[str, IncrementalIndexManager] = field(default_factory=dict)
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
@@ -64,6 +64,7 @@ class AppState:
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
     _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
+    _shared_chroma_collection: Optional[Any] = field(default=None, repr=False)
     hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
     _index_load_attempted: bool = field(default=False, init=False)
 
@@ -142,12 +143,13 @@ class AppState:
         
         # Tenant-aware vector retriever
         if self.vector_retriever is None and self.index is not None:
-            config = AppConfig.get()
-            
-            # Get ChromaDB collection
-            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-            collection = client.get_or_create_collection("maritime_docs")
-            
+            # Use shared collection if injected (FastAPI path), else create client (Streamlit path)
+            collection = self._shared_chroma_collection
+            if collection is None:
+                config = AppConfig.get()
+                client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
+                collection = client.get_or_create_collection("maritime_docs")
+
             # Create tenant-aware retriever
             self.vector_retriever = TenantAwareVectorRetriever(
                 collection=collection,
@@ -172,19 +174,15 @@ class AppState:
             target_tenant_id: Override tenant for admin operations.
                 Defaults to self.tenant_id if not provided.
 
-        Recreates the manager if the tenant context has changed.
+        Managers are cached per tenant_id to avoid recreation ping-pong
+        when admin panel alternates between tenants.
         """
         tenant_id = target_tenant_id or self.tenant_id
 
-        # Recreate if tenant changed
-        if self.manager is not None and self.manager.tenant_id != tenant_id:
-            LOGGER.info("Tenant changed to '%s' — recreating IncrementalIndexManager", tenant_id)
-            self.manager = None
-
-        if self.manager is None:
+        if tenant_id not in self._managers:
             config = AppConfig.get()
             paths = config.paths
-            self.manager = IncrementalIndexManager(
+            manager = IncrementalIndexManager(
                 docs_path=config.docs_path_for(tenant_id),
                 gemini_cache_path=config.gemini_cache_for(tenant_id),
                 nodes_cache_path=paths.nodes_cache_path,
@@ -192,8 +190,11 @@ class AppState:
                 chroma_path=paths.chroma_path,
                 tenant_id=tenant_id,
             )
-            self.manager.nodes = self.nodes
-        return self.manager
+            manager.nodes = self.nodes
+            self._managers[tenant_id] = manager
+            LOGGER.info("Created IncrementalIndexManager for tenant '%s'", tenant_id)
+
+        return self._managers[tenant_id]
 
     def ensure_session_manager(self) -> SessionManager:
         """

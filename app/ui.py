@@ -1207,7 +1207,7 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         app_state.invalidate_node_map_cache()  # Clear stale cache
         app_state.vector_retriever = None
         app_state.bm25_retriever = None
-        app_state.manager = None
+        app_state._managers.clear()
         app_state.ensure_retrievers()
         app_state.ensure_manager(target_tenant_id=tenant_id).nodes = nodes
 
