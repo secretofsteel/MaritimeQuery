@@ -75,8 +75,12 @@ app = FastAPI(
 )
 
 from api.routes.auth import router as auth_router
+from api.routes.query import router as query_router
+from api.routes.sessions import router as sessions_router
 
 app.include_router(auth_router)
+app.include_router(query_router)
+app.include_router(sessions_router)
 
 
 # --- Health check (validates lifespan worked) ---
