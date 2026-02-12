@@ -1138,7 +1138,8 @@ def rebuild_index(app_state: AppState) -> None:
             app_state.vector_retriever = None
             app_state.bm25_retriever = None
             app_state.ensure_retrievers()
-            app_state.ensure_manager().nodes = nodes
+            manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+            app_state.ensure_manager(target_tenant_id=manage_tenant).nodes = nodes
             st.success(f"✅ Rebuilt index with {len(nodes)} chunks.")
             LOGGER.info("Index rebuilt successfully: %d nodes", len(nodes))
         except Exception as exc:
@@ -1208,8 +1209,8 @@ def rebuild_index_parallel_execute(app_state: AppState, clear_gemini_cache: bool
         app_state.bm25_retriever = None
         app_state.manager = None
         app_state.ensure_retrievers()
-        app_state.ensure_manager().nodes = nodes
-        
+        app_state.ensure_manager(target_tenant_id=tenant_id).nodes = nodes
+
         # Success
         cache_msg = " (all files re-extracted)" if clear_gemini_cache else ""
         overall_status.success(
@@ -1276,8 +1277,7 @@ def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared", doc_typ
         overall_status.info("⏳ Starting incremental sync...")
         
         # Run sync with progress callback
-        manager = app_state.ensure_manager()
-        manager.tenant_id = tenant_id
+        manager = app_state.ensure_manager(target_tenant_id=tenant_id)
         manager.nodes = app_state.nodes
         
         sync_result, report = manager.sync_library(
@@ -1320,10 +1320,11 @@ def sync_library_with_ui(app_state: AppState, tenant_id: str = "shared", doc_typ
 def sync_library(app_state: AppState) -> None:
     """
     Simple sync without progress UI (for backward compatibility).
-    
+
     Used in contexts where progress bars aren't appropriate.
     """
-    manager = app_state.ensure_manager()
+    manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
+    manager = app_state.ensure_manager(target_tenant_id=manage_tenant)
     manager.nodes = app_state.nodes
     
     with st.spinner("Syncing library..."):
@@ -2546,7 +2547,7 @@ def render_admin_panel(app_state: AppState) -> None:
                 st.metric("Chunks", len(visible_nodes))
             
             try:
-                manager = app_state.ensure_manager()
+                manager = app_state.ensure_manager(target_tenant_id=selected_tenant)
                 total_db = manager.collection.count()
                 st.caption(f"📊 {total_db} total in DB")
             except Exception as exc:
@@ -2842,7 +2843,7 @@ def _render_bulk_upload(app_state: AppState) -> None:
     
     # Check if ANY documents exist in the system (not just this tenant's folder)
     try:
-        manager = app_state.ensure_manager()
+        manager = app_state.ensure_manager(target_tenant_id=manage_tenant)
         system_has_index = manager.collection.count() > 0
     except Exception:
         system_has_index = False
@@ -2932,7 +2933,7 @@ def _execute_bulk_upload(
         # Run sync to remove from DB (if library exists)
         if system_has_index:
             st.write("Cleaning up database...")
-            manager = app_state.ensure_manager()
+            manager = app_state.ensure_manager(target_tenant_id=tenant_id)
             manager.nodes = app_state.nodes
             sync_result, _ = manager.sync_library(app_state.index, force_retry_errors=False)
             app_state.nodes = manager.nodes
@@ -3659,8 +3660,7 @@ def _batch_delete_documents(filenames: List[str], app_state: AppState) -> None:
     if deleted_count > 0:
         with st.spinner("Syncing library to update database..."):
             manage_tenant = st.session_state.get("manage_tenant", st.session_state.get("tenant_id", "shared"))
-            manager = app_state.ensure_manager()
-            manager.tenant_id = manage_tenant
+            manager = app_state.ensure_manager(target_tenant_id=manage_tenant)
             manager.nodes = app_state.nodes
             
             sync_result, _ = manager.sync_library(

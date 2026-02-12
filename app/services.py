@@ -20,8 +20,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 import chromadb
 from llama_index.core.schema import TextNode
 
-import streamlit as st
-
 from .config import AppConfig
 from .logger import LOGGER
 
@@ -91,7 +89,6 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     ChromaDB is source of truth for vectors. SQLite mirrors text/metadata.
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
-    import streamlit as st
     from llama_index.core.schema import TextNode
     import chromadb
     
