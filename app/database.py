@@ -316,6 +316,30 @@ def get_node_count(tenant_id: Optional[str] = None, db_path: Optional[Path] = No
         return cursor.fetchone()[0]
 
 
+def get_distinct_doc_count(tenant_id: Optional[str] = None, db_path: Optional[Path] = None) -> int:
+    """
+    Count distinct documents, optionally filtered by tenant.
+    
+    Args:
+        tenant_id: If provided, count only this tenant's documents
+        db_path: Path to database
+    
+    Returns:
+        Count of distinct doc_ids
+    """
+    db_path = db_path or get_db_path()
+    
+    with db_connection(db_path) as conn:
+        if tenant_id:
+            cursor = conn.execute(
+                "SELECT COUNT(DISTINCT doc_id) FROM nodes WHERE tenant_id = ?",
+                (tenant_id,)
+            )
+        else:
+            cursor = conn.execute("SELECT COUNT(DISTINCT doc_id) FROM nodes")
+        return cursor.fetchone()[0]
+
+
 __all__ = [
     "init_db",
     "get_connection", 
@@ -324,5 +348,6 @@ __all__ = [
     "get_schema_version",
     "rebuild_fts_index",
     "get_node_count",
+    "get_distinct_doc_count",
     "SCHEMA_VERSION",
 ]
