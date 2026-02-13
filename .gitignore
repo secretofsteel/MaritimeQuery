@@ -16,3 +16,4 @@ data/docs/*
 *.pkl
 *.jsonl
 *.sqlite3
+data/maritime.db
