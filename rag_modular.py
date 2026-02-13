@@ -97,7 +97,7 @@ def main() -> None:
         LOGGER.info("Cleared session state due to version change")
     
     if "app_state" not in st.session_state:
-        st.session_state["app_state"] = AppState()
+        st.session_state["app_state"] = AppState(tenant_id=st.session_state.get("tenant_id", "shared"))
         st.session_state["app_state_version"] = APP_STATE_VERSION
         LOGGER.info("Created new AppState (version %s) for tenant %s", 
                     APP_STATE_VERSION, st.session_state.get("tenant_id"))
@@ -119,7 +119,7 @@ def main() -> None:
         # Clear old state if tenant changed
         if cached_tenant and cached_tenant != current_tenant:
             app_state.invalidate_node_map_cache()
-            st.session_state["_index_load_attempted"] = False
+            app_state._index_load_attempted = False
         
         with st.spinner("Loading library..."):
             if app_state.ensure_index_loaded():
