@@ -219,7 +219,7 @@ async def get_document_detail(
     
     # Extract cache details if available
     sections=gemini_meta.get("sections", [])
-    section_names = [s.get("title", "Untitled") for s in sections] if sections else None
+    section_names = [s.get("name", "Untitled") for s in sections] if sections else None
 
     return DocumentDetailResponse(
         filename=filename,
