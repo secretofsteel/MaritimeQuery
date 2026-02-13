@@ -10,14 +10,11 @@ from fastapi import APIRouter, Depends, Request
 from api.dependencies import get_current_tenant, get_current_user
 from app.database import get_distinct_doc_count, get_node_count
 from app.nodes import NodeRepository
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
-
-
-# --- Pydantic Models ---
-from pydantic import BaseModel
 
 class SystemStatusResponse(BaseModel):
     status: str                    # "ok" | "degraded" | "empty"

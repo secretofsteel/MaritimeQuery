@@ -83,10 +83,6 @@ class BatchDeleteResponse(BaseModel):
 
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
-    target_tenant_id: Optional[str] = Query(
-        None,
-        description="Override tenant (superuser only). Defaults to authenticated user's tenant.",
-    ),
     tenant_id: str = Depends(get_target_tenant),
 ):
     """List all documents for the target tenant with rich status info."""
@@ -159,10 +155,6 @@ async def list_documents(
 @router.post("/batch-delete", response_model=BatchDeleteResponse)
 async def batch_delete(
     request: BatchDeleteRequest,
-    target_tenant_id: Optional[str] = Query(
-        None,
-        description="Override tenant (superuser only). Defaults to authenticated user's tenant.",
-    ),
     app_state: AppState = Depends(get_admin_app_state),
 ):
     """Delete multiple documents in one operation.
@@ -184,10 +176,6 @@ async def batch_delete(
 @router.get("/{filename}", response_model=DocumentDetailResponse)
 async def get_document_detail(
     filename: str,
-    target_tenant_id: Optional[str] = Query(
-        None,
-        description="Override tenant (superuser only). Defaults to authenticated user's tenant.",
-    ),
     tenant_id: str = Depends(get_target_tenant),
 ):
     """Get detailed info for a single document."""
@@ -252,10 +240,6 @@ async def get_document_detail(
 @router.delete("/{filename}", response_model=DeleteDocumentResponse)
 async def delete_document(
     filename: str,
-    target_tenant_id: Optional[str] = Query(
-        None,
-        description="Override tenant (superuser only). Defaults to authenticated user's tenant.",
-    ),
     app_state: AppState = Depends(get_admin_app_state),
 ):
     """Delete a single document.
