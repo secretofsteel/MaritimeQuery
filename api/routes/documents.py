@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from pathlib import PurePosixPath
+from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
 from api.dependencies import (
@@ -79,6 +80,21 @@ class BatchDeleteResponse(BaseModel):
     error: Optional[str] = None
 
 
+class FileUploadResult(BaseModel):
+    """Result for a single file in the upload batch."""
+    filename: str
+    saved: bool
+    size_bytes: int
+    overwritten: bool                # True if file existed and was replaced
+
+
+class UploadResponse(BaseModel):
+    """Response for batch upload."""
+    tenant_id: str
+    files_saved: int
+    files: List[FileUploadResult]
+
+
 # --- Endpoints ---
 
 @router.get("", response_model=DocumentListResponse)
@@ -149,6 +165,127 @@ async def list_documents(
         documents=documents,
         total_documents=len(documents),
         total_chunks=total_chunks,
+    )
+
+
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt"}
+
+
+def _sanitize_filename(raw_name: str | None) -> str | None:
+    """Strip path components, return None if invalid."""
+    if not raw_name:
+        return None
+    name = PurePosixPath(raw_name).name
+    if not name or name.startswith("."):
+        return None
+    return name
+
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload_documents(
+    files: List[UploadFile] = File(..., description="Documents to upload"),
+    overwrite: bool = Query(False, description="Overwrite existing files"),
+    tenant_id: str = Depends(get_target_tenant),
+):
+    """Upload documents to the tenant's library.
+
+    Files are saved to disk only. Call POST /documents/process to trigger
+    extraction, chunking, and embedding.
+    """
+    config = AppConfig.get()
+    docs_path = config.docs_path_for(tenant_id)
+    
+    # Ensure directory exists (it should, but safety first)
+    docs_path.mkdir(parents=True, exist_ok=True)
+
+    # --- Validation (all checks before any writes) ---
+
+    # 1. Empty check
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    # 2. Sanitize filenames
+    sanitized: List[Tuple[UploadFile, str]] = []   # (file, safe_name)
+    invalid_names = []
+
+    for f in files:
+        safe = _sanitize_filename(f.filename)
+        if safe is None:
+            invalid_names.append(f.filename or "<empty>")
+        else:
+            sanitized.append((f, safe))
+
+    if invalid_names:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Invalid filename(s)",
+                "rejected": invalid_names,
+            },
+        )
+
+    # 3. Extension validation
+    rejected_ext = []
+    for f, safe in sanitized:
+        suffix = PurePosixPath(safe).suffix.lower()
+        if suffix not in ALLOWED_EXTENSIONS:
+            rejected_ext.append(safe)
+
+    if rejected_ext:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unsupported file type(s)",
+                "rejected": rejected_ext,
+                "allowed_extensions": list(ALLOWED_EXTENSIONS),
+            },
+        )
+
+    # 4. Duplicate check (if not overwriting)
+    if not overwrite:
+        existing = {p.name for p in docs_path.iterdir() if p.is_file()}
+        dupes = [safe for _, safe in sanitized if safe in existing]
+        if dupes:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Duplicate filename(s) detected. Set overwrite=true to replace.",
+                    "duplicates": dupes,
+                },
+            )
+
+    # --- Save files ---
+    existing_before = {p.name for p in docs_path.iterdir() if p.is_file()} \
+                      if overwrite else set()
+
+    results = []
+    for upload_file, safe_name in sanitized:
+        was_existing = safe_name in existing_before
+        dest = docs_path / safe_name
+        try:
+            content = await upload_file.read()
+            dest.write_bytes(content)
+            results.append(FileUploadResult(
+                filename=safe_name,
+                saved=True,
+                size_bytes=len(content),
+                overwritten=was_existing,
+            ))
+        except Exception as exc:
+            logger.error("Failed to save %s: %s", safe_name, exc)
+            results.append(FileUploadResult(
+                filename=safe_name,
+                saved=False,
+                size_bytes=0,
+                overwritten=False,
+            ))
+
+    saved_count = sum(1 for r in results if r.saved)
+
+    return UploadResponse(
+        tenant_id=tenant_id,
+        files_saved=saved_count,
+        files=results,
     )
 
 
