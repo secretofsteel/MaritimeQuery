@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
 from api.dependencies import (
@@ -15,10 +16,13 @@ from api.dependencies import (
     get_current_user,
     get_target_tenant,
 )
+from api.processing_jobs import ProcessingJob, complete_job, get_job, start_job
 from app.config import AppConfig
 from app.files import current_files_index, load_jsonl
+from app.indexing import build_index_from_library_parallel
 from app.nodes import NodeRepository
-from app.services import batch_delete_documents, delete_document_by_source
+from app.processing_status import load_processing_report
+from app.services import batch_delete_documents, delete_document_by_source, rebuild_document_trees
 from app.state import AppState
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,38 @@ class UploadResponse(BaseModel):
     tenant_id: str
     files_saved: int
     files: List[FileUploadResult]
+
+
+class ProcessRequest(BaseModel):
+    """Options for document processing."""
+    force_rebuild: bool = False
+    doc_type_override: Optional[str] = None
+
+
+class ProcessingJobResponse(BaseModel):
+    """Current state of a processing job."""
+    job_id: str
+    tenant_id: str
+    status: str                     # "running" | "completed" | "failed"
+    started_at: str
+    completed_at: Optional[str]
+    mode: str                       # "sync" | "rebuild"
+    phase: str
+    progress: dict                  # {current, total, current_item}
+    sync_result: Optional[dict]
+    report_summary: Optional[dict]
+    error: Optional[str]
+
+
+class ProcessingReportResponse(BaseModel):
+    """Full processing report with per-file details."""
+    timestamp: str
+    total_files: int
+    successful: int
+    warnings: int
+    failed: int
+    total_duration_sec: Optional[float]
+    file_statuses: List[dict]
 
 
 # --- Endpoints ---
@@ -308,6 +344,197 @@ async def batch_delete(
         db_entries_removed=db_entries_removed,
         error=error,
     )
+
+
+async def _run_processing(app, app_state: AppState, job: ProcessingJob) -> None:
+    """Run processing in a background thread, updating job state."""
+    try:
+        if job.mode == "sync":
+            await asyncio.to_thread(_run_sync, app, app_state, job)
+        else:
+            await asyncio.to_thread(_run_rebuild, app, app_state, job)
+    except Exception as exc:
+        logger.exception("Processing failed for tenant %s", job.tenant_id)
+        complete_job(job.tenant_id, error=str(exc))
+
+
+def _make_progress_callback(job: ProcessingJob):
+    """Create a progress callback that updates the job state."""
+    def callback(phase: str, current: int, total: int, item: str) -> None:
+        job.phase = phase
+        job.current = current
+        job.total = total
+        job.current_item = item
+    return callback
+
+
+def _run_sync(app, app_state: AppState, job: ProcessingJob) -> None:
+    """Synchronous sync_library execution."""
+    tenant_id = job.tenant_id
+    callback = _make_progress_callback(job)
+
+    manager = app_state.ensure_manager(target_tenant_id=tenant_id)
+    manager.nodes = app_state.nodes
+
+    try:
+        sync_result, report = manager.sync_library(
+            app_state.index,
+            force_retry_errors=True,
+            progress_callback=callback,
+            doc_type_override=job.doc_type_override,
+        )
+
+        # Update app_state nodes for tree rebuild
+        app_state.nodes = manager.nodes
+
+        # Post-processing: rebuild trees
+        job.phase = "tree_building"
+        try:
+            rebuild_document_trees(app_state)
+        except Exception as exc:
+            logger.warning("Tree rebuild failed (non-fatal): %s", exc)
+
+        # Complete
+        complete_job(
+            tenant_id,
+            report=report.to_dict() if report else None,
+            sync_result={
+                "added": len(sync_result.added),
+                "modified": len(sync_result.modified),
+                "deleted": len(sync_result.deleted),
+            },
+        )
+    except Exception as exc:
+        raise exc
+
+
+def _run_rebuild(app, app_state: AppState, job: ProcessingJob) -> None:
+    """Synchronous build_index_from_library_parallel execution."""
+    tenant_id = job.tenant_id
+    callback = _make_progress_callback(job)
+
+    try:
+        nodes, index, report = build_index_from_library_parallel(
+            progress_callback=callback,
+            clear_gemini_cache=False,
+            tenant_id=tenant_id,
+            doc_type_override=job.doc_type_override,
+        )
+
+        # Update shared app state with new index
+        app.state.index = index
+
+        # Refresh ChromaDB collection reference
+        import chromadb
+        from app.config import AppConfig
+        config = AppConfig.get()
+        try:
+            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
+            app.state.chroma_collection = client.get_or_create_collection("maritime_docs")
+        except Exception as exc:
+            logger.error("Failed to refresh ChromaDB collection: %s", exc)
+
+        # Update app_state for tree rebuild
+        app_state.nodes = nodes
+
+        # Post-processing: rebuild trees
+        job.phase = "tree_building"
+        try:
+            rebuild_document_trees(app_state)
+        except Exception as exc:
+            logger.warning("Tree rebuild failed (non-fatal): %s", exc)
+
+        # Complete — rebuild has no SyncResult, just report
+        complete_job(
+            tenant_id,
+            report=report.to_dict() if report else None,
+            sync_result={"added": report.successful if report else 0, "modified": 0, "deleted": 0},
+        )
+    except Exception as exc:
+        raise exc
+
+
+@router.post("/process", response_model=ProcessingJobResponse, status_code=202)
+async def start_processing(
+    request: Request,
+    body: ProcessRequest = ProcessRequest(),
+    app_state: AppState = Depends(get_admin_app_state),
+):
+    """Start document processing (extraction, chunking, embedding).
+
+    Auto-detects whether to run incremental sync or full rebuild based on
+    whether vectors exist for this tenant. Set force_rebuild=true to force
+    a full rebuild.
+
+    Returns 202 immediately. Poll GET /process/status for progress.
+    """
+    tenant_id = app_state.tenant_id
+
+    # --- Determine mode ---
+    collection = request.app.state.chroma_collection
+    has_vectors = False
+    if collection and not body.force_rebuild:
+        try:
+            tenant_docs = collection.get(
+                where={"tenant_id": tenant_id}, limit=1, include=[]
+            )
+            has_vectors = bool(tenant_docs and tenant_docs["ids"])
+        except Exception:
+            pass
+
+    mode = "sync" if (has_vectors and not body.force_rebuild) else "rebuild"
+
+    # --- Register job (rejects if already running) ---
+    try:
+        job = start_job(tenant_id, mode, body.doc_type_override)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # --- Launch background processing ---
+    asyncio.get_event_loop().create_task(
+        _run_processing(request.app, app_state, job)
+    )
+
+    return ProcessingJobResponse(**job.to_dict())
+
+
+@router.get("/process/status", response_model=ProcessingJobResponse)
+async def get_processing_status(
+    tenant_id: str = Depends(get_target_tenant),
+):
+    """Get the current/latest processing job status for this tenant.
+
+    Returns live progress while running, or final results if completed.
+    """
+    job = get_job(tenant_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No processing job found for tenant '{tenant_id}'",
+        )
+    return ProcessingJobResponse(**job.to_dict())
+
+
+@router.get("/process/report", response_model=ProcessingReportResponse)
+async def get_processing_report(
+    tenant_id: str = Depends(get_target_tenant),
+):
+    """Get the last completed processing report.
+
+    Returns detailed per-file processing results from the most recent
+    sync or rebuild. This data persists across app restarts.
+    """
+    config = AppConfig.get()
+    report_path = config.paths.cache_dir / "last_sync_report.json"
+
+    report = load_processing_report(report_path)
+    if not report:
+        raise HTTPException(
+            status_code=404,
+            detail="No processing report found. Run processing first.",
+        )
+
+    return ProcessingReportResponse(**report.to_dict())
 
 
 @router.get("/{filename}", response_model=DocumentDetailResponse)
