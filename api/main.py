@@ -92,6 +92,12 @@ app.include_router(auth_router)
 app.include_router(query_router)
 app.include_router(sessions_router)
 
+from api.routes.documents import router as documents_router
+from api.routes.system import router as system_router
+
+app.include_router(documents_router)
+app.include_router(system_router)
+
 
 # --- Health check (validates lifespan worked) ---
 

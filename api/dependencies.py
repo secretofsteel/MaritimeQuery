@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from api.auth import decode_token
@@ -56,6 +56,32 @@ async def get_current_tenant(
     return user["tenant_id"]
 
 
+async def get_target_tenant(
+    target_tenant_id: Optional[str] = Query(
+        None,
+        description="Override tenant (superuser only). Defaults to authenticated user's tenant.",
+    ),
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> str:
+    """Resolve effective tenant for admin operations.
+
+    Non-superusers: always their own tenant.
+    Superusers: target_tenant_id if provided, else their own tenant.
+    """
+    own_tenant = user["tenant_id"]
+
+    if target_tenant_id is None:
+        return own_tenant
+
+    if user.get("role") != "superuser":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superusers can manage other tenants' documents",
+        )
+
+    return target_tenant_id
+
+
 async def get_app_state(
     request: Request,
     tenant_id: str = Depends(get_current_tenant),
@@ -84,6 +110,25 @@ async def get_app_state(
     state._shared_chroma_collection = request.app.state.chroma_collection
 
     # Build tenant-scoped retrievers (cheap: just stores references + tenant_id)
+    if state.index is not None:
+        state.ensure_retrievers()
+
+    return state
+
+
+async def get_admin_app_state(
+    request: Request,
+    tenant_id: str = Depends(get_target_tenant),
+) -> AppState:
+    """AppState scoped to the admin's target tenant.
+
+    Same as get_app_state() but uses get_target_tenant() for tenant resolution,
+    allowing superusers to operate on other tenants' documents.
+    """
+    state = AppState(tenant_id=tenant_id)
+    state.index = request.app.state.index
+    state._shared_chroma_collection = request.app.state.chroma_collection
+
     if state.index is not None:
         state.ensure_retrievers()
 
