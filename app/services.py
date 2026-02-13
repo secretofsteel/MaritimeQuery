@@ -20,8 +20,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 import chromadb
 from llama_index.core.schema import TextNode
 
-import streamlit as st
-
 from .config import AppConfig
 from .logger import LOGGER
 
@@ -91,7 +89,6 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     ChromaDB is source of truth for vectors. SQLite mirrors text/metadata.
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
-    import streamlit as st
     from llama_index.core.schema import TextNode
     import chromadb
     
@@ -560,7 +557,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
         app_state.vector_retriever = None
         app_state.fts5_retriever = None
         app_state.bm25_retriever = None
-        app_state.manager = None
+        app_state._managers.clear()
         app_state.invalidate_node_map_cache()
         
         LOGGER.info("Nuclear delete: %d files across all tenants", deleted_count)

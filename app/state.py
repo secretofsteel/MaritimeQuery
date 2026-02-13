@@ -1,4 +1,4 @@
-"""Session state helpers for the Streamlit app."""
+"""Application state management (Streamlit-free)."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from .database import get_node_count
 
 @dataclass
 class AppState:
+    tenant_id: str = "shared"
     # Core state
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
@@ -39,7 +40,7 @@ class AppState:
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
-    manager: Optional[IncrementalIndexManager] = None
+    _managers: Dict[str, IncrementalIndexManager] = field(default_factory=dict)
     feedback_system: FeedbackSystem = field(default_factory=FeedbackSystem)
     history_loaded: bool = False
     history_log_path: Optional[Path] = None
@@ -63,15 +64,16 @@ class AppState:
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
     _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
+    _shared_chroma_collection: Optional[Any] = field(default=None, repr=False)
     hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
+    _index_load_attempted: bool = field(default=False, init=False)
 
     def ensure_nodes_loaded(self) -> List[Document]:
         """Load nodes from SQLite if not already in memory."""
-        import streamlit as st
         from .nodes import NodeRepository
-        
+
         if not self.nodes:
-            tenant_id = st.session_state.get("tenant_id", "shared")
+            tenant_id = self.tenant_id
             
             # Load tenant-specific nodes
             repo = NodeRepository(tenant_id=tenant_id)
@@ -89,20 +91,12 @@ class AppState:
         
         return self.nodes
 
-    @property
-    def tenant_id(self) -> Optional[str]:
-        """Get current tenant ID from session state."""
-        import streamlit as st
-        return st.session_state.get("tenant_id")
-
     def ensure_index_loaded(self) -> bool:
         """Ensure search index is ready."""
-        import streamlit as st
-        
-        if st.session_state.get("_index_load_attempted"):
+        if self._index_load_attempted:
             return self.index is not None
-        
-        st.session_state["_index_load_attempted"] = True
+
+        self._index_load_attempted = True
         
         # Load ChromaDB index
         if self.index is None:
@@ -131,11 +125,10 @@ class AppState:
         - FTS5Retriever - queries SQLite directly (tenant-aware)
         - TenantAwareVectorRetriever - queries ChromaDB with tenant filter
         """
-        import streamlit as st
         import chromadb
         from .config import AppConfig
-        
-        tenant_id = st.session_state.get("tenant_id", "shared")
+
+        tenant_id = self.tenant_id
         
         # FTS5 retriever (tenant-aware keyword search)
         if self.fts5_retriever is None:
@@ -150,12 +143,13 @@ class AppState:
         
         # Tenant-aware vector retriever
         if self.vector_retriever is None and self.index is not None:
-            config = AppConfig.get()
-            
-            # Get ChromaDB collection
-            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-            collection = client.get_or_create_collection("maritime_docs")
-            
+            # Use shared collection if injected (FastAPI path), else create client (Streamlit path)
+            collection = self._shared_chroma_collection
+            if collection is None:
+                config = AppConfig.get()
+                client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
+                collection = client.get_or_create_collection("maritime_docs")
+
             # Create tenant-aware retriever
             self.vector_retriever = TenantAwareVectorRetriever(
                 collection=collection,
@@ -173,30 +167,22 @@ class AppState:
             and self.fts5_retriever is not None  # Changed from bm25_retriever
         )
 
-    def ensure_manager(self) -> IncrementalIndexManager:
-        """Provide an incremental manager bound to the current tenant.
-        
-        Uses manage_tenant (admin context) if set, otherwise falls back
-        to the logged-in user's tenant_id.
-        
-        Recreates the manager if the tenant context has changed.
+    def ensure_manager(self, target_tenant_id: Optional[str] = None) -> IncrementalIndexManager:
+        """Provide an incremental manager bound to a tenant.
+
+        Args:
+            target_tenant_id: Override tenant for admin operations.
+                Defaults to self.tenant_id if not provided.
+
+        Managers are cached per tenant_id to avoid recreation ping-pong
+        when admin panel alternates between tenants.
         """
-        import streamlit as st
+        tenant_id = target_tenant_id or self.tenant_id
 
-        tenant_id = st.session_state.get(
-            "manage_tenant",
-            st.session_state.get("tenant_id", "shared")
-        )
-
-        # Recreate if tenant changed
-        if self.manager is not None and self.manager.tenant_id != tenant_id:
-            LOGGER.info("Tenant changed to '%s' — recreating IncrementalIndexManager", tenant_id)
-            self.manager = None
-
-        if self.manager is None:
+        if tenant_id not in self._managers:
             config = AppConfig.get()
             paths = config.paths
-            self.manager = IncrementalIndexManager(
+            manager = IncrementalIndexManager(
                 docs_path=config.docs_path_for(tenant_id),
                 gemini_cache_path=config.gemini_cache_for(tenant_id),
                 nodes_cache_path=paths.nodes_cache_path,
@@ -204,31 +190,28 @@ class AppState:
                 chroma_path=paths.chroma_path,
                 tenant_id=tenant_id,
             )
-            self.manager.nodes = self.nodes
-        return self.manager
+            manager.nodes = self.nodes
+            self._managers[tenant_id] = manager
+            LOGGER.info("Created IncrementalIndexManager for tenant '%s'", tenant_id)
+
+        return self._managers[tenant_id]
 
     def ensure_session_manager(self) -> SessionManager:
         """
         Get or create SessionManager, scoped to current tenant.
-        
-        Retrieves tenant_id from Streamlit session state (set by auth).
-        Recreates manager if tenant changes (shouldn't happen normally).
-        
+
         Returns:
             SessionManager instance for the current tenant.
-        
+
         Raises:
-            RuntimeError: If no tenant_id in session (auth not completed).
+            RuntimeError: If no tenant_id set on AppState.
         """
-        import streamlit as st
-        
-        tenant_id = st.session_state.get("tenant_id")
-        
+        tenant_id = self.tenant_id
+
         if tenant_id is None:
-            # This shouldn't happen if auth gate is working
             raise RuntimeError(
-                "No tenant_id in session state. "
-                "Ensure authentication completes before accessing sessions."
+                "No tenant_id set on AppState. "
+                "Ensure tenant_id is provided when constructing AppState."
             )
         
         # Create new manager if none exists or tenant changed
@@ -411,37 +394,35 @@ class AppState:
             return
         
         LOGGER.info("📎 Found %d uploaded files to re-index...", len(extraction_files))
-        
-        # NEW: Add spinner here ↓
-        import streamlit as st
-        
-        with st.spinner(f"📎 Re-indexing {len(extraction_files)} uploaded file{'s' if len(extraction_files) != 1 else ''}..."):
-            # Restore uploads from JSONLs
-            try:
-                result = upload_manager.restore_uploads_from_jsonl(self.current_session_id)
-                
-                status = result.get("status")
-                if status == "restored":
-                    restored = result.get("restored_count", 0)
-                    failed = result.get("failed_count", 0)
-                    total_chunks = result.get("total_chunks", 0)
-                    
-                    if restored > 0:
-                        LOGGER.info("✅ Restored %d uploaded files (%d chunks)", restored, total_chunks)
-                    if failed > 0:
-                        LOGGER.warning("⚠️  Failed to restore %d uploaded files", failed)
-                    
-                    # Refresh cache so UI shows restored files
-                    self.refresh_session_upload_cache(self.current_session_id)
-                elif status == "no_uploads":
-                    LOGGER.debug("No uploads to restore")
-                else:
-                    LOGGER.warning("Upload restoration failed: %s", result.get("reason", "Unknown error"))
-                    
-            except Exception as exc:
-                LOGGER.error("Failed to restore session uploads: %s", exc)
-                import traceback
-                traceback.print_exc()
+
+        LOGGER.info("📎 Re-indexing %d uploaded file(s)...", len(extraction_files))
+
+        # Restore uploads from JSONLs
+        try:
+            result = upload_manager.restore_uploads_from_jsonl(self.current_session_id)
+
+            status = result.get("status")
+            if status == "restored":
+                restored = result.get("restored_count", 0)
+                failed = result.get("failed_count", 0)
+                total_chunks = result.get("total_chunks", 0)
+
+                if restored > 0:
+                    LOGGER.info("✅ Restored %d uploaded files (%d chunks)", restored, total_chunks)
+                if failed > 0:
+                    LOGGER.warning("⚠️  Failed to restore %d uploaded files", failed)
+
+                # Refresh cache so UI shows restored files
+                self.refresh_session_upload_cache(self.current_session_id)
+            elif status == "no_uploads":
+                LOGGER.debug("No uploads to restore")
+            else:
+                LOGGER.warning("Upload restoration failed: %s", result.get("reason", "Unknown error"))
+
+        except Exception as exc:
+            LOGGER.error("Failed to restore session uploads: %s", exc)
+            import traceback
+            traceback.print_exc()
 
     def _message_to_display_dict(self, message: Any) -> Dict[str, Any]:
         """Flatten a Message object into the format expected by the UI."""
@@ -712,9 +693,8 @@ class AppState:
         """
         if self._node_map_cache is None:
             from llama_index.core.schema import NodeWithScore
-            import streamlit as st
-            
-            tenant_id = st.session_state.get("tenant_id", "shared")
+
+            tenant_id = self.tenant_id
             
             # Load nodes from SQLite
             repo = NodeRepository(tenant_id=tenant_id)
