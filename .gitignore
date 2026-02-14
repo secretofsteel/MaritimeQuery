@@ -17,3 +17,4 @@ data/docs/*
 *.jsonl
 *.sqlite3
 data/maritime.db
+.gemini

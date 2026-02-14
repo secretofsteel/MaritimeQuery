@@ -10,10 +10,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-import chromadb
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Filter,
+    FieldCondition,
+    MatchValue,
+    FilterSelector,
+)
+
 from llama_index.core import Document, StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.core.schema import Document
+
+from .vector_store import get_qdrant_client, ensure_collection
 from llama_index.core.schema import Document
 
 from .config import AppConfig
@@ -289,9 +299,9 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     nodes = chunk_documents(documents)
     LOGGER.info("Created %s chunks", len(nodes))
 
-    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
-    collection = chroma_client.get_or_create_collection("maritime_docs")
-    vector_store = ChromaVectorStore(chroma_collection=collection)
+    qdrant_client = get_qdrant_client()
+    collection_name = ensure_collection(qdrant_client)
+    vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
     LOGGER.info("Embedding %s chunks...", len(nodes))
@@ -303,7 +313,7 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     cache_nodes(nodes, len(documents), paths.nodes_cache_path, paths.cache_info_path)
     LOGGER.info("Cached nodes with embeddings")
 
-    manager = IncrementalIndexManager(paths.docs_path, paths.gemini_json_cache, paths.nodes_cache_path, paths.cache_info_path, paths.chroma_path)
+    manager = IncrementalIndexManager(paths.docs_path, paths.gemini_json_cache, paths.nodes_cache_path, paths.cache_info_path, qdrant_client=qdrant_client)
     manager.sync_cache["files_hash"] = manager._get_files_hash(paths.docs_path)
     manager._save_sync_cache()
     LOGGER.info("Initial sync cache saved.")
@@ -620,33 +630,34 @@ def build_index_from_library_parallel(
                 f"Embedded {chunks_per_file[filename]} chunks"
             )
     
-    # Initialize ChromaDB
-    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
+    # Initialize Qdrant
+    qdrant_client = get_qdrant_client()
+    collection_name = ensure_collection(qdrant_client)
 
     if tenant_id:
         # Scoped rebuild — only remove this tenant's chunks
-        collection = chroma_client.get_or_create_collection("maritime_docs")
-        tenant_chunks = collection.get(where={"tenant_id": tenant_id}, include=[])
-        if tenant_chunks and tenant_chunks["ids"]:
-            collection.delete(ids=tenant_chunks["ids"])
-            LOGGER.info("Deleted %d chunks for tenant '%s' from ChromaDB", 
-                        len(tenant_chunks["ids"]), tenant_id)
+        qdrant_client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))
+                ])
+            ),
+        )
+        LOGGER.info("Deleted vectors for tenant '%s' from Qdrant", tenant_id)
     else:
-        # Full rebuild — nuke and recreate
-        try:
-            chroma_client.delete_collection("maritime_docs")
-            LOGGER.info("Deleted old ChromaDB collection")
-        except Exception:
-            LOGGER.info("No existing ChromaDB collection to delete")
-        collection = chroma_client.create_collection("maritime_docs")
+        # Full rebuild — drop and recreate collection
+        qdrant_client.delete_collection(collection_name)
+        collection_name = ensure_collection(qdrant_client)
+        LOGGER.info("Deleted old Qdrant collection and created new one")
 
-    vector_store = ChromaVectorStore(chroma_collection=collection)
+    vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     
-    # Write to ChromaDB (sequential - embeddings already attached)
-    LOGGER.info("Writing %d chunks to ChromaDB (sequential)...", len(nodes))
+    # Write to Qdrant (sequential - embeddings already attached)
+    LOGGER.info("Writing %d chunks to Qdrant (sequential)...", len(nodes))
     index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, show_progress=True)
-    LOGGER.info("ChromaDB indexing complete")
+    LOGGER.info("Qdrant indexing complete")
     
     # Update sync cache for each tenant processed
     for tid in tenant_ids:
@@ -656,8 +667,8 @@ def build_index_from_library_parallel(
             config.gemini_cache_for(tid),
             paths.nodes_cache_path,
             paths.cache_info_path,
-            paths.chroma_path,
             tenant_id=tid,
+            qdrant_client=qdrant_client,
         )
         tenant_mgr.sync_cache["files_hash"] = tenant_mgr._get_files_hash(tenant_docs_path)
         tenant_mgr._save_sync_cache()
@@ -753,7 +764,7 @@ def build_index_from_library_parallel(
 
 def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[VectorStoreIndex]]:
     """
-    Connect to ChromaDB index. 
+    Connect to Qdrant index. 
     
     Note: With FTS5, we don't load nodes into memory here.
     Nodes are queried directly from SQLite by the FTS5 retriever.
@@ -773,23 +784,28 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
         LOGGER.info("No nodes found in SQLite")
         return None, None
     
-    # Check ChromaDB exists
-    if not paths.chroma_path.exists():
-        LOGGER.info("ChromaDB path doesn't exist")
+    # Check Qdrant exists/connectable
+    try:
+        qdrant_client = get_qdrant_client()
+        collection_name = ensure_collection(qdrant_client)
+        collection_info = qdrant_client.get_collection(collection_name)
+        if collection_info.points_count == 0:
+            LOGGER.info("Qdrant collection is empty")
+            return None, None
+    except Exception as exc:
+        LOGGER.warning("Could not connect to Qdrant: %s", exc)
         return None, None
     
-    LOGGER.info("Found %d nodes in SQLite, connecting to ChromaDB", node_count)
+    LOGGER.info("Found %d nodes in SQLite, connecting to Qdrant", node_count)
     
-    # Connect to ChromaDB
-    chroma_client = chromadb.PersistentClient(path=str(paths.chroma_path))
-    collection = chroma_client.get_or_create_collection("maritime_docs")
-    vector_store = ChromaVectorStore(chroma_collection=collection)
+    # Connect to Qdrant
+    vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
     
     # Don't load nodes into memory - FTS5 queries SQLite directly
     # Return empty list; code needing nodes calls ensure_nodes_loaded()
-    LOGGER.info("Connected to ChromaDB index")
+    LOGGER.info("Connected to Qdrant index")
     return [], index
 
 
@@ -809,16 +825,16 @@ class IncrementalIndexManager:
         gemini_cache_path: Path,
         nodes_cache_path: Path, # DEPRECATED: unused after Phase 3 (SQLite migration)
         cache_info_path: Path,
-        chroma_path: Path,
         tenant_id: str = "shared",
+        qdrant_client: "QdrantClient | None" = None,
     ) -> None:
         self.docs_path = docs_path
         self.gemini_cache_path = gemini_cache_path
         self.nodes_cache_path = nodes_cache_path
         self.cache_info_path = cache_info_path
         self.tenant_id = tenant_id
-        self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
-        self.collection = self.chroma_client.get_or_create_collection("maritime_docs")
+        self.qdrant_client = qdrant_client or get_qdrant_client()
+        self.collection_name = ensure_collection(self.qdrant_client)
         self.sync_cache_file = cache_info_path.parent / f"sync_cache_{tenant_id}.json"
         self.sync_cache = self._load_sync_cache()
         self.gemini_cache = load_jsonl(gemini_cache_path)
@@ -882,7 +898,7 @@ class IncrementalIndexManager:
     def _remove_documents(self, filenames: Set[str], tenant_id: str = None) -> None:
         tenant_id = tenant_id or self.tenant_id
         """
-        Remove documents from ChromaDB, SQLite, and Gemini cache.
+        Remove documents from Qdrant, SQLite, and Gemini cache.
         
         Args:
             filenames: Set of source filenames to remove
@@ -893,20 +909,20 @@ class IncrementalIndexManager:
         
         LOGGER.info("Removing %d documents: %s", len(filenames), filenames)
         
-        # 1. Remove from ChromaDB
+        # 1. Remove from Qdrant
         for filename in filenames:
             try:
-                # Get chunk IDs for this document
-                results = self.collection.get(
-                    where={"source": filename},
-                    include=[]
+                self.qdrant_client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=FilterSelector(
+                        filter=Filter(must=[
+                            FieldCondition(key="source", match=MatchValue(value=filename))
+                        ])
+                    ),
                 )
-                if results and results['ids']:
-                    self.collection.delete(ids=results['ids'])
-                    LOGGER.debug("Removed %d chunks from ChromaDB for %s", 
-                            len(results['ids']), filename)
+                LOGGER.debug("Removed chunks from Qdrant for %s", filename)
             except Exception as exc:
-                LOGGER.warning("Failed to remove %s from ChromaDB: %s", filename, exc)
+                LOGGER.warning("Failed to remove %s from Qdrant: %s", filename, exc)
         
         # 2. Remove from SQLite
         repo = NodeRepository(tenant_id=tenant_id)

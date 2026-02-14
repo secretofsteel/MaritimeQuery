@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
-import chromadb
+from .vector_store import get_qdrant_client, ensure_collection
 from llama_index.core.schema import TextNode
 
 from .config import AppConfig
@@ -84,13 +84,11 @@ class BulkUploadResult:
 
 def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     """
-    Verify and repair consistency between SQLite and ChromaDB.
+    Verify and repair consistency between SQLite and Qdrant.
     
-    ChromaDB is source of truth for vectors. SQLite mirrors text/metadata.
+    Qdrant is source of truth for vectors. SQLite mirrors text/metadata.
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
-    from llama_index.core.schema import TextNode
-    import chromadb
     
     from .database import rebuild_fts_index, get_node_count, db_connection
     from .nodes import NodeRepository, bulk_insert_nodes
@@ -103,15 +101,16 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         with db_connection() as conn:
             sqlite_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         
-        # Get TOTAL ChromaDB count
-        client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-        collection = client.get_collection("maritime_docs")
-        chroma_count = collection.count()
+        # Get TOTAL Qdrant count
+        qdrant_client = get_qdrant_client()
+        collection_name = ensure_collection(qdrant_client)
+        collection_info = qdrant_client.get_collection(collection_name)
+        qdrant_count = collection_info.points_count
         
-        LOGGER.info("Sync check: SQLite=%d (all tenants), ChromaDB=%d", sqlite_count, chroma_count)
+        LOGGER.info("Sync check: SQLite=%d (all tenants), Qdrant=%d", sqlite_count, qdrant_count)
         
         # If counts match (within tolerance), just rebuild FTS
-        if abs(sqlite_count - chroma_count) <= 5:
+        if abs(sqlite_count - qdrant_count) <= 5:
             rebuild_fts_index()
             return SyncMemoryResult(
                 old_count=sqlite_count,
@@ -120,25 +119,47 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
                 success=True
             )
         
-        # Counts don't match — rebuild SQLite from ChromaDB
-        LOGGER.warning("Count mismatch (%d vs %d) — rebuilding SQLite from ChromaDB",
-                       sqlite_count, chroma_count)
+        # Counts don't match — rebuild SQLite from Qdrant
+        LOGGER.warning("Count mismatch (%d vs %d) — rebuilding SQLite from Qdrant",
+                       sqlite_count, qdrant_count)
         
-        # Fetch everything from ChromaDB
-        result = collection.get(
-            include=['documents', 'metadatas']
-        )
+        # Fetch everything from Qdrant
+        all_points = []
+        offset = None
+        while True:
+            points, next_offset = qdrant_client.scroll(
+                collection_name=collection_name,
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            all_points.extend(points)
+            if next_offset is None:
+                break
+            offset = next_offset
         
         # Clear ALL SQLite nodes
         clear_all_nodes_for_rebuild()
         
         # Rebuild with correct tenant_id per node
         nodes = []
-        for i, chunk_id in enumerate(result['ids']):
-            metadata = result['metadatas'][i]
+        for point in all_points:
+            metadata = {k: v for k, v in point.payload.items() if k != "_node_content"}
+            text = point.payload.get("text", "") or point.payload.get("_node_content", "") or point.payload.get("document", "")
+            
+            # Helper to extract text if it's buried in _node_content JSON string
+            if not text and "_node_content" in point.payload:
+                 try:
+                     import json
+                     content_dict = json.loads(point.payload["_node_content"])
+                     text = content_dict.get("text", "")
+                 except:
+                     pass
+
             node = TextNode(
-                id_=chunk_id,
-                text=result['documents'][i],
+                id_=str(point.id),
+                text=text,
                 metadata=metadata,
             )
             nodes.append(node)
@@ -163,7 +184,7 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         app_state.fts5_retriever = None
         app_state.ensure_retrievers()
         
-        LOGGER.info("Synced SQLite to ChromaDB: %d → %d nodes", sqlite_count, total_inserted)
+        LOGGER.info("Synced SQLite to Qdrant: %d → %d nodes", sqlite_count, total_inserted)
         
         return SyncMemoryResult(
             old_count=sqlite_count,
@@ -324,7 +345,7 @@ def delete_document_by_source(
     Delete a single document by source filename.
     
     This operation:
-    1. Removes from ChromaDB, nodes, and Gemini cache
+    1. Removes from Qdrant, nodes, and Gemini cache
     2. Deletes source file from disk
     3. Runs sync_library for consistency
     4. Updates app_state
@@ -357,7 +378,7 @@ def delete_document_by_source(
             manager.tenant_id = tenant_id
         manager.nodes = app_state.nodes
         
-        # Remove from database (ChromaDB, nodes, Gemini cache)
+        # Remove from database (Qdrant, nodes, Gemini cache)
         manager._remove_documents({source_filename})
         
         # Delete source file
@@ -490,7 +511,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
     
     This operation:
     1. Deletes all source files from ALL tenant subfolders
-    2. Clears ChromaDB collection
+    2. Clears Qdrant collection
     3. Clears ALL SQLite nodes (all tenants)
     4. Deletes all cache files (including per-tenant JSONLs)
     5. Resets app_state completely
@@ -518,10 +539,10 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
                 file_path.unlink()
                 deleted_count += 1
         
-        # Clear ChromaDB (all tenants — single collection)
+        # Clear Qdrant (all tenants — single collection)
         manager = app_state.ensure_manager()
-        manager.collection.delete()
-        manager.collection = manager.chroma_client.get_or_create_collection("maritime_docs")
+        manager.qdrant_client.delete_collection(manager.collection_name)
+        manager.collection_name = ensure_collection(manager.qdrant_client)
         
         # Clear ALL SQLite nodes (all tenants)
         clear_all_nodes_for_rebuild()
