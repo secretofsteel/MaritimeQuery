@@ -200,7 +200,10 @@ class PgFTSRetriever(BaseRetriever):
                         params.append(expanded)
 
                     where_clause = " AND ".join(conditions)
-                    params.extend([tsquery, retrieval_top_k])
+
+                    # Params in SQL appearance order:
+                    # 1. ts_rank_cd in SELECT, 2. WHERE conditions, 3. LIMIT
+                    all_params = [tsquery] + params + [retrieval_top_k]
 
                     sql = f"""
                         SELECT
@@ -213,7 +216,7 @@ class PgFTSRetriever(BaseRetriever):
                         LIMIT %s
                     """
 
-                    cur.execute(sql, params)
+                    cur.execute(sql, all_params)
                     rows = cur.fetchall()
 
             LOGGER.info(
