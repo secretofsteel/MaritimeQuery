@@ -187,7 +187,6 @@ class AppState:
                 gemini_cache_path=config.gemini_cache_for(tenant_id),
                 nodes_cache_path=paths.nodes_cache_path,
                 cache_info_path=paths.cache_info_path,
-                chroma_path=paths.chroma_path,
                 tenant_id=tenant_id,
             )
             manager.nodes = self.nodes

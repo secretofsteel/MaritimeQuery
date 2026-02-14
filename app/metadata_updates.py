@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import chromadb
+from qdrant_client.models import Filter, FieldCondition, MatchValue
+
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
-from llama_index.vector_stores.chroma import ChromaVectorStore
+
+from .vector_store import get_qdrant_client, ensure_collection
 
 from .config import AppConfig
 from .files import load_jsonl, write_jsonl
@@ -224,34 +226,32 @@ def update_metadata_everywhere(
         
         LOGGER.info("Updated %d nodes in memory", updated_count)
         
-        # 3. Update ChromaDB
-        chroma_client = chromadb.PersistentClient(path=str(chroma_path))
-        collection = chroma_client.get_or_create_collection("maritime_docs")
+        # 3. Update Qdrant payload
+        qdrant_client = get_qdrant_client()
+        collection_name = ensure_collection(qdrant_client)
         
-        # Get all document IDs for this source
-        results = collection.get(where={"source": filename})
-        doc_ids = results["ids"]
-        
-        if not doc_ids:
-            LOGGER.warning("No documents found in ChromaDB for: %s", filename)
+        # Find points for this document
+        points, _ = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="source", match=MatchValue(value=filename))
+            ]),
+            limit=1000,
+        )
+
+        if not points:
+            LOGGER.warning("No points found in Qdrant for: %s", filename)
             return False
-        
-        # Update metadata for each document
-        for doc_id in doc_ids:
-            update_dict = {}
-            for field, value in corrections.items():
-                # ChromaDB expects flat metadata
-                if field == "form_category_name":
-                    update_dict["form_category_name"] = value
-                else:
-                    update_dict[field] = value
-            
-            collection.update(
-                ids=[doc_id],
-                metadatas=[update_dict]
+
+        # Update payload on each point (set_payload merges, does not replace)
+        for point in points:
+            qdrant_client.set_payload(
+                collection_name=collection_name,
+                payload=corrections,
+                points=[point.id],
             )
-        
-        LOGGER.info("✅ Updated %d chunks in ChromaDB", len(doc_ids))
+
+        LOGGER.info("Updated %d chunks in Qdrant", len(points))
         return True
         
     except Exception as exc:

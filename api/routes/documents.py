@@ -424,15 +424,15 @@ def _run_rebuild(app, app_state: AppState, job: ProcessingJob) -> None:
         # Update shared app state with new index
         app.state.index = index
 
-        # Refresh ChromaDB collection reference
-        import chromadb
-        from app.config import AppConfig
-        config = AppConfig.get()
+        # Refresh Qdrant client reference
+        from app.vector_store import get_qdrant_client, ensure_collection
         try:
-            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-            app.state.chroma_collection = client.get_or_create_collection("maritime_docs")
+            qdrant_client = get_qdrant_client()
+            collection_name = ensure_collection(qdrant_client)
+            app.state.qdrant_client = qdrant_client
+            app.state.qdrant_collection_name = collection_name
         except Exception as exc:
-            logger.error("Failed to refresh ChromaDB collection: %s", exc)
+            logger.error("Failed to refresh Qdrant connection: %s", exc)
 
         # Update app_state for tree rebuild
         app_state.nodes = nodes
