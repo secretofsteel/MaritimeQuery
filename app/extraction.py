@@ -473,7 +473,7 @@ def gemini_extract_record(path: Path, max_retries: int = 0) -> Dict[str, Any]:
 
 
 def format_references_for_metadata(references: Dict[str, List[str]]) -> str:
-    """Format the reference dictionary into a metadata string suitable for Chroma."""
+    """Format the reference dictionary into a metadata string suitable for vector store."""
     parts: List[str] = []
     if not isinstance(references, dict):
         return ""

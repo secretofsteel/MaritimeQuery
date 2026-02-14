@@ -96,8 +96,8 @@ async def get_app_state(
 
     Creates a fresh AppState per request with:
     - tenant_id from JWT authentication
-    - Shared index from app startup (avoids re-loading ChromaDB)
-    - Shared ChromaDB collection (avoids creating new PersistentClient per request)
+    - Shared index from app startup (avoids re-loading Qdrant index)
+    - Shared Qdrant client (avoids creating new client per request)
     - Tenant-scoped retrievers (FTS5 + Vector, created cheaply per request)
 
     Conversation context (query_history, topic, turn_count) is NOT loaded here.
@@ -107,7 +107,7 @@ async def get_app_state(
 
     # Inject shared resources from lifespan
     state.index = request.app.state.index
-    state._shared_chroma_collection = request.app.state.chroma_collection
+    state._shared_qdrant_client = request.app.state.qdrant_client
 
     # Build tenant-scoped retrievers (cheap: just stores references + tenant_id)
     if state.index is not None:
@@ -127,7 +127,7 @@ async def get_admin_app_state(
     """
     state = AppState(tenant_id=tenant_id)
     state.index = request.app.state.index
-    state._shared_chroma_collection = request.app.state.chroma_collection
+    state._shared_qdrant_client = request.app.state.qdrant_client
 
     if state.index is not None:
         state.ensure_retrievers()

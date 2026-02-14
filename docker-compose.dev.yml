@@ -1,0 +1,17 @@
+# Development services only — app runs on host
+# Usage: docker compose -f docker-compose.dev.yml up -d
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: madass-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC (not used yet, but no cost to expose)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+
+volumes:
+  qdrant_data:        # Named volume — Docker manages the storage location

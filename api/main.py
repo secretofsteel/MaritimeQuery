@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
 
     Startup:
         1. Initialize AppConfig singleton (API keys, paths, LlamaIndex settings).
-        2. Connect to ChromaDB and build VectorStoreIndex.
+        2. Connect to Qdrant and build VectorStoreIndex.
         3. Store shared resources on app.state for dependency injection.
 
     Shutdown:
@@ -33,28 +33,32 @@ async def lifespan(app: FastAPI):
     config = AppConfig.get()
     logger.info("Config loaded: base_dir=%s", config.paths.base_dir)
 
-    # 2. Connect to ChromaDB index
+    # 2. Connect to Qdrant index
     nodes, index = load_cached_nodes_and_index()
 
-    # 3. Get ChromaDB collection reference for sharing with retrievers
-    chroma_collection = None
+    # 3. Get shared Qdrant client for dependency injection
+    qdrant_client = None
+    qdrant_collection_name = None
     if index is not None:
         try:
-            import chromadb
-            client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-            chroma_collection = client.get_or_create_collection("maritime_docs")
+            from app.vector_store import get_qdrant_client, ensure_collection
+            qdrant_client = get_qdrant_client()
+            qdrant_collection_name = ensure_collection(qdrant_client)
+            collection_info = qdrant_client.get_collection(qdrant_collection_name)
             logger.info(
-                "ChromaDB connected: %d vectors in collection",
-                chroma_collection.count(),
+                "Qdrant connected: %d vectors in collection '%s'",
+                collection_info.points_count,
+                qdrant_collection_name,
             )
         except Exception as exc:
-            logger.error("Failed to connect to ChromaDB: %s", exc)
+            logger.error("Failed to connect to Qdrant: %s", exc)
 
     # 4. Store shared resources on app.state
     app.state.config = config
     app.state.index = index
-    app.state.chroma_collection = chroma_collection
-    app.state.node_count = get_node_count(None)  # Total across all tenants
+    app.state.qdrant_client = qdrant_client
+    app.state.qdrant_collection_name = qdrant_collection_name
+    app.state.node_count = get_node_count(None)
 
     logger.info(
         "Startup complete: index=%s, nodes=%d",
@@ -108,10 +112,10 @@ async def health():
     Returns status of shared resources loaded during startup.
     """
     has_index = app.state.index is not None
-    has_collection = app.state.chroma_collection is not None
+    has_qdrant = app.state.qdrant_client is not None
     return {
         "status": "ok" if has_index else "degraded",
         "index_loaded": has_index,
-        "chroma_connected": has_collection,
+        "qdrant_connected": has_qdrant,
         "node_count": app.state.node_count,
     }

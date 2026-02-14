@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import chromadb
+from qdrant_client.models import Filter, FieldCondition, MatchValue
+
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
-from llama_index.vector_stores.chroma import ChromaVectorStore
+
+from .vector_store import get_qdrant_client, ensure_collection
 
 from .config import AppConfig
 from .files import load_jsonl, write_jsonl
@@ -182,19 +184,17 @@ def update_metadata_everywhere(
     filename: str,
     corrections: Dict[str, Any],
     nodes: List[Document],
-    chroma_path: Path
 ) -> bool:
     """
     Apply metadata corrections to all three storage locations:
     1. Gemini JSON cache
-    2. Pickled nodes cache
-    3. ChromaDB vector store
+    2. In-memory nodes
+    3. Qdrant vector store
     
     Args:
         filename: Source filename
         corrections: Dictionary of fields to correct
         nodes: List of Document nodes (will be modified in place)
-        chroma_path: Path to ChromaDB storage
     
     Returns:
         True if all updates succeeded
@@ -224,34 +224,32 @@ def update_metadata_everywhere(
         
         LOGGER.info("Updated %d nodes in memory", updated_count)
         
-        # 3. Update ChromaDB
-        chroma_client = chromadb.PersistentClient(path=str(chroma_path))
-        collection = chroma_client.get_or_create_collection("maritime_docs")
+        # 3. Update Qdrant payload
+        qdrant_client = get_qdrant_client()
+        collection_name = ensure_collection(qdrant_client)
         
-        # Get all document IDs for this source
-        results = collection.get(where={"source": filename})
-        doc_ids = results["ids"]
-        
-        if not doc_ids:
-            LOGGER.warning("No documents found in ChromaDB for: %s", filename)
+        # Find points for this document
+        points, _ = qdrant_client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="source", match=MatchValue(value=filename))
+            ]),
+            limit=1000,
+        )
+
+        if not points:
+            LOGGER.warning("No points found in Qdrant for: %s", filename)
             return False
-        
-        # Update metadata for each document
-        for doc_id in doc_ids:
-            update_dict = {}
-            for field, value in corrections.items():
-                # ChromaDB expects flat metadata
-                if field == "form_category_name":
-                    update_dict["form_category_name"] = value
-                else:
-                    update_dict[field] = value
-            
-            collection.update(
-                ids=[doc_id],
-                metadatas=[update_dict]
+
+        # Update payload on each point (set_payload merges, does not replace)
+        for point in points:
+            qdrant_client.set_payload(
+                collection_name=collection_name,
+                payload=corrections,
+                points=[point.id],
             )
-        
-        LOGGER.info("✅ Updated %d chunks in ChromaDB", len(doc_ids))
+
+        LOGGER.info("Updated %d chunks in Qdrant", len(points))
         return True
         
     except Exception as exc:
@@ -294,7 +292,7 @@ def transfer_document_ownership(
     2. Removes the JSONL record from old tenant's cache
     3. Adds the JSONL record to new tenant's cache (with updated tenant_id)
     
-    Does NOT update ChromaDB or SQLite — the caller handles that separately
+    Does NOT update Qdrant or SQLite — the caller handles that separately
     via update_metadata_everywhere() and direct SQL updates (existing flow).
     
     Args:
