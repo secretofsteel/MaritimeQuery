@@ -22,9 +22,8 @@ from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
 from .session_uploads import SessionUploadManager, SessionUploadChunk
-from .retrieval import SQLiteFTS5Retriever, SQLiteNodeLoader, TenantAwareVectorRetriever
-from .nodes import NodeRepository
-from .database import get_node_count
+from .retrieval import PgFTSRetriever, PgNodeLoader, TenantAwareVectorRetriever
+from .nodes import get_node_count, NodeRepository
 
 
 
@@ -34,9 +33,10 @@ class AppState:
     # Core state
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
-    vector_retriever: Optional[VectorIndexRetriever] = None
-    fts5_retriever: Optional[SQLiteFTS5Retriever] = None
-    bm25_retriever: Optional[Any] = None
+    # Retrievers
+    fts5_retriever: Optional[PgFTSRetriever] = None
+    vector_retriever: Optional[TenantAwareVectorRetriever] = None
+    bm25_retriever: Optional[PgFTSRetriever] = None  # Alias for backward compatibility
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
@@ -129,13 +129,13 @@ class AppState:
 
         tenant_id = self.tenant_id
 
-        # FTS5 retriever (tenant-aware keyword search)
+        # 2. FTS5 (PostgreSQL) Retriever
         if self.fts5_retriever is None:
-            self.fts5_retriever = SQLiteFTS5Retriever(
+            self.fts5_retriever = PgFTSRetriever(
                 tenant_id=tenant_id,
                 similarity_top_k=20,
             )
-            LOGGER.debug("Created FTS5Retriever for tenant %s", tenant_id)
+            LOGGER.debug("Created PgFTSRetriever for tenant %s", tenant_id)
 
         # Point bm25_retriever to fts5 for compatibility
         self.bm25_retriever = self.fts5_retriever

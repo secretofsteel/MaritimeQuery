@@ -40,18 +40,19 @@ from .processing_status import (
     StageStatus,
     save_processing_report,
 )
-from .nodes import NodeRepository, bulk_insert_nodes
-from .database import init_db, rebuild_fts_index
+from .nodes import bulk_insert_nodes, get_node_count, rebuild_fts_index, NodeRepository
+from .database import init_db
 
 def clear_all_nodes_for_rebuild() -> int:
-    """Clear ALL nodes from SQLite regardless of tenant."""
-    from .database import db_connection
+    """Clear ALL nodes from PostgreSQL regardless of tenant."""
+    from .pg_database import pg_connection
     
-    with db_connection() as conn:
-        cursor = conn.execute("DELETE FROM nodes")
-        deleted = cursor.rowcount
+    with pg_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM nodes")
+            deleted = cur.rowcount
     
-    LOGGER.warning("Cleared ALL %d nodes from SQLite for rebuild", deleted)
+    LOGGER.warning("Cleared ALL %d nodes from PostgreSQL for rebuild", deleted)
     return deleted
 
 def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
@@ -125,10 +126,10 @@ def cache_nodes(
         tenant_id: Tenant identifier for multi-tenancy
     """
     from .nodes import bulk_insert_nodes
-    from .database import init_db, rebuild_fts_index
+    # from .database import init_db  # Not needed for PG
     
     # Ensure database is initialized
-    init_db()
+    # init_db()
     
     # Clear existing nodes for this tenant and insert new ones
     if not skip_clear:
@@ -138,8 +139,7 @@ def cache_nodes(
     # Bulk insert for performance
     inserted = bulk_insert_nodes(nodes, tenant_id=tenant_id)
     
-    # Rebuild FTS index after bulk insert
-    rebuild_fts_index()
+    # PG triggers handle FTS update automatically
     
     # Save cache info (for compatibility and debugging)
     cache_info = {
@@ -148,13 +148,13 @@ def cache_nodes(
         "num_documents": documents_count,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
-        "storage": "sqlite",  # Flag that we're using SQLite now
+        "storage": "postgres",
         "tenant_id": tenant_id,
     }
     with info_path.open("w") as file:
         json.dump(cache_info, file, indent=2)
     
-    LOGGER.info("Saved %d nodes to SQLite (tenant=%s)", inserted, tenant_id)
+    LOGGER.info("Saved %d nodes to PostgreSQL (tenant=%s)", inserted, tenant_id)
 
 
 def save_document_trees(trees: List[Dict[str, Any]], trees_path: Path) -> None:
@@ -875,9 +875,6 @@ class IncrementalIndexManager:
         
         # Upsert nodes (this handles both new and existing)
         inserted = bulk_insert_nodes(self.nodes, tenant_id=tenant_id)
-        
-        # Rebuild FTS index
-        rebuild_fts_index()
         
         # Update cache info
         cache_info = {

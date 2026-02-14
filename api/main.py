@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from app.config import AppConfig
 from app.indexing import load_cached_nodes_and_index
-from app.database import get_node_count
+from app.nodes import get_node_count
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, Request
 
 from api.dependencies import get_current_tenant, get_current_user
-from app.database import get_distinct_doc_count, get_node_count
+from app.nodes import get_distinct_doc_count, get_node_count
 from app.nodes import NodeRepository
 from pydantic import BaseModel
 

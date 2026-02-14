@@ -90,16 +90,18 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
     
-    from .database import rebuild_fts_index, get_node_count, db_connection
-    from .nodes import NodeRepository, bulk_insert_nodes
+    from .pg_database import pg_connection
+    from .nodes import NodeRepository, bulk_insert_nodes, rebuild_fts_index, get_node_count
     from .indexing import clear_all_nodes_for_rebuild
     
     config = AppConfig.get()
     
     try:
         # Get TOTAL SQLite count (all tenants)
-        with db_connection() as conn:
-            sqlite_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM nodes")
+                sqlite_count = cur.fetchone()[0]
         
         # Get TOTAL Qdrant count
         qdrant_client = get_qdrant_client()
