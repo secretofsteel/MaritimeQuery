@@ -58,9 +58,11 @@ def init_pg_pool(database_url: str | None = None) -> ConnectionPool:
 
 
 def get_pg_pool() -> ConnectionPool:
-    """Get the connection pool. Raises RuntimeError if not initialized."""
+    """Get the connection pool. Auto-initializes from AppConfig if needed."""
     if _PG_POOL is None:
-        raise RuntimeError("PostgreSQL pool not initialized. Call init_pg_pool() first.")
+        from .config import AppConfig
+        config = AppConfig.get()
+        init_pg_pool(config.database_url)
     return _PG_POOL
 
 

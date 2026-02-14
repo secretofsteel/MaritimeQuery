@@ -1,14 +1,13 @@
-"""Feedback logging and analytics."""
+"""Feedback logging and analytics using PostgreSQL."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List
 
-from .config import AppConfig
+from .pg_database import pg_connection
 
 
 @dataclass
@@ -33,40 +32,85 @@ class FeedbackEntry:
 class FeedbackSystem:
     """Collects and analyses user feedback on RAG answers."""
 
-    def __init__(self, log_path: Path | None = None) -> None:
-        paths = AppConfig.get().paths
-        self.log_path = log_path or paths.feedback_log
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, tenant_id: str = "shared") -> None:
+        self.tenant_id = tenant_id
 
     def log_feedback(self, result: Dict, feedback_type: str, correction: str = "") -> None:
-        entry = FeedbackEntry(
-            timestamp=datetime.now().isoformat(),
-            query=result.get("query", ""),
-            answer=result.get("answer", ""),
-            confidence_pct=result.get("confidence_pct", 0),
-            confidence_level=result.get("confidence_level", ""),
-            num_sources=result.get("num_sources", 0),
-            top_sources=[src["source"] for src in result.get("sources", [])[:3]],
-            retriever_type=result.get("retriever_type", "unknown"),
-            feedback=feedback_type,
-            correction=correction,
-            attempts=result.get("attempts", 1),
-            was_refined=result.get("final_query") != result.get("query"),
-        )
-        with self.log_path.open("a", encoding="utf-8") as file:
-            file.write(entry.to_json() + "\n")
+        top_sources = [src["source"] for src in result.get("sources", [])[:3]]
+
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO feedback (
+                        tenant_id, query, answer, confidence_pct,
+                        confidence_level, num_sources, top_sources,
+                        retriever_type, feedback, correction,
+                        attempts, was_refined
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                """, (
+                    self.tenant_id,
+                    result.get("query", ""),
+                    result.get("answer", ""),
+                    result.get("confidence_pct", 0),
+                    result.get("confidence_level", ""),
+                    result.get("num_sources", 0),
+                    json.dumps(top_sources),   # JSONB column — pass as JSON string
+                    result.get("retriever_type", "unknown"),
+                    feedback_type,
+                    correction,
+                    result.get("attempts", 1),
+                    result.get("final_query") != result.get("query"),
+                ))
 
     def get_all_feedback(self) -> List[Dict]:
-        if not self.log_path.exists():
+        try:
+            with pg_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            created_at, query, answer, confidence_pct,
+                            confidence_level, num_sources, top_sources,
+                            retriever_type, feedback, correction,
+                            attempts, was_refined
+                        FROM feedback
+                        WHERE tenant_id = %s
+                        ORDER BY created_at DESC
+                    """, (self.tenant_id,))
+                    rows = cur.fetchall()
+        except Exception:
             return []
-        feedback: List[Dict] = []
-        with self.log_path.open("r", encoding="utf-8") as file:
-            for line in file:
+
+        result = []
+        for row in rows:
+            ts = row["created_at"]
+            if hasattr(ts, "isoformat"):
+                ts = ts.isoformat()
+
+            # top_sources: PG JSONB returns list directly, or might be a string
+            top_sources = row["top_sources"]
+            if isinstance(top_sources, str):
                 try:
-                    feedback.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return feedback
+                    top_sources = json.loads(top_sources)
+                except (json.JSONDecodeError, TypeError):
+                    top_sources = []
+
+            result.append({
+                "timestamp": ts,
+                "query": row["query"],
+                "answer": row["answer"],
+                "confidence_pct": row["confidence_pct"] or 0,
+                "confidence_level": row["confidence_level"] or "",
+                "num_sources": row["num_sources"] or 0,
+                "top_sources": top_sources or [],
+                "retriever_type": row["retriever_type"] or "unknown",
+                "feedback": row["feedback"],
+                "correction": row["correction"] or "",
+                "attempts": row["attempts"] or 1,
+                "was_refined": row["was_refined"] or False,
+            })
+        return result
 
     def analyze_feedback(self) -> Dict:
         feedback = self.get_all_feedback()
