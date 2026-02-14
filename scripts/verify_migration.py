@@ -21,7 +21,6 @@ def verify_migration():
     
     print(f"Collection: {name}")
     print(f"Points count: {info.points_count}")
-    print(f"Vectors count: {info.vectors_count}")
     
     if info.points_count > 0:
         print("SUCCESS: Qdrant has points.")
