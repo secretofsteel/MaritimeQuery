@@ -69,7 +69,7 @@ class AppState:
     _index_load_attempted: bool = field(default=False, init=False)
 
     def ensure_nodes_loaded(self) -> List[Document]:
-        """Load nodes from SQLite if not already in memory."""
+        """Load nodes from PostgreSQL if not already in memory."""
         from .nodes import NodeRepository
 
         if not self.nodes:
@@ -105,7 +105,7 @@ class AppState:
             
             if index is not None:
                 self.index = index
-                # Don't store nodes - FTS5 queries SQLite directly
+                # Don't store nodes - FTS queries PostgreSQL directly
                 LOGGER.info("Loaded Qdrant-backed index")
             else:
                 LOGGER.info("No cached index found")
@@ -121,7 +121,7 @@ class AppState:
         """Ensure retriever instances are ready.
 
         Creates:
-        - FTS5Retriever — queries SQLite directly (tenant-aware)
+        - FTS5Retriever — queries PostgreSQL directly (tenant-aware)
         - TenantAwareVectorRetriever — queries Qdrant with tenant filter
         """
         from .config import AppConfig
@@ -185,7 +185,6 @@ class AppState:
             manager = IncrementalIndexManager(
                 docs_path=config.docs_path_for(tenant_id),
                 gemini_cache_path=config.gemini_cache_for(tenant_id),
-                nodes_cache_path=paths.nodes_cache_path,
                 cache_info_path=paths.cache_info_path,
                 tenant_id=tenant_id,
             )
@@ -688,14 +687,14 @@ class AppState:
         
         Note: This still loads nodes into memory for the map.
         Consider refactoring hierarchical retrieval to use
-        SQLiteNodeLoader.get_node_by_id() instead for better scaling.
+        NodeRepository.get_node_by_id() instead for better scaling.
         """
         if self._node_map_cache is None:
             from llama_index.core.schema import NodeWithScore
 
             tenant_id = self.tenant_id
             
-            # Load nodes from SQLite
+            # Load nodes from PostgreSQL
             repo = NodeRepository(tenant_id=tenant_id)
             nodes = repo.get_all_nodes()
             

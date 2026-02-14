@@ -43,7 +43,6 @@ class PathConfig:
     docs_path: Path
     cache_dir: Path
     gemini_json_cache: Path
-    nodes_cache_path: Path
     cache_info_path: Path
     feedback_log: Path
 
@@ -60,7 +59,6 @@ def build_paths(base_dir: Optional[Path] = None) -> PathConfig:
         docs_path=docs_path,
         cache_dir=cache_dir,
         gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
-        nodes_cache_path=cache_dir / "nodes_cache.pkl",
         cache_info_path=cache_dir / "nodes_cache_info.json",
         feedback_log=cache_dir / "feedback_log.jsonl",
     )
@@ -135,7 +133,6 @@ class AppConfig:
             docs_path=docs_path,
             cache_dir=cache_dir,
             gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
-            nodes_cache_path=cache_dir / "nodes_cache.pkl",
             cache_info_path=cache_dir / "nodes_cache_info.json",
             feedback_log=cache_dir / "feedback_log.jsonl",
         )

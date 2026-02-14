@@ -206,7 +206,7 @@ def _get_tenant_list() -> List[str]:
 def _sync_memory_to_db(app_state: AppState) -> None:
     """UI wrapper for sync_memory_to_db service."""
     
-    with st.spinner("Syncing SQLite with Qdrant..."):
+    with st.spinner("Syncing PostgreSQL with Qdrant..."):
         result = sync_memory_to_db(app_state)
     
     if result.success:
