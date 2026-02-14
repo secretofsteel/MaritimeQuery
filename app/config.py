@@ -100,6 +100,10 @@ class AppConfig:
         # Read from environment, with localhost defaults for dev
         self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
         self.qdrant_collection = os.getenv("QDRANT_COLLECTION", "maritime_rag")
+        self.database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://maritime:maritime_dev@localhost:5432/maritime_rag"
+        )
 
         self.paths = build_paths()
         configure_llama_settings(api_key)
