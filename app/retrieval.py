@@ -1,7 +1,7 @@
 """SQLite FTS5-based retriever and tenant-aware vector retriever.
 
 Phase 3: FTS5 for keyword search (replaces in-memory BM25)
-Phase 4: Tenant-aware vector retrieval (filters ChromaDB by tenant)
+Phase 4: Tenant-aware vector retrieval (filters Qdrant by tenant)
 """
 
 from __future__ import annotations
@@ -16,6 +16,18 @@ from llama_index.core.vector_stores.types import VectorStoreQueryResult
 
 from .database import db_connection, get_db_path
 from .logger import LOGGER
+
+import json
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Filter,
+    FieldCondition,
+    MatchValue,
+    MatchAny,
+)
+
+from .vector_store import get_qdrant_client, ensure_collection
 
 
 def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
@@ -35,6 +47,44 @@ def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
         expanded.add(dt.upper())     # FORM, PROCEDURE
         expanded.add(dt.title())     # Form, Procedure
     return sorted(expanded)
+
+
+# =============================================================================
+# QDRANT PAYLOAD HELPERS
+# =============================================================================
+
+# Keys written by LlamaIndex internals — not useful as user-facing metadata
+_INTERNAL_PAYLOAD_KEYS = frozenset({
+    "_node_content", "_node_type", "document_id", "doc_id", "ref_doc_id",
+})
+
+
+def _extract_text_from_payload(payload: dict) -> str:
+    """Extract text content from a Qdrant point's payload.
+
+    LlamaIndex stores the full node as JSON in ``_node_content``.
+    Falls back to common alternative field names.
+    """
+    node_content = payload.get("_node_content")
+    if node_content:
+        try:
+            parsed = json.loads(node_content)
+            text = parsed.get("text", "")
+            if text:
+                return text
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Fallback: direct payload fields
+    return payload.get("text", "") or payload.get("document", "")
+
+
+def _extract_metadata_from_payload(payload: dict) -> dict:
+    """Extract user-facing metadata from a Qdrant point's payload.
+
+    Strips LlamaIndex internal keys so downstream consumers
+    (reranker, LLM context) see clean metadata.
+    """
+    return {k: v for k, v in payload.items() if k not in _INTERNAL_PAYLOAD_KEYS}
 
 
 # =============================================================================
@@ -322,120 +372,116 @@ class SQLiteFTS5Retriever(BaseRetriever):
 
 
 # =============================================================================
-# TENANT-AWARE VECTOR RETRIEVER (Phase 4)
+# TENANT-AWARE VECTOR RETRIEVER (Phase 4 — Qdrant)
 # =============================================================================
 
 class TenantAwareVectorRetriever(BaseRetriever):
-    """
-    Vector retriever with tenant isolation.
-    
-    Wraps ChromaDB queries to filter by tenant_id metadata.
+    """Vector retriever with tenant isolation via Qdrant payload filtering.
+
+    Queries Qdrant directly (not through LlamaIndex) for full control
+    over filter composition, scoring, and result construction.
     Returns vectors belonging to the specified tenant OR 'shared'.
     """
-    
+
     def __init__(
         self,
-        collection,
+        qdrant_client: QdrantClient,
+        collection_name: str,
         embed_model,
         tenant_id: Optional[str] = None,
         similarity_top_k: int = 10,
     ):
-        """
-        Initialize tenant-aware vector retriever.
-        
-        Args:
-            collection: ChromaDB collection
-            embed_model: Embedding model for query encoding
-            tenant_id: Tenant to filter for (also includes 'shared')
-            similarity_top_k: Number of results to return
-        """
         super().__init__()
-        self.collection = collection
+        self.qdrant_client = qdrant_client
+        self.collection_name = collection_name
         self.embed_model = embed_model
         self.tenant_id = tenant_id
         self.similarity_top_k = similarity_top_k
-        
+
         LOGGER.debug(
-            "TenantAwareVectorRetriever initialized: tenant=%s, top_k=%d",
-            tenant_id or "all", similarity_top_k
+            "TenantAwareVectorRetriever initialized: tenant=%s, top_k=%d, collection=%s",
+            tenant_id or "all", similarity_top_k, collection_name,
         )
-    
+
+    # ------------------------------------------------------------------
+    # Filter builders
+    # ------------------------------------------------------------------
+
+    def _build_tenant_filter(self) -> Optional[Filter]:
+        """Build a Qdrant filter for tenant scoping (tenant OR shared)."""
+        if not self.tenant_id:
+            return None
+        return Filter(should=[
+            FieldCondition(key="tenant_id", match=MatchValue(value=self.tenant_id)),
+            FieldCondition(key="tenant_id", match=MatchValue(value="shared")),
+        ])
+
+    @staticmethod
+    def _build_doc_type_condition(doc_type_filter: List[str]) -> FieldCondition:
+        """Build a FieldCondition for doc_type matching."""
+        expanded = _expand_doc_type_case(doc_type_filter)
+        if len(expanded) == 1:
+            return FieldCondition(key="doc_type", match=MatchValue(value=expanded[0]))
+        return FieldCondition(key="doc_type", match=MatchAny(any=expanded))
+
+    # ------------------------------------------------------------------
+    # Result conversion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _points_to_nodes(points) -> List[NodeWithScore]:
+        """Convert Qdrant ScoredPoints to LlamaIndex NodeWithScore list."""
+        nodes = []
+        for point in points:
+            payload = point.payload or {}
+            text = _extract_text_from_payload(payload)
+            metadata = _extract_metadata_from_payload(payload)
+
+            node = TextNode(
+                id_=str(point.id),
+                text=text,
+                metadata=metadata,
+            )
+            # Qdrant cosine → similarity score directly (higher = better)
+            nodes.append(NodeWithScore(node=node, score=point.score))
+        return nodes
+
+    # ------------------------------------------------------------------
+    # BaseRetriever interface
+    # ------------------------------------------------------------------
+
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        """
-        Retrieve vectors filtered by tenant.
-        
-        Args:
-            query_bundle: Query containing the search string
-        
-        Returns:
-            List of NodeWithScore objects ranked by similarity
-        """
+        """Retrieve vectors filtered by tenant."""
         query_str = query_bundle.query_str
-        
         if not query_str.strip():
             return []
-        
+
         try:
-            # Get query embedding
             query_embedding = self.embed_model.get_query_embedding(query_str)
-            
-            # Build tenant filter
-            where_filter = None
-            if self.tenant_id:
-                where_filter = {
-                    "$or": [
-                        {"tenant_id": self.tenant_id},
-                        {"tenant_id": "shared"}
-                    ]
-                }
-            
-            # Query ChromaDB
-            if where_filter:
-                results = self.collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=self.similarity_top_k,
-                    where=where_filter,
-                    include=["documents", "metadatas", "distances"]
-                )
-            else:
-                results = self.collection.query(
-                    query_embeddings=[query_embedding],
-                    n_results=self.similarity_top_k,
-                    include=["documents", "metadatas", "distances"]
-                )
-            
+            tenant_filter = self._build_tenant_filter()
+
+            result = self.qdrant_client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                query_filter=tenant_filter,
+                limit=self.similarity_top_k,
+                with_payload=True,
+            )
+
+            points = result.points
             LOGGER.info(
                 "Vector search returned %d results (tenant=%s)",
-                len(results["ids"][0]) if results["ids"] else 0,
-                self.tenant_id or "all"
+                len(points), self.tenant_id or "all",
             )
-            
-            # Convert to NodeWithScore
-            nodes = []
-            if results["ids"] and results["ids"][0]:
-                for i, node_id in enumerate(results["ids"][0]):
-                    metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                    text = results["documents"][0][i] if results["documents"] else ""
-                    distance = results["distances"][0][i] if results["distances"] else 0.0
-                    
-                    node = TextNode(
-                        id_=node_id,
-                        text=text,
-                        metadata=metadata,
-                    )
-                    
-                    # Convert distance to similarity score (lower distance = higher similarity)
-                    # ChromaDB returns L2 distance by default
-                    score = 1.0 / (1.0 + distance)
-                    
-                    nodes.append(NodeWithScore(node=node, score=score))
-            
-            return nodes
-            
+            return self._points_to_nodes(points)
+
         except Exception as exc:
             LOGGER.error("Vector search failed: %s", exc)
             return []
 
+    # ------------------------------------------------------------------
+    # Extended API (used by orchestrator)
+    # ------------------------------------------------------------------
 
     def retrieve_filtered(
         self,
@@ -452,7 +498,6 @@ class TenantAwareVectorRetriever(BaseRetriever):
         Args:
             query_str: Raw search query.
             doc_type_filter: e.g. ``["REGULATION", "VETTING"]``.
-                Added to the ChromaDB ``where`` clause via ``$in``.
             title_filter: Substring to match in document title
                 (applied post-retrieval on metadata).
             top_k: Override the instance's ``similarity_top_k``.
@@ -464,80 +509,52 @@ class TenantAwareVectorRetriever(BaseRetriever):
             return []
 
         effective_top_k = top_k or self.similarity_top_k
+        # Over-fetch when title filtering is active (post-retrieval filter)
         retrieval_top_k = effective_top_k * 2 if title_filter else effective_top_k
 
         try:
             query_embedding = self.embed_model.get_query_embedding(query_str)
 
-            # ---- build where filter ----
-            filter_parts: List[Dict] = []
+            # ---- build composite Qdrant filter ----
+            must_conditions: List = []
 
-            if self.tenant_id:
-                filter_parts.append(
-                    {"$or": [
-                        {"tenant_id": self.tenant_id},
-                        {"tenant_id": "shared"},
-                    ]}
-                )
+            # Tenant scoping (OR logic wrapped in a nested Filter)
+            tenant_filter = self._build_tenant_filter()
+            if tenant_filter:
+                must_conditions.append(tenant_filter)
 
+            # Doc-type filter
             if doc_type_filter:
-                expanded = _expand_doc_type_case(doc_type_filter)
-                if len(expanded) == 1:
-                    filter_parts.append({"doc_type": expanded[0]})
-                else:
-                    filter_parts.append({"doc_type": {"$in": expanded}})
+                must_conditions.append(self._build_doc_type_condition(doc_type_filter))
 
-            if len(filter_parts) == 0:
-                where_filter = None
-            elif len(filter_parts) == 1:
-                where_filter = filter_parts[0]
-            else:
-                where_filter = {"$and": filter_parts}
+            query_filter = Filter(must=must_conditions) if must_conditions else None
 
-            # ---- query ChromaDB ----
-            query_kwargs = dict(
-                query_embeddings=[query_embedding],
-                n_results=retrieval_top_k,
-                include=["documents", "metadatas", "distances"],
+            # ---- query Qdrant ----
+            result = self.qdrant_client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                query_filter=query_filter,
+                limit=retrieval_top_k,
+                with_payload=True,
             )
-            if where_filter:
-                query_kwargs["where"] = where_filter
 
-            results = self.collection.query(**query_kwargs)
-
+            points = result.points
             LOGGER.info(
                 "Vector filtered: %d results (doc_type=%s, title=%s)",
-                len(results["ids"][0]) if results["ids"] else 0,
-                doc_type_filter,
-                title_filter,
+                len(points), doc_type_filter, title_filter,
             )
 
-            # ---- convert to NodeWithScore ----
-            nodes = []
-            if results["ids"] and results["ids"][0]:
-                for i, node_id in enumerate(results["ids"][0]):
-                    metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                    text = results["documents"][0][i] if results["documents"] else ""
-                    distance = results["distances"][0][i] if results["distances"] else 0.0
+            nodes = self._points_to_nodes(points)
 
-                    node = TextNode(id_=node_id, text=text, metadata=metadata)
-                    score = 1.0 / (1.0 + distance)
-                    nodes.append(NodeWithScore(node=node, score=score))
-
-            # Post-retrieval title filter
+            # ---- post-retrieval title filter ----
             if title_filter:
-                before = len(nodes)
-                pattern = title_filter.upper()
+                title_lower = title_filter.lower()
                 nodes = [
                     n for n in nodes
-                    if pattern in (n.node.metadata.get("title") or "").upper()
-                ]
-                LOGGER.info(
-                    "Title filter '%s': %d → %d results",
-                    title_filter, before, len(nodes),
-                )
+                    if title_lower in n.node.metadata.get("title", "").lower()
+                ][:effective_top_k]
 
-            return nodes[:effective_top_k]
+            return nodes
 
         except Exception as exc:
             LOGGER.error("Vector filtered search failed: %s", exc)

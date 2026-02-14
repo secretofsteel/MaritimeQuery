@@ -64,7 +64,7 @@ class AppState:
     _session_upload_metadata_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     _session_upload_chunks_cache: Dict[str, List[SessionUploadChunk]] = field(default_factory=dict)
     _node_map_cache: Optional[Dict[str, Any]] = None  # Cached node map for hierarchical retrieval
-    _shared_chroma_collection: Optional[Any] = field(default=None, repr=False)
+    _shared_qdrant_client: Optional[Any] = field(default=None, repr=False)
     hierarchical_enabled: bool = False  # Whether hierarchical retrieval is available
     _index_load_attempted: bool = field(default=False, init=False)
 
@@ -98,7 +98,7 @@ class AppState:
 
         self._index_load_attempted = True
         
-        # Load ChromaDB index
+        # Load Qdrant-backed index
         if self.index is None:
             from .indexing import load_cached_nodes_and_index
             nodes, index = load_cached_nodes_and_index()  # No tenant_id
@@ -106,7 +106,7 @@ class AppState:
             if index is not None:
                 self.index = index
                 # Don't store nodes - FTS5 queries SQLite directly
-                LOGGER.info("Loaded ChromaDB index")
+                LOGGER.info("Loaded Qdrant-backed index")
             else:
                 LOGGER.info("No cached index found")
                 return False
@@ -118,18 +118,17 @@ class AppState:
         return self.index is not None
 
     def ensure_retrievers(self) -> None:
-        """
-        Ensure retriever instances are ready.
-        
+        """Ensure retriever instances are ready.
+
         Creates:
-        - FTS5Retriever - queries SQLite directly (tenant-aware)
-        - TenantAwareVectorRetriever - queries ChromaDB with tenant filter
+        - FTS5Retriever — queries SQLite directly (tenant-aware)
+        - TenantAwareVectorRetriever — queries Qdrant with tenant filter
         """
-        import chromadb
         from .config import AppConfig
+        from .vector_store import get_qdrant_client, ensure_collection
 
         tenant_id = self.tenant_id
-        
+
         # FTS5 retriever (tenant-aware keyword search)
         if self.fts5_retriever is None:
             self.fts5_retriever = SQLiteFTS5Retriever(
@@ -137,22 +136,23 @@ class AppState:
                 similarity_top_k=20,
             )
             LOGGER.debug("Created FTS5Retriever for tenant %s", tenant_id)
-        
+
         # Point bm25_retriever to fts5 for compatibility
         self.bm25_retriever = self.fts5_retriever
-        
+
         # Tenant-aware vector retriever
         if self.vector_retriever is None and self.index is not None:
-            # Use shared collection if injected (FastAPI path), else create client (Streamlit path)
-            collection = self._shared_chroma_collection
-            if collection is None:
-                config = AppConfig.get()
-                client = chromadb.PersistentClient(path=str(config.paths.chroma_path))
-                collection = client.get_or_create_collection("maritime_docs")
+            # Use shared client if injected (FastAPI path), else create one
+            qdrant_client = self._shared_qdrant_client
+            if qdrant_client is None:
+                qdrant_client = get_qdrant_client()
 
-            # Create tenant-aware retriever
+            config = AppConfig.get()
+            collection_name = ensure_collection(qdrant_client)
+
             self.vector_retriever = TenantAwareVectorRetriever(
-                collection=collection,
+                qdrant_client=qdrant_client,
+                collection_name=collection_name,
                 embed_model=LlamaSettings.embed_model,
                 tenant_id=tenant_id,
                 similarity_top_k=20,

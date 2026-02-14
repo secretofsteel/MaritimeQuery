@@ -84,12 +84,11 @@ class BulkUploadResult:
 
 def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     """
-    Verify and repair consistency between SQLite and ChromaDB.
+    Verify and repair consistency between SQLite and Qdrant.
     
-    ChromaDB is source of truth for vectors. SQLite mirrors text/metadata.
+    Qdrant is source of truth for vectors. SQLite mirrors text/metadata.
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
-    from llama_index.core.schema import TextNode
     from llama_index.core.schema import TextNode
     
     from .database import rebuild_fts_index, get_node_count, db_connection
