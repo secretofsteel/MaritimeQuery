@@ -471,16 +471,25 @@ async def start_processing(
     tenant_id = app_state.tenant_id
 
     # --- Determine mode ---
-    collection = request.app.state.chroma_collection
     has_vectors = False
-    if collection and not body.force_rebuild:
-        try:
-            tenant_docs = collection.get(
-                where={"tenant_id": tenant_id}, limit=1, include=[]
-            )
-            has_vectors = bool(tenant_docs and tenant_docs["ids"])
-        except Exception:
-            pass
+    if not body.force_rebuild:
+        qdrant_client = request.app.state.qdrant_client
+        collection_name = request.app.state.qdrant_collection_name
+        if qdrant_client and collection_name:
+            try:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                count_result = qdrant_client.count(
+                    collection_name=collection_name,
+                    count_filter=Filter(must=[
+                        FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))
+                    ]),
+                    exact=False,
+                )
+                has_vectors = count_result.count > 0
+            except Exception:
+                pass
+
+    mode = "sync" if (has_vectors and not body.force_rebuild) else "rebuild"
 
     mode = "sync" if (has_vectors and not body.force_rebuild) else "rebuild"
 

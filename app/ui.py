@@ -206,7 +206,7 @@ def _get_tenant_list() -> List[str]:
 def _sync_memory_to_db(app_state: AppState) -> None:
     """UI wrapper for sync_memory_to_db service."""
     
-    with st.spinner("Rebuilding memory from ChromaDB..."):
+    with st.spinner("Rebuilding memory from Qdrant..."):
         result = sync_memory_to_db(app_state)
     
     if result.success:
@@ -3438,7 +3438,6 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                     source,
                     corrections,
                     app_state.nodes,
-                    config.paths.chroma_path
                 )
                 
                 if success:

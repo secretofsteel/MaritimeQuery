@@ -13,7 +13,7 @@ from collections import defaultdict
 from llama_index.core import Document, VectorStoreIndex
 from llama_index.core import Settings as LlamaSettings
 from llama_index.core.retrievers import VectorIndexRetriever
-from llama_index.retrievers.bm25 import BM25Retriever
+
 
 
 from .config import AppConfig

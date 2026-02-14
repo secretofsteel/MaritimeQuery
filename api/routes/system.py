@@ -19,10 +19,10 @@ router = APIRouter(prefix="/api/v1/system", tags=["system"])
 class SystemStatusResponse(BaseModel):
     status: str                    # "ok" | "degraded" | "empty"
     index_loaded: bool
-    chroma_connected: bool
+    qdrant_connected: bool
     total_nodes: int               # Live count from SQLite (all tenants)
     total_documents: int           # Live count: distinct doc_ids in SQLite (all tenants)
-    chroma_vectors: int            # Live count from ChromaDB collection
+    qdrant_vectors: int            # Live count from Qdrant collection
     tenant_id: str                 # Requesting user's tenant
     tenant_nodes: int              # Node count for this tenant only
     tenant_documents: int          # Document count for this tenant only
@@ -48,11 +48,14 @@ async def get_system_status(
     # Optimized: distinct doc count for tenant using DB helper instead of scanning all ids
     tenant_docs = get_distinct_doc_count(tenant_id=tenant_id)
 
-    # ChromaDB live count
-    chroma_vectors = 0
-    if request.app.state.chroma_collection:
+    # Qdrant live count
+    qdrant_vectors = 0
+    qdrant_client = request.app.state.qdrant_client
+    collection_name = request.app.state.qdrant_collection_name
+    if qdrant_client and collection_name:
         try:
-            chroma_vectors = request.app.state.chroma_collection.count()
+            info = qdrant_client.get_collection(collection_name)
+            qdrant_vectors = info.points_count
         except Exception:
             pass
 
@@ -68,10 +71,10 @@ async def get_system_status(
     return SystemStatusResponse(
         status=status_str,
         index_loaded=has_index,
-        chroma_connected=request.app.state.chroma_collection is not None,
+        qdrant_connected=request.app.state.qdrant_client is not None,
         total_nodes=total_nodes,
         total_documents=total_docs,
-        chroma_vectors=chroma_vectors,
+        qdrant_vectors=qdrant_vectors,
         tenant_id=tenant_id,
         tenant_nodes=tenant_nodes,
         tenant_documents=tenant_docs,

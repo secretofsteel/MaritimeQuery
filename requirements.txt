@@ -12,10 +12,7 @@ google-genai
 llama-index-core
 llama-index-llms-google-genai
 llama-index-embeddings-google-genai
-llama-index-vector-stores-chroma
-llama-index-retrievers-bm25
-chromadb
-rank-bm25
+
 cohere
 
 #Document processing libraries

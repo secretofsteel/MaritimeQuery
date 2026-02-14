@@ -184,19 +184,17 @@ def update_metadata_everywhere(
     filename: str,
     corrections: Dict[str, Any],
     nodes: List[Document],
-    chroma_path: Path
 ) -> bool:
     """
     Apply metadata corrections to all three storage locations:
     1. Gemini JSON cache
-    2. Pickled nodes cache
-    3. ChromaDB vector store
+    2. In-memory nodes
+    3. Qdrant vector store
     
     Args:
         filename: Source filename
         corrections: Dictionary of fields to correct
         nodes: List of Document nodes (will be modified in place)
-        chroma_path: Path to ChromaDB storage
     
     Returns:
         True if all updates succeeded
@@ -294,7 +292,7 @@ def transfer_document_ownership(
     2. Removes the JSONL record from old tenant's cache
     3. Adds the JSONL record to new tenant's cache (with updated tenant_id)
     
-    Does NOT update ChromaDB or SQLite — the caller handles that separately
+    Does NOT update Qdrant or SQLite — the caller handles that separately
     via update_metadata_everywhere() and direct SQL updates (existing flow).
     
     Args:

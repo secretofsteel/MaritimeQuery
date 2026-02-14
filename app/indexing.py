@@ -630,7 +630,6 @@ def build_index_from_library_parallel(
                 f"Embedded {chunks_per_file[filename]} chunks"
             )
     
-    # Initialize ChromaDB
     # Initialize Qdrant
     qdrant_client = get_qdrant_client()
     collection_name = ensure_collection(qdrant_client)
@@ -765,7 +764,7 @@ def build_index_from_library_parallel(
 
 def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[VectorStoreIndex]]:
     """
-    Connect to ChromaDB index. 
+    Connect to Qdrant index. 
     
     Note: With FTS5, we don't load nodes into memory here.
     Nodes are queried directly from SQLite by the FTS5 retriever.
@@ -785,7 +784,6 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
         LOGGER.info("No nodes found in SQLite")
         return None, None
     
-    # Check ChromaDB exists
     # Check Qdrant exists/connectable
     try:
         qdrant_client = get_qdrant_client()

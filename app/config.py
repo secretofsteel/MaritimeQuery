@@ -41,7 +41,6 @@ class PathConfig:
     base_dir: Path
     data_dir: Path
     docs_path: Path
-    chroma_path: Path
     cache_dir: Path
     gemini_json_cache: Path
     nodes_cache_path: Path
@@ -54,13 +53,11 @@ def build_paths(base_dir: Optional[Path] = None) -> PathConfig:
     base = base_dir or Path(__file__).resolve().parent.parent
     data_dir = resolve_path("MARITIME_RAG_DATA_DIR", base / "data")
     docs_path = resolve_path("MARITIME_RAG_DOCS", data_dir / "docs")
-    chroma_path = resolve_path("MARITIME_RAG_CHROMA", data_dir / "chroma_db")
     cache_dir = resolve_path("MARITIME_RAG_CACHE", data_dir / "cache")
     return PathConfig(
         base_dir=base,
         data_dir=data_dir,
         docs_path=docs_path,
-        chroma_path=chroma_path,
         cache_dir=cache_dir,
         gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
         nodes_cache_path=cache_dir / "nodes_cache.pkl",
@@ -123,24 +120,22 @@ class AppConfig:
             LOGGER.info("PDF visual extraction (images/drawings) disabled")
 
 
-    def update_paths(self, docs_path: Path, chroma_path: Path, cache_dir: Path) -> None:
+    def update_paths(self, docs_path: Path, cache_dir: Path) -> None:
         """Allow runtime overrides of key directories."""
         docs_path = ensure_directory(docs_path.expanduser().resolve())
-        chroma_path = ensure_directory(chroma_path.expanduser().resolve())
         cache_dir = ensure_directory(cache_dir.expanduser().resolve())
 
         self.paths = PathConfig(
             base_dir=self.paths.base_dir,
             data_dir=self.paths.data_dir,
             docs_path=docs_path,
-            chroma_path=chroma_path,
             cache_dir=cache_dir,
             gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
             nodes_cache_path=cache_dir / "nodes_cache.pkl",
             cache_info_path=cache_dir / "nodes_cache_info.json",
             feedback_log=cache_dir / "feedback_log.jsonl",
         )
-        LOGGER.info("Updated runtime paths: docs=%s chroma=%s cache=%s", docs_path, chroma_path, cache_dir)
+        LOGGER.info("Updated runtime paths: docs=%s cache=%s", docs_path, cache_dir)
 
     def update_llama_settings(self, api_key: str) -> None:
         """Allow runtime overrides of LlamaIndex settings."""

@@ -346,7 +346,7 @@ def delete_document_by_source(
     Delete a single document by source filename.
     
     This operation:
-    1. Removes from ChromaDB, nodes, and Gemini cache
+    1. Removes from Qdrant, nodes, and Gemini cache
     2. Deletes source file from disk
     3. Runs sync_library for consistency
     4. Updates app_state
@@ -379,7 +379,7 @@ def delete_document_by_source(
             manager.tenant_id = tenant_id
         manager.nodes = app_state.nodes
         
-        # Remove from database (ChromaDB, nodes, Gemini cache)
+        # Remove from database (Qdrant, nodes, Gemini cache)
         manager._remove_documents({source_filename})
         
         # Delete source file
@@ -512,7 +512,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
     
     This operation:
     1. Deletes all source files from ALL tenant subfolders
-    2. Clears ChromaDB collection
+    2. Clears Qdrant collection
     3. Clears ALL SQLite nodes (all tenants)
     4. Deletes all cache files (including per-tenant JSONLs)
     5. Resets app_state completely

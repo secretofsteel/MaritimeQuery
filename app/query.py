@@ -580,7 +580,7 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
                 embedding_misses,
             )
         if sample_node_ids:
-            LOGGER.info("📋 Sample node IDs (for ChromaDB verification): %s", sample_node_ids[:3])
+            LOGGER.info("📋 Sample node IDs: %s", sample_node_ids[:3])
         # ============ END DIAGNOSTIC ============
         
         # Re-sort by new scores
@@ -592,73 +592,7 @@ def _rescore_cached_chunks(cached_nodes: List[NodeWithScore], query: str, config
         LOGGER.warning("Re-scoring failed, using original chunks: %s", exc)
         return cached_nodes
 
-def diagnose_chroma_embedding_format(app_state: "AppState") -> Dict[str, Any]:
-    """
-    Diagnostic utility to check ChromaDB ID format and embedding availability.
-    Run this once to verify if embeddings can be fetched from ChromaDB.
-    
-    Usage:
-        from app.query import diagnose_chroma_embedding_format
-        result = diagnose_chroma_embedding_format(app_state)
-        print(result)
-    """
-    result = {
-        "success": False,
-        "chroma_sample_ids": [],
-        "llamaindex_sample_ids": [],
-        "ids_match": None,
-        "embeddings_available": False,
-        "error": None,
-    }
-    
-    try:
-        # Get sample node IDs from LlamaIndex
-        if app_state.nodes:
-            for node in app_state.nodes[:3]:
-                node_id = getattr(node, 'node_id', None) or getattr(node, 'id_', None) or getattr(node, 'doc_id', None)
-                if node_id:
-                    result["llamaindex_sample_ids"].append(node_id)
-        
-        # Try to access ChromaDB collection
-        if app_state.index and hasattr(app_state.index, '_vector_store'):
-            vector_store = app_state.index._vector_store
-            if hasattr(vector_store, '_collection'):
-                collection = vector_store._collection
-                
-                # Get sample from ChromaDB
-                sample = collection.get(limit=3, include=["embeddings"])
-                result["chroma_sample_ids"] = sample.get("ids", [])
-                result["embeddings_available"] = bool(sample.get("embeddings") and sample["embeddings"][0])
-                
-                # Check if IDs match
-                if result["llamaindex_sample_ids"] and result["chroma_sample_ids"]:
-                    # Check if any LlamaIndex IDs exist in ChromaDB
-                    chroma_set = set(result["chroma_sample_ids"])
-                    llama_set = set(result["llamaindex_sample_ids"])
-                    result["ids_match"] = bool(chroma_set & llama_set)
-                
-                result["success"] = True
-            else:
-                result["error"] = "ChromaDB collection not accessible via _collection"
-        else:
-            result["error"] = "Vector store not accessible via _vector_store"
-            
-    except Exception as exc:
-        result["error"] = str(exc)
-    
-    # Log results
-    LOGGER.info("=" * 60)
-    LOGGER.info("🔍 EMBEDDING DIAGNOSTIC RESULTS")
-    LOGGER.info("  Success: %s", result["success"])
-    LOGGER.info("  LlamaIndex node IDs: %s", result["llamaindex_sample_ids"])
-    LOGGER.info("  ChromaDB IDs: %s", result["chroma_sample_ids"])
-    LOGGER.info("  IDs match: %s", result["ids_match"])
-    LOGGER.info("  Embeddings available in ChromaDB: %s", result["embeddings_available"])
-    if result["error"]:
-        LOGGER.warning("  Error: %s", result["error"])
-    LOGGER.info("=" * 60)
-    
-    return result
+
 
 
 def _build_conversation_history_context(app_state: AppState) -> str:

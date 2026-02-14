@@ -36,7 +36,7 @@ def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
     Production data contains mixed casing (e.g. ``"Form"`` vs ``"FORM"``,
     ``"Procedure"`` vs ``"PROCEDURE"``).  Rather than requiring a full
     reindex, this helper emits both UPPER and Title variants for each
-    requested type so that DB/ChromaDB filters match regardless of how
+    requested type so that DB/Qdrant filters match regardless of how
     the metadata was stored.
 
     Duplicates are removed to keep filter lists clean.
