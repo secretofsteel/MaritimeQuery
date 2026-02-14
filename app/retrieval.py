@@ -206,7 +206,7 @@ class PgFTSRetriever(BaseRetriever):
                         SELECT
                             n.node_id, n.text, n.metadata,
                             n.doc_id, n.section_id,
-                            ts_rank(n.tsv, to_tsquery('simple', %s)) AS score
+                            ts_rank_cd(n.tsv, to_tsquery('simple', %s)) AS score
                         FROM nodes n
                         WHERE {where_clause}
                         ORDER BY score DESC
