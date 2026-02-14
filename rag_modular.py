@@ -125,9 +125,7 @@ def main() -> None:
             if app_state.ensure_index_loaded():
                 app_state.ensure_nodes_loaded()
                 st.session_state["_loaded_tenant"] = current_tenant
-                from app.database import get_node_count
-                LOGGER.info("Loaded cached index: %d nodes in SQLite (tenant=%s)", 
-                        get_node_count(None), current_tenant)
+                LOGGER.info("Loaded cached index: %d nodes in SQLite (tenant=%s)", )
             else:
                 LOGGER.info("No cached index found")
     

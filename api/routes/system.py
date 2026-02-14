@@ -8,7 +8,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, Request
 
 from api.dependencies import get_current_tenant, get_current_user
-from app.database import get_distinct_doc_count, get_node_count
+from app.nodes import get_distinct_doc_count, get_node_count
 from app.nodes import NodeRepository
 from pydantic import BaseModel
 
@@ -26,6 +26,8 @@ class SystemStatusResponse(BaseModel):
     tenant_id: str                 # Requesting user's tenant
     tenant_nodes: int              # Node count for this tenant only
     tenant_documents: int          # Document count for this tenant only
+    pg_connected: bool = False
+    pg_tables: int = 0
 
 
 # --- Endpoints ---
@@ -68,6 +70,23 @@ async def get_system_status(
     else:
         status_str = "ok"
 
+    from app.pg_database import check_pg_connection, pg_connection
+
+    pg_connected = check_pg_connection()
+    pg_tables = 0
+    if pg_connected:
+        try:
+            with pg_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) AS cnt FROM information_schema.tables "
+                        "WHERE table_schema = 'public'"
+                    )
+                    row = cur.fetchone()
+                    pg_tables = row["cnt"] if row else 0
+        except Exception:
+            pass
+
     return SystemStatusResponse(
         status=status_str,
         index_loaded=has_index,
@@ -78,4 +97,6 @@ async def get_system_status(
         tenant_id=tenant_id,
         tenant_nodes=tenant_nodes,
         tenant_documents=tenant_docs,
+        pg_connected=pg_connected,
+        pg_tables=pg_tables,
     )

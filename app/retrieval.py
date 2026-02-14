@@ -1,22 +1,20 @@
-"""SQLite FTS5-based retriever and tenant-aware vector retriever.
+"""PostgreSQL FTS-based retriever and tenant-aware vector retriever.
 
-Phase 3: FTS5 for keyword search (replaces in-memory BM25)
+Phase 3: PostgreSQL FTS for keyword search (replaces SQLite FTS5)
 Phase 4: Tenant-aware vector retrieval (filters Qdrant by tenant)
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
-
-from .database import db_connection, get_db_path
+from .pg_database import pg_connection
 from .logger import LOGGER
-
 
 
 from qdrant_client import QdrantClient
@@ -26,8 +24,6 @@ from qdrant_client.models import (
     MatchValue,
     MatchAny,
 )
-
-from .vector_store import get_qdrant_client, ensure_collection
 
 
 def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
@@ -88,122 +84,90 @@ def _extract_metadata_from_payload(payload: dict) -> dict:
 
 
 # =============================================================================
-# FTS5 RETRIEVER (Phase 3)
+# POSTGRESQL FTS RETRIEVER
 # =============================================================================
 
-class SQLiteFTS5Retriever(BaseRetriever):
+class PgFTSRetriever(BaseRetriever):
+    """Full-text search retriever using PostgreSQL tsvector/tsquery.
+
+    Replaces SQLiteFTS5Retriever. Uses ts_rank_cd() for scoring
+    with 'simple' text search config (no stemming — preserves
+    maritime acronyms like SOLAS, MARPOL, BWM).
     """
-    Retriever that uses SQLite FTS5 for keyword search.
-    
-    Implements the same interface as BM25Retriever but queries
-    the database instead of searching in-memory nodes.
-    
-    FTS5 uses BM25 ranking by default, so search quality is comparable.
-    """
-    
+
     def __init__(
         self,
         tenant_id: Optional[str] = None,
         similarity_top_k: int = 10,
-        db_path: Optional[Path] = None,
     ):
-        """
-        Initialize the FTS5 retriever.
-        
-        Args:
-            tenant_id: If provided, restrict search to this tenant's nodes + shared.
-                      If None, searches all nodes (for backward compatibility).
-            similarity_top_k: Number of results to return.
-            db_path: Path to SQLite database.
-        """
         super().__init__()
         self.tenant_id = tenant_id
         self.similarity_top_k = similarity_top_k
-        self.db_path = db_path or get_db_path()
-        
+
         LOGGER.debug(
-            "FTS5Retriever initialized: tenant=%s, top_k=%d",
+            "PgFTSRetriever initialized: tenant=%s, top_k=%d",
             tenant_id or "all", similarity_top_k
         )
-    
+
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        """
-        Retrieve nodes matching the query using FTS5.
-        
-        Args:
-            query_bundle: Query containing the search string.
-        
-        Returns:
-            List of NodeWithScore objects ranked by BM25.
-        """
         query_str = query_bundle.query_str
-        
+
         if not query_str.strip():
             return []
-        
-        # Escape special FTS5 characters and prepare query
-        fts_query = self._prepare_fts_query(query_str)
-        LOGGER.info("FTS5 query: %s", fts_query)
-        
+
+        tsquery = self._prepare_tsquery(query_str)
+        LOGGER.info("PG FTS query: %s", tsquery)
+
         try:
-            with db_connection(self.db_path) as conn:
-                if self.tenant_id:
-                    # Tenant-scoped search (includes shared docs)
-                    cursor = conn.execute("""
-                        SELECT 
-                            n.node_id,
-                            n.text,
-                            n.metadata,
-                            n.doc_id,
-                            n.section_id,
-                            bm25(nodes_fts) as score
-                        FROM nodes_fts 
-                        JOIN nodes n ON nodes_fts.rowid = n.rowid
-                        WHERE nodes_fts MATCH ?
-                          AND (n.tenant_id = ? OR n.tenant_id = 'shared')
-                        ORDER BY score
-                        LIMIT ?
-                    """, (fts_query, self.tenant_id, self.similarity_top_k))
-                else:
-                    # Global search (all tenants)
-                    cursor = conn.execute("""
-                        SELECT 
-                            n.node_id,
-                            n.text,
-                            n.metadata,
-                            n.doc_id,
-                            n.section_id,
-                            bm25(nodes_fts) as score
-                        FROM nodes_fts 
-                        JOIN nodes n ON nodes_fts.rowid = n.rowid
-                        WHERE nodes_fts MATCH ?
-                        ORDER BY score
-                        LIMIT ?
-                    """, (fts_query, self.similarity_top_k))
-                
-                rows = cursor.fetchall()
-            
-            LOGGER.info("FTS5 returned %d results", len(rows))
-            
+            with pg_connection() as conn:
+                with conn.cursor() as cur:
+                    if self.tenant_id:
+                        cur.execute("""
+                            SELECT
+                                n.node_id,
+                                n.text,
+                                n.metadata,
+                                n.doc_id,
+                                n.section_id,
+                                ts_rank_cd(n.tsv, to_tsquery('simple', %s)) AS score
+                            FROM nodes n
+                            WHERE n.tsv @@ to_tsquery('simple', %s)
+                              AND (n.tenant_id = %s OR n.tenant_id = 'shared')
+                            ORDER BY score DESC
+                            LIMIT %s
+                        """, (tsquery, tsquery, self.tenant_id, self.similarity_top_k))
+                    else:
+                        cur.execute("""
+                            SELECT
+                                n.node_id,
+                                n.text,
+                                n.metadata,
+                                n.doc_id,
+                                n.section_id,
+                                ts_rank_cd(n.tsv, to_tsquery('simple', %s)) AS score
+                            FROM nodes n
+                            WHERE n.tsv @@ to_tsquery('simple', %s)
+                            ORDER BY score DESC
+                            LIMIT %s
+                        """, (tsquery, tsquery, self.similarity_top_k))
+
+                    rows = cur.fetchall()
+
+            LOGGER.info("PG FTS returned %d results", len(rows))
+
             results = []
             for row in rows:
                 node = self._row_to_node(row)
-                # FTS5 bm25() returns negative scores (lower = better)
-                # Normalize to positive (higher = better) for consistency
-                score = -row["score"] if row["score"] else 0.0
+                # ts_rank_cd returns positive scores (higher = better)
+                score = float(row["score"]) if row["score"] else 0.0
                 results.append(NodeWithScore(node=node, score=score))
-            
-            LOGGER.debug(
-                "FTS5 search '%s': %d results (tenant=%s)",
-                query_str[:50], len(results), self.tenant_id or "all"
-            )
-            
+
             return results
-            
+
         except Exception as exc:
-            LOGGER.error("FTS5 search failed: %s", exc)
+            LOGGER.error("PG FTS search failed: %s", exc)
             return []
-    
+
     def retrieve_filtered(
         self,
         query_str: str,
@@ -211,83 +175,62 @@ class SQLiteFTS5Retriever(BaseRetriever):
         title_filter: Optional[str] = None,
         top_k: Optional[int] = None,
     ) -> List[NodeWithScore]:
-        """Retrieve with optional metadata filters.
-
-        Used by the orchestrator's FilteredRetriever for source-specific
-        retrieval.  Falls back to standard behaviour when no filters are
-        provided.
-
-        Args:
-            query_str: Raw search query.
-            doc_type_filter: e.g. ``["REGULATION", "VETTING"]``.
-            title_filter: Substring to match in the document title
-                          (applied post-retrieval on metadata).
-            top_k: Override the instance's ``similarity_top_k``.
-
-        Returns:
-            Filtered list of ``NodeWithScore`` ranked by BM25.
-        """
         if not query_str.strip():
             return []
 
         effective_top_k = top_k or self.similarity_top_k
-
-        # When title filtering is active, retrieve more to compensate for
-        # post-retrieval filtering losses.
         retrieval_top_k = effective_top_k * 2 if title_filter else effective_top_k
 
-        fts_query = self._prepare_fts_query(query_str)
+        tsquery = self._prepare_tsquery(query_str)
 
         try:
-            with db_connection(self.db_path) as conn:
-                # ---- build query dynamically ----
-                conditions = ["nodes_fts MATCH ?"]
-                params: list = [fts_query]
+            with pg_connection() as conn:
+                with conn.cursor() as cur:
+                    # Build dynamic query
+                    conditions = ["n.tsv @@ to_tsquery('simple', %s)"]
+                    params: list = [tsquery]
 
-                if self.tenant_id:
-                    conditions.append("(n.tenant_id = ? OR n.tenant_id = 'shared')")
-                    params.append(self.tenant_id)
+                    if self.tenant_id:
+                        conditions.append("(n.tenant_id = %s OR n.tenant_id = 'shared')")
+                        params.append(self.tenant_id)
 
-                if doc_type_filter:
-                    expanded = _expand_doc_type_case(doc_type_filter)
-                    placeholders = ", ".join("?" for _ in expanded)
-                    conditions.append(
-                        f"json_extract(n.metadata, '$.doc_type') IN ({placeholders})"
-                    )
-                    params.extend(expanded)
+                    if doc_type_filter:
+                        expanded = _expand_doc_type_case(doc_type_filter)
+                        conditions.append("n.metadata->>'doc_type' = ANY(%s)")
+                        params.append(expanded)
 
-                where_clause = " AND ".join(conditions)
-                params.append(retrieval_top_k)
+                    where_clause = " AND ".join(conditions)
 
-                sql = f"""
-                    SELECT
-                        n.node_id, n.text, n.metadata,
-                        n.doc_id, n.section_id,
-                        bm25(nodes_fts) AS score
-                    FROM nodes_fts
-                    JOIN nodes n ON nodes_fts.rowid = n.rowid
-                    WHERE {where_clause}
-                    ORDER BY score
-                    LIMIT ?
-                """
+                    # Params in SQL appearance order:
+                    # 1. ts_rank_cd in SELECT, 2. WHERE conditions, 3. LIMIT
+                    all_params = [tsquery] + params + [retrieval_top_k]
 
-                cursor = conn.execute(sql, params)
-                rows = cursor.fetchall()
+                    sql = f"""
+                        SELECT
+                            n.node_id, n.text, n.metadata,
+                            n.doc_id, n.section_id,
+                            ts_rank_cd(n.tsv, to_tsquery('simple', %s)) AS score
+                        FROM nodes n
+                        WHERE {where_clause}
+                        ORDER BY score DESC
+                        LIMIT %s
+                    """
+
+                    cur.execute(sql, all_params)
+                    rows = cur.fetchall()
 
             LOGGER.info(
-                "FTS5 filtered: %d results (doc_type=%s, title=%s)",
-                len(rows),
-                doc_type_filter,
-                title_filter,
+                "PG FTS filtered: %d results (doc_type=%s, title=%s)",
+                len(rows), doc_type_filter, title_filter,
             )
 
             results = []
             for row in rows:
                 node = self._row_to_node(row)
-                score = -row["score"] if row["score"] else 0.0
+                score = float(row["score"]) if row["score"] else 0.0
                 results.append(NodeWithScore(node=node, score=score))
 
-            # Post-retrieval title filter
+            # Post-retrieval title filter (same as before)
             if title_filter:
                 before = len(results)
                 pattern = title_filter.upper()
@@ -303,67 +246,48 @@ class SQLiteFTS5Retriever(BaseRetriever):
             return results[:effective_top_k]
 
         except Exception as exc:
-            LOGGER.error("FTS5 filtered search failed: %s", exc)
+            LOGGER.error("PG FTS filtered search failed: %s", exc)
             return []
 
-    def _prepare_fts_query(self, query: str) -> str:
+    def _prepare_tsquery(self, query: str) -> str:
+        """Prepare query string for PostgreSQL to_tsquery().
+
+        Splits into words, joins with | (OR) for broad matching.
+        Uses 'simple' config — no stemming, preserves acronyms.
+
+        Returns a string safe for to_tsquery('simple', ...).
         """
-        Prepare query string for FTS5 MATCH.
-        
-        FTS5 has special syntax characters that need escaping.
-        We use a simple approach: split into words, quote each.
-        
-        Args:
-            query: Raw query string
-        
-        Returns:
-            FTS5-safe query string
-        """
-        # Remove special FTS5 operators that could cause syntax errors
-        # Keep it simple: split words, join with OR for broader matching
         words = query.strip().split()
-        
+
         if not words:
-            return '""'  # Empty query
-        
-        # Escape each word by wrapping in quotes, join with OR
-        # This matches documents containing ANY of the words
-        escaped_words = []
+            return ""
+
+        # Clean each word: remove characters that break tsquery syntax
+        cleaned = []
         for word in words:
-            # Remove any quotes from the word itself
-            clean_word = word.replace('"', '').replace("'", "")
-            if clean_word:
-                escaped_words.append(f'"{clean_word}"')
-        
-        if not escaped_words:
-            return '""'
-        
-        # Use OR for broader matching (same behavior as typical BM25)
-        return " OR ".join(escaped_words)
-    
-    def _row_to_node(self, row: Any) -> TextNode:
-        """
-        Convert a database row to a TextNode.
-        
-        Args:
-            row: SQLite Row object
-        
-        Returns:
-            TextNode with metadata restored
-        """
-        # Parse metadata JSON
-        metadata = {}
-        if row["metadata"]:
+            # Strip anything that isn't alphanumeric, hyphen, or period
+            clean = "".join(c for c in word if c.isalnum() or c in "-.")
+            if clean:
+                cleaned.append(clean)
+
+        if not cleaned:
+            return ""
+
+        # Join with | (OR) — matches documents containing ANY term
+        return " | ".join(cleaned)
+
+    def _row_to_node(self, row) -> TextNode:
+        metadata = row["metadata"] or {}
+        if isinstance(metadata, str):
             try:
-                metadata = json.loads(row["metadata"])
+                metadata = json.loads(metadata)
             except json.JSONDecodeError:
-                LOGGER.warning("Failed to parse metadata for node %s", row["node_id"])
-        
-        # Ensure core fields are in metadata
+                metadata = {}
+
         metadata.setdefault("source", row["doc_id"])
-        if row["section_id"]:
+        if row.get("section_id"):
             metadata.setdefault("section_id", row["section_id"])
-        
+
         return TextNode(
             id_=row["node_id"],
             text=row["text"],
@@ -562,102 +486,52 @@ class TenantAwareVectorRetriever(BaseRetriever):
 
 
 # =============================================================================
-# SQLITE NODE LOADER (Utility)
+# POSTGRESQL NODE LOADER (Utility)
 # =============================================================================
 
-class SQLiteNodeLoader:
+class PgNodeLoader:
+    """Load nodes from PostgreSQL for operations that need full node sets.
+
+    Use sparingly — prefer NodeRepository for scoped queries.
     """
-    Helper class for loading nodes from SQLite.
-    
-    Used for operations that need full node objects (like hierarchical retrieval)
-    but don't need the full in-memory cache.
-    """
-    
-    def __init__(self, tenant_id: Optional[str] = None, db_path: Optional[Path] = None):
+
+    def __init__(self, tenant_id: Optional[str] = None):
         self.tenant_id = tenant_id
-        self.db_path = db_path or get_db_path()
-    
-    def get_node_by_id(self, node_id: str) -> Optional[TextNode]:
-        """Load a single node by ID."""
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT node_id, text, metadata, doc_id, section_id
-                FROM nodes
-                WHERE node_id = ?
-            """, (node_id,))
-            row = cursor.fetchone()
-        
-        if row:
-            return self._row_to_node(row)
-        return None
-    
-    def get_nodes_by_doc(self, doc_id: str) -> List[TextNode]:
-        """Load all nodes for a document."""
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT node_id, text, metadata, doc_id, section_id
-                FROM nodes
-                WHERE doc_id = ?
-                ORDER BY node_id
-            """, (doc_id,))
-            rows = cursor.fetchall()
-        
+
+    def load_all_nodes(self) -> List[TextNode]:
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                if self.tenant_id:
+                    cur.execute("""
+                        SELECT node_id, text, metadata, doc_id, section_id
+                        FROM nodes
+                        WHERE tenant_id = %s OR tenant_id = 'shared'
+                        ORDER BY doc_id, node_id
+                    """, (self.tenant_id,))
+                else:
+                    cur.execute("""
+                        SELECT node_id, text, metadata, doc_id, section_id
+                        FROM nodes
+                        ORDER BY doc_id, node_id
+                    """)
+                rows = cur.fetchall()
+
+        LOGGER.info("Loaded %d nodes from PostgreSQL", len(rows))
         return [self._row_to_node(row) for row in rows]
-    
-    def get_nodes_by_section(self, doc_id: str, section_id: str) -> List[TextNode]:
-        """Load nodes for a specific section (for hierarchical retrieval)."""
-        with db_connection(self.db_path) as conn:
-            # Match section_id prefix for hierarchical sections
-            # e.g., section_id "3.1" matches "3.1", "3.1.1", "3.1.2", etc.
-            cursor = conn.execute("""
-                SELECT node_id, text, metadata, doc_id, section_id
-                FROM nodes
-                WHERE doc_id = ?
-                  AND (section_id = ? OR section_id LIKE ?)
-                ORDER BY section_id, node_id
-            """, (doc_id, section_id, f"{section_id}.%"))
-            rows = cursor.fetchall()
-        
-        return [self._row_to_node(row) for row in rows]
-    
-    def get_all_nodes(self) -> List[TextNode]:
-        """
-        Load all nodes for the tenant.
-        
-        Use sparingly - for operations that truly need all nodes.
-        """
-        with db_connection(self.db_path) as conn:
-            if self.tenant_id:
-                cursor = conn.execute("""
-                    SELECT node_id, text, metadata, doc_id, section_id
-                    FROM nodes
-                    WHERE tenant_id = ? OR tenant_id = 'shared'
-                    ORDER BY doc_id, node_id
-                """, (self.tenant_id,))
-            else:
-                cursor = conn.execute("""
-                    SELECT node_id, text, metadata, doc_id, section_id
-                    FROM nodes
-                    ORDER BY doc_id, node_id
-                """)
-            rows = cursor.fetchall()
-        
-        LOGGER.info("Loaded %d nodes from SQLite", len(rows))
-        return [self._row_to_node(row) for row in rows]
-    
-    def _row_to_node(self, row: Any) -> TextNode:
+
+    def _row_to_node(self, row) -> TextNode:
         """Convert database row to TextNode."""
-        metadata = {}
-        if row["metadata"]:
+        metadata = row["metadata"] or {}
+        if isinstance(metadata, str):
             try:
-                metadata = json.loads(row["metadata"])
+                metadata = json.loads(metadata)
             except json.JSONDecodeError:
-                pass
-        
+                metadata = {}
+
         metadata.setdefault("source", row["doc_id"])
-        if row["section_id"]:
+        if row.get("section_id"):
             metadata.setdefault("section_id", row["section_id"])
-        
+
         return TextNode(
             id_=row["node_id"],
             text=row["text"],
@@ -666,7 +540,7 @@ class SQLiteNodeLoader:
 
 
 __all__ = [
-    "SQLiteFTS5Retriever", 
+    "PgFTSRetriever",
     "TenantAwareVectorRetriever",
-    "SQLiteNodeLoader"
+    "PgNodeLoader",
 ]

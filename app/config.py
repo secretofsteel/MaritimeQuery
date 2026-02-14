@@ -43,7 +43,6 @@ class PathConfig:
     docs_path: Path
     cache_dir: Path
     gemini_json_cache: Path
-    nodes_cache_path: Path
     cache_info_path: Path
     feedback_log: Path
 
@@ -60,7 +59,6 @@ def build_paths(base_dir: Optional[Path] = None) -> PathConfig:
         docs_path=docs_path,
         cache_dir=cache_dir,
         gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
-        nodes_cache_path=cache_dir / "nodes_cache.pkl",
         cache_info_path=cache_dir / "nodes_cache_info.json",
         feedback_log=cache_dir / "feedback_log.jsonl",
     )
@@ -100,6 +98,10 @@ class AppConfig:
         # Read from environment, with localhost defaults for dev
         self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
         self.qdrant_collection = os.getenv("QDRANT_COLLECTION", "maritime_rag")
+        self.database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://maritime:maritime_dev@localhost:5432/maritime_rag"
+        )
 
         self.paths = build_paths()
         configure_llama_settings(api_key)
@@ -131,7 +133,6 @@ class AppConfig:
             docs_path=docs_path,
             cache_dir=cache_dir,
             gemini_json_cache=cache_dir / "gemini_extract_cache.jsonl",
-            nodes_cache_path=cache_dir / "nodes_cache.pkl",
             cache_info_path=cache_dir / "nodes_cache_info.json",
             feedback_log=cache_dir / "feedback_log.jsonl",
         )

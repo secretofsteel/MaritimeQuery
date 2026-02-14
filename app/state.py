@@ -22,9 +22,8 @@ from .indexing import IncrementalIndexManager, load_cached_nodes_and_index
 from .logger import LOGGER
 from .sessions import SessionManager
 from .session_uploads import SessionUploadManager, SessionUploadChunk
-from .retrieval import SQLiteFTS5Retriever, SQLiteNodeLoader, TenantAwareVectorRetriever
-from .nodes import NodeRepository
-from .database import get_node_count
+from .retrieval import PgFTSRetriever, PgNodeLoader, TenantAwareVectorRetriever
+from .nodes import get_node_count, NodeRepository
 
 
 
@@ -34,9 +33,10 @@ class AppState:
     # Core state
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
-    vector_retriever: Optional[VectorIndexRetriever] = None
-    fts5_retriever: Optional[SQLiteFTS5Retriever] = None
-    bm25_retriever: Optional[Any] = None
+    # Retrievers
+    fts5_retriever: Optional[PgFTSRetriever] = None
+    vector_retriever: Optional[TenantAwareVectorRetriever] = None
+    bm25_retriever: Optional[PgFTSRetriever] = None  # Alias for backward compatibility
     query_history: List[Dict] = field(default_factory=list)
     history_log: List[Dict] = field(default_factory=list)
     last_result: Optional[Dict] = None
@@ -69,7 +69,7 @@ class AppState:
     _index_load_attempted: bool = field(default=False, init=False)
 
     def ensure_nodes_loaded(self) -> List[Document]:
-        """Load nodes from SQLite if not already in memory."""
+        """Load nodes from PostgreSQL if not already in memory."""
         from .nodes import NodeRepository
 
         if not self.nodes:
@@ -105,7 +105,7 @@ class AppState:
             
             if index is not None:
                 self.index = index
-                # Don't store nodes - FTS5 queries SQLite directly
+                # Don't store nodes - FTS queries PostgreSQL directly
                 LOGGER.info("Loaded Qdrant-backed index")
             else:
                 LOGGER.info("No cached index found")
@@ -121,7 +121,7 @@ class AppState:
         """Ensure retriever instances are ready.
 
         Creates:
-        - FTS5Retriever — queries SQLite directly (tenant-aware)
+        - FTS5Retriever — queries PostgreSQL directly (tenant-aware)
         - TenantAwareVectorRetriever — queries Qdrant with tenant filter
         """
         from .config import AppConfig
@@ -129,13 +129,13 @@ class AppState:
 
         tenant_id = self.tenant_id
 
-        # FTS5 retriever (tenant-aware keyword search)
+        # 2. FTS5 (PostgreSQL) Retriever
         if self.fts5_retriever is None:
-            self.fts5_retriever = SQLiteFTS5Retriever(
+            self.fts5_retriever = PgFTSRetriever(
                 tenant_id=tenant_id,
                 similarity_top_k=20,
             )
-            LOGGER.debug("Created FTS5Retriever for tenant %s", tenant_id)
+            LOGGER.debug("Created PgFTSRetriever for tenant %s", tenant_id)
 
         # Point bm25_retriever to fts5 for compatibility
         self.bm25_retriever = self.fts5_retriever
@@ -185,7 +185,6 @@ class AppState:
             manager = IncrementalIndexManager(
                 docs_path=config.docs_path_for(tenant_id),
                 gemini_cache_path=config.gemini_cache_for(tenant_id),
-                nodes_cache_path=paths.nodes_cache_path,
                 cache_info_path=paths.cache_info_path,
                 tenant_id=tenant_id,
             )
@@ -688,14 +687,14 @@ class AppState:
         
         Note: This still loads nodes into memory for the map.
         Consider refactoring hierarchical retrieval to use
-        SQLiteNodeLoader.get_node_by_id() instead for better scaling.
+        NodeRepository.get_node_by_id() instead for better scaling.
         """
         if self._node_map_cache is None:
             from llama_index.core.schema import NodeWithScore
 
             tenant_id = self.tenant_id
             
-            # Load nodes from SQLite
+            # Load nodes from PostgreSQL
             repo = NodeRepository(tenant_id=tenant_id)
             nodes = repo.get_all_nodes()
             

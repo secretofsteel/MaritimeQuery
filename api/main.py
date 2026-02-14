@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from app.config import AppConfig
 from app.indexing import load_cached_nodes_and_index
-from app.database import get_node_count
+from app.nodes import get_node_count
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,18 @@ async def lifespan(app: FastAPI):
     # 1. Config singleton — loads API keys, configures embedding model
     config = AppConfig.get()
     logger.info("Config loaded: base_dir=%s", config.paths.base_dir)
+
+    # 5. Initialize PostgreSQL connection pool
+    pg_pool = None
+    try:
+        from app.pg_database import init_pg_pool, check_pg_connection
+        pg_pool = init_pg_pool(config.database_url)
+        pg_ok = check_pg_connection()
+        logger.info("PostgreSQL connected: %s", "OK" if pg_ok else "FAILED")
+    except Exception as exc:
+        logger.error("Failed to initialize PostgreSQL pool: %s", exc)
+
+    app.state.pg_pool = pg_pool
 
     # 2. Connect to Qdrant index
     nodes, index = load_cached_nodes_and_index()
@@ -69,6 +81,8 @@ async def lifespan(app: FastAPI):
     yield  # --- Application runs ---
 
     # --- Shutdown ---
+    from app.pg_database import close_pg_pool
+    close_pg_pool()
     logger.info("Shutting down Maritime RAG API.")
 
 

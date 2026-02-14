@@ -32,3 +32,8 @@ PyPDF2
 pymupdf-layout
 pymupdf4llm
 
+
+#PostgreSQL and migrations
+psycopg[binary]>=3.1.0
+psycopg-pool>=3.1.0
+alembic>=1.13.0

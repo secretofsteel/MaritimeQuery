@@ -84,22 +84,24 @@ class BulkUploadResult:
 
 def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     """
-    Verify and repair consistency between SQLite and Qdrant.
+    Execute full sync of node counts between PostgreSQL and Qdrant.
     
-    Qdrant is source of truth for vectors. SQLite mirrors text/metadata.
-    Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
+    Qdrant is source of truth for vectors. PostgreSQL stores text/metadata.
+    Compares TOTAL counts across all tenants, then rebuilds PostgreSQL if needed.
     """
     
-    from .database import rebuild_fts_index, get_node_count, db_connection
-    from .nodes import NodeRepository, bulk_insert_nodes
+    from .pg_database import pg_connection
+    from .nodes import NodeRepository, bulk_insert_nodes, rebuild_fts_index, get_node_count
     from .indexing import clear_all_nodes_for_rebuild
     
     config = AppConfig.get()
     
     try:
-        # Get TOTAL SQLite count (all tenants)
-        with db_connection() as conn:
-            sqlite_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        # Get TOTAL PostgreSQL count (all tenants)
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM nodes")
+                pg_count = cur.fetchone()[0]
         
         # Get TOTAL Qdrant count
         qdrant_client = get_qdrant_client()
@@ -107,21 +109,21 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         collection_info = qdrant_client.get_collection(collection_name)
         qdrant_count = collection_info.points_count
         
-        LOGGER.info("Sync check: SQLite=%d (all tenants), Qdrant=%d", sqlite_count, qdrant_count)
+        LOGGER.info("Sync check: PG=%d (all tenants), Qdrant=%d", pg_count, qdrant_count)
         
         # If counts match (within tolerance), just rebuild FTS
-        if abs(sqlite_count - qdrant_count) <= 5:
+        if abs(pg_count - qdrant_count) <= 5:
             rebuild_fts_index()
             return SyncMemoryResult(
-                old_count=sqlite_count,
-                new_count=sqlite_count,
+                old_count=pg_count,
+                new_count=pg_count,
                 removed=0,
                 success=True
             )
         
-        # Counts don't match — rebuild SQLite from Qdrant
-        LOGGER.warning("Count mismatch (%d vs %d) — rebuilding SQLite from Qdrant",
-                       sqlite_count, qdrant_count)
+        # Counts don't match — rebuild PostgreSQL from Qdrant
+        LOGGER.warning("Count mismatch (%d vs %d) — rebuilding PostgreSQL from Qdrant",
+                       pg_count, qdrant_count)
         
         # Fetch everything from Qdrant
         all_points = []
@@ -139,7 +141,7 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
                 break
             offset = next_offset
         
-        # Clear ALL SQLite nodes
+        # Clear ALL PostgreSQL nodes
         clear_all_nodes_for_rebuild()
         
         # Rebuild with correct tenant_id per node
@@ -184,12 +186,12 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         app_state.fts5_retriever = None
         app_state.ensure_retrievers()
         
-        LOGGER.info("Synced SQLite to Qdrant: %d → %d nodes", sqlite_count, total_inserted)
+        LOGGER.info("Synced PostgreSQL to Qdrant: %d → %d nodes", pg_count, total_inserted)
         
         return SyncMemoryResult(
-            old_count=sqlite_count,
+            old_count=pg_count,
             new_count=total_inserted,
-            removed=sqlite_count - total_inserted if sqlite_count > total_inserted else 0,
+            removed=pg_count - total_inserted if pg_count > total_inserted else 0,
             success=True
         )
         
@@ -564,7 +566,6 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
         
         # Delete other cache files
         other_caches = [
-            config.paths.nodes_cache_path,   # Legacy pickle
             config.paths.cache_info_path,
             cache_dir / "sync_cache.json",   # Legacy single sync cache
         ]

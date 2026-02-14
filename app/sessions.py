@@ -1,6 +1,6 @@
-"""Session management for chat history using SQLite storage.
+"""Session management for chat history using PostgreSQL storage.
 
-This module replaces the JSONL-based session storage with SQLite,
+This module replaces the SQLite-based session storage with PostgreSQL,
 enabling proper multi-tenancy and better data integrity.
 
 The public interface remains identical to the original implementation,
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from google.genai import types
 
 from .config import AppConfig
-from .database import db_connection, get_db_path, init_db
+from .pg_database import pg_connection
 from .logger import LOGGER
 
 
@@ -58,14 +58,20 @@ class Session:
     
     @classmethod
     def from_row(cls, row) -> "Session":
-        """Create Session from SQLite row."""
+        """Create Session from database row (SQLite or PostgreSQL)."""
+        created_at = row["created_at"]
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        last_active = row["last_active"]
+        if isinstance(last_active, str):
+            last_active = datetime.fromisoformat(last_active)
         return cls(
             session_id=row["session_id"],
             title=row["title"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            last_active=datetime.fromisoformat(row["last_active"]),
+            created_at=created_at,
+            last_active=last_active,
             message_count=row["message_count"],
-            tenant_id=row["tenant_id"],
+            tenant_id=row.get("tenant_id") if isinstance(row, dict) else row["tenant_id"],
         )
 
 
@@ -98,46 +104,49 @@ class Message:
     
     @classmethod
     def from_row(cls, row) -> "Message":
-        """Create Message from SQLite row."""
-        metadata = {}
-        if row["metadata"]:
+        """Create Message from database row (SQLite or PostgreSQL)."""
+        # Handle metadata: PG JSONB returns dict, SQLite returns JSON string
+        metadata = row["metadata"]
+        if metadata is None:
+            metadata = {}
+        elif isinstance(metadata, str):
             try:
-                metadata = json.loads(row["metadata"])
+                metadata = json.loads(metadata)
             except json.JSONDecodeError:
                 LOGGER.warning("Failed to parse message metadata")
-        
+                metadata = {}
+        # else: already a dict (PG JSONB)
+
+        # Handle timestamp: PG returns datetime, SQLite returns string
+        timestamp = row["timestamp"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+
         return cls(
             role=row["role"],
             content=row["content"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
+            timestamp=timestamp,
             metadata=metadata,
         )
 
 
 class SessionManager:
     """
-    Manages chat sessions using SQLite storage.
-    
+    Manages chat sessions using PostgreSQL storage.
+
     All operations are scoped to the tenant_id provided at initialization,
     ensuring complete data isolation between tenants.
     """
-    
-    def __init__(self, tenant_id: str, db_path: Optional[Path] = None):
+
+    def __init__(self, tenant_id: str):
         """
         Initialize session manager for a specific tenant.
-        
+
         Args:
             tenant_id: Tenant identifier. All queries are scoped to this tenant.
-            db_path: Path to SQLite database. Uses default if None.
         """
         self.tenant_id = tenant_id
-        self.db_path = db_path or get_db_path()
-        
-        # Ensure database is initialized
-        init_db(self.db_path)
-        
-        LOGGER.debug("SessionManager initialized for tenant '%s': %s", 
-                     tenant_id, self.db_path)
+        LOGGER.debug("SessionManager initialized for tenant '%s' (PostgreSQL)", tenant_id)
     
     def create_session(self, title: str = "New Chat") -> str:
         """
@@ -152,14 +161,15 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
         
-        with db_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO sessions (session_id, tenant_id, title, created_at, last_active, message_count)
-                VALUES (?, ?, ?, ?, ?, 0)
-                """,
-                (session_id, self.tenant_id, title, now, now)
-            )
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sessions (session_id, tenant_id, title, created_at, last_active, message_count)
+                    VALUES (%s, %s, %s, %s, %s, 0)
+                    """,
+                    (session_id, self.tenant_id, title, now, now)
+                )
         
         LOGGER.info("Created session %s for tenant %s", session_id, self.tenant_id)
         return session_id
@@ -174,19 +184,22 @@ class SessionManager:
         Returns:
             List of Session objects
         """
-        with db_connection(self.db_path) as conn:
-            query = """
-                SELECT session_id, tenant_id, title, created_at, last_active, message_count
-                FROM sessions
-                WHERE tenant_id = ?
-                ORDER BY last_active DESC
-            """
-            
-            if limit:
-                query += f" LIMIT {int(limit)}"
-            
-            cursor = conn.execute(query, (self.tenant_id,))
-            rows = cursor.fetchall()
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT session_id, tenant_id, title, created_at, last_active, message_count
+                    FROM sessions
+                    WHERE tenant_id = %s
+                    ORDER BY last_active DESC
+                """
+                params = [self.tenant_id]
+                
+                if limit:
+                    query += " LIMIT %s"
+                    params.append(limit)
+                
+                cur.execute(query, tuple(params))
+                rows = cur.fetchall()
         
         return [Session.from_row(row) for row in rows]
     
@@ -200,16 +213,17 @@ class SessionManager:
         Returns:
             Session object or None if not found (or wrong tenant)
         """
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                SELECT session_id, tenant_id, title, created_at, last_active, message_count
-                FROM sessions
-                WHERE session_id = ? AND tenant_id = ?
-                """,
-                (session_id, self.tenant_id)
-            )
-            row = cursor.fetchone()
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT session_id, tenant_id, title, created_at, last_active, message_count
+                    FROM sessions
+                    WHERE session_id = %s AND tenant_id = %s
+                    """,
+                    (session_id, self.tenant_id)
+                )
+                row = cur.fetchone()
         
         if row:
             return Session.from_row(row)
@@ -231,17 +245,18 @@ class SessionManager:
             LOGGER.warning("Session not found or access denied: %s", session_id)
             return []
         
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                SELECT role, content, timestamp, metadata
-                FROM messages
-                WHERE session_id = ?
-                ORDER BY id ASC
-                """,
-                (session_id,)
-            )
-            rows = cursor.fetchall()
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content, timestamp, metadata
+                    FROM messages
+                    WHERE session_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (session_id,)
+                )
+                rows = cur.fetchall()
         
         return [Message.from_row(row) for row in rows]
     
@@ -268,27 +283,29 @@ class SessionManager:
             return
         
         now = datetime.now().isoformat()
+        # Ensure metadata is JSON serializable
         metadata_json = json.dumps(metadata) if metadata else None
         
-        with db_connection(self.db_path) as conn:
-            # Insert message
-            conn.execute(
-                """
-                INSERT INTO messages (session_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (session_id, role, content, now, metadata_json)
-            )
-            
-            # Update session metadata
-            conn.execute(
-                """
-                UPDATE sessions 
-                SET last_active = ?, message_count = message_count + 1
-                WHERE session_id = ? AND tenant_id = ?
-                """,
-                (now, session_id, self.tenant_id)
-            )
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                # Insert message
+                cur.execute(
+                    """
+                    INSERT INTO messages (session_id, role, content, timestamp, metadata)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (session_id, role, content, now, metadata_json)
+                )
+                
+                # Update session metadata
+                cur.execute(
+                    """
+                    UPDATE sessions 
+                    SET last_active = %s, message_count = message_count + 1
+                    WHERE session_id = %s AND tenant_id = %s
+                    """,
+                    (now, session_id, self.tenant_id)
+                )
         
         LOGGER.debug("Added %s message to session %s", role, session_id)
     
@@ -300,20 +317,21 @@ class SessionManager:
             session_id: Session identifier
             title: New title
         """
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE sessions 
-                SET title = ?
-                WHERE session_id = ? AND tenant_id = ?
-                """,
-                (title, session_id, self.tenant_id)
-            )
-            
-            if cursor.rowcount == 0:
-                LOGGER.warning("Failed to update title: session %s not found", session_id)
-            else:
-                LOGGER.debug("Updated title for session %s: %s", session_id, title)
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE sessions 
+                    SET title = %s
+                    WHERE session_id = %s AND tenant_id = %s
+                    """,
+                    (title, session_id, self.tenant_id)
+                )
+                
+                if cur.rowcount == 0:
+                    LOGGER.warning("Failed to update title: session %s not found", session_id)
+                else:
+                    LOGGER.debug("Updated title for session %s: %s", session_id, title)
     
     def delete_session(self, session_id: str) -> bool:
         """
@@ -325,17 +343,18 @@ class SessionManager:
         Returns:
             True if session was deleted, False if not found
         """
-        with db_connection(self.db_path) as conn:
-            # Messages are deleted automatically via ON DELETE CASCADE
-            cursor = conn.execute(
-                """
-                DELETE FROM sessions
-                WHERE session_id = ? AND tenant_id = ?
-                """,
-                (session_id, self.tenant_id)
-            )
-            
-            deleted = cursor.rowcount > 0
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                # Messages are deleted automatically via ON DELETE CASCADE
+                cur.execute(
+                    """
+                    DELETE FROM sessions
+                    WHERE session_id = %s AND tenant_id = %s
+                    """,
+                    (session_id, self.tenant_id)
+                )
+                
+                deleted = cur.rowcount > 0
         
         if deleted:
             LOGGER.info("Deleted session %s", session_id)
@@ -413,19 +432,21 @@ Title:"""
         Returns:
             Number of sessions deleted
         """
-        with db_connection(self.db_path) as conn:
-            # Get count first
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
-                (self.tenant_id,)
-            )
-            count = cursor.fetchone()[0]
-            
-            # Delete all (messages cascade)
-            conn.execute(
-                "DELETE FROM sessions WHERE tenant_id = ?",
-                (self.tenant_id,)
-            )
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                # Get count first
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE tenant_id = %s",
+                    (self.tenant_id,)
+                )
+                count_row = cur.fetchone()
+                count = count_row["count"] if count_row else 0
+                
+                # Delete all (messages cascade)
+                cur.execute(
+                    "DELETE FROM sessions WHERE tenant_id = %s",
+                    (self.tenant_id,)
+                )
         
         LOGGER.info("Cleared all sessions for tenant %s: %d deleted", 
                     self.tenant_id, count)
@@ -438,12 +459,14 @@ Title:"""
         Returns:
             Number of sessions
         """
-        with db_connection(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE tenant_id = ?",
-                (self.tenant_id,)
-            )
-            return cursor.fetchone()[0]
+        with pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE tenant_id = %s",
+                    (self.tenant_id,)
+                )
+                count_row = cur.fetchone()
+                return count_row["count"] if count_row else 0
 
 
 __all__ = ["Session", "Message", "SessionManager"]

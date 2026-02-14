@@ -40,18 +40,18 @@ from .processing_status import (
     StageStatus,
     save_processing_report,
 )
-from .nodes import NodeRepository, bulk_insert_nodes
-from .database import init_db, rebuild_fts_index
+from .nodes import bulk_insert_nodes, get_node_count, rebuild_fts_index, NodeRepository
 
 def clear_all_nodes_for_rebuild() -> int:
-    """Clear ALL nodes from SQLite regardless of tenant."""
-    from .database import db_connection
+    """Clear ALL nodes from PostgreSQL regardless of tenant."""
+    from .pg_database import pg_connection
     
-    with db_connection() as conn:
-        cursor = conn.execute("DELETE FROM nodes")
-        deleted = cursor.rowcount
+    with pg_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM nodes")
+            deleted = cur.rowcount
     
-    LOGGER.warning("Cleared ALL %d nodes from SQLite for rebuild", deleted)
+    LOGGER.warning("Cleared ALL %d nodes from PostgreSQL for rebuild", deleted)
     return deleted
 
 def chunk_documents(documents: Iterable[Document], assign_section_ids: bool = True) -> List[Document]:
@@ -113,7 +113,7 @@ def cache_nodes(
     skip_clear: bool = False
 ) -> None:
     """
-    Save nodes to SQLite database (replaces pickle storage).
+    Save nodes to PostgreSQL database.
     
     Also saves cache info JSON for compatibility with existing code.
     
@@ -125,10 +125,9 @@ def cache_nodes(
         tenant_id: Tenant identifier for multi-tenancy
     """
     from .nodes import bulk_insert_nodes
-    from .database import init_db, rebuild_fts_index
     
     # Ensure database is initialized
-    init_db()
+    # init_db()
     
     # Clear existing nodes for this tenant and insert new ones
     if not skip_clear:
@@ -138,8 +137,7 @@ def cache_nodes(
     # Bulk insert for performance
     inserted = bulk_insert_nodes(nodes, tenant_id=tenant_id)
     
-    # Rebuild FTS index after bulk insert
-    rebuild_fts_index()
+    # PG triggers handle FTS update automatically
     
     # Save cache info (for compatibility and debugging)
     cache_info = {
@@ -148,13 +146,13 @@ def cache_nodes(
         "num_documents": documents_count,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
-        "storage": "sqlite",  # Flag that we're using SQLite now
+        "storage": "postgres",
         "tenant_id": tenant_id,
     }
     with info_path.open("w") as file:
         json.dump(cache_info, file, indent=2)
     
-    LOGGER.info("Saved %d nodes to SQLite (tenant=%s)", inserted, tenant_id)
+    LOGGER.info("Saved %d nodes to PostgreSQL (tenant=%s)", inserted, tenant_id)
 
 
 def save_document_trees(trees: List[Dict[str, Any]], trees_path: Path) -> None:
@@ -310,10 +308,10 @@ def build_index_from_library() -> Tuple[List[Document], VectorStoreIndex]:
     
     # Cache nodes AFTER embedding so embeddings are preserved on reload
     # Note: VectorStoreIndex attaches embeddings to nodes during construction
-    cache_nodes(nodes, len(documents), paths.nodes_cache_path, paths.cache_info_path)
+    cache_nodes(nodes, len(documents), None, paths.cache_info_path)
     LOGGER.info("Cached nodes with embeddings")
 
-    manager = IncrementalIndexManager(paths.docs_path, paths.gemini_json_cache, paths.nodes_cache_path, paths.cache_info_path, qdrant_client=qdrant_client)
+    manager = IncrementalIndexManager(paths.docs_path, paths.gemini_json_cache, paths.cache_info_path, qdrant_client=qdrant_client)
     manager.sync_cache["files_hash"] = manager._get_files_hash(paths.docs_path)
     manager._save_sync_cache()
     LOGGER.info("Initial sync cache saved.")
@@ -615,7 +613,7 @@ def build_index_from_library_parallel(
     cache_nodes(
     nodes, 
     len(all_documents), 
-    paths.nodes_cache_path,  # Kept for signature, not used
+    None,  # Kept for signature, not used
     paths.cache_info_path,
     tenant_id="shared",
     skip_clear=True
@@ -665,7 +663,6 @@ def build_index_from_library_parallel(
         tenant_mgr = IncrementalIndexManager(
             tenant_docs_path,
             config.gemini_cache_for(tid),
-            paths.nodes_cache_path,
             paths.cache_info_path,
             tenant_id=tid,
             qdrant_client=qdrant_client,
@@ -766,13 +763,13 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
     """
     Connect to Qdrant index. 
     
-    Note: With FTS5, we don't load nodes into memory here.
-    Nodes are queried directly from SQLite by the FTS5 retriever.
+    Note: With FTS, we don't load nodes into memory here.
+    Nodes are queried directly from PostgreSQL by the FTS retriever.
     
     Returns:
         Tuple of (empty nodes list, VectorStoreIndex) or (None, None) if no data
     """
-    from .database import get_node_count
+    from .nodes import get_node_count
     
     config = AppConfig.get()
     paths = config.paths
@@ -781,7 +778,7 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
     node_count = get_node_count(None)
     
     if node_count == 0:
-        LOGGER.info("No nodes found in SQLite")
+        LOGGER.info("No nodes found in PostgreSQL")
         return None, None
     
     # Check Qdrant exists/connectable
@@ -796,14 +793,14 @@ def load_cached_nodes_and_index() -> Tuple[Optional[List[Document]], Optional[Ve
         LOGGER.warning("Could not connect to Qdrant: %s", exc)
         return None, None
     
-    LOGGER.info("Found %d nodes in SQLite, connecting to Qdrant", node_count)
+    LOGGER.info("Found %d nodes in PostgreSQL, connecting to Qdrant", node_count)
     
     # Connect to Qdrant
     vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
     
-    # Don't load nodes into memory - FTS5 queries SQLite directly
+    # Don't load nodes into memory - FTS queries PostgreSQL directly
     # Return empty list; code needing nodes calls ensure_nodes_loaded()
     LOGGER.info("Connected to Qdrant index")
     return [], index
@@ -823,14 +820,13 @@ class IncrementalIndexManager:
         self,
         docs_path: Path,
         gemini_cache_path: Path,
-        nodes_cache_path: Path, # DEPRECATED: unused after Phase 3 (SQLite migration)
         cache_info_path: Path,
         tenant_id: str = "shared",
         qdrant_client: "QdrantClient | None" = None,
     ) -> None:
         self.docs_path = docs_path
         self.gemini_cache_path = gemini_cache_path
-        self.nodes_cache_path = nodes_cache_path
+        self.cache_info_path = cache_info_path
         self.cache_info_path = cache_info_path
         self.tenant_id = tenant_id
         self.qdrant_client = qdrant_client or get_qdrant_client()
@@ -851,12 +847,11 @@ class IncrementalIndexManager:
 
     def _save_nodes_pickle(self, tenant_id: str = "shared") -> None:
         """
-        Save current nodes to SQLite.
+        Save current nodes to PostgreSQL.
         
-        Note: Method name kept for compatibility, but now saves to SQLite.
+        Note: Method name kept for compatibility, but now saves to DB.
         """
         from .nodes import bulk_insert_nodes
-        from .database import rebuild_fts_index
         
         if not self.nodes:
             LOGGER.warning("No nodes to save")
@@ -876,9 +871,6 @@ class IncrementalIndexManager:
         # Upsert nodes (this handles both new and existing)
         inserted = bulk_insert_nodes(self.nodes, tenant_id=tenant_id)
         
-        # Rebuild FTS index
-        rebuild_fts_index()
-        
         # Update cache info
         cache_info = {
             "timestamp": datetime.now().isoformat(),
@@ -890,7 +882,7 @@ class IncrementalIndexManager:
         }
         self.cache_info_path.write_text(json.dumps(cache_info, indent=2))
         
-        LOGGER.info("Saved %d nodes to SQLite", inserted)
+        LOGGER.info("Saved %d nodes to PostgreSQL", inserted)
 
     def _get_files_hash(self, docs_path: Path) -> Dict[str, Dict[str, Any]]:
         return current_files_index(docs_path)
@@ -898,7 +890,7 @@ class IncrementalIndexManager:
     def _remove_documents(self, filenames: Set[str], tenant_id: str = None) -> None:
         tenant_id = tenant_id or self.tenant_id
         """
-        Remove documents from Qdrant, SQLite, and Gemini cache.
+        Remove documents from Qdrant, PostgreSQL, and Gemini cache.
         
         Args:
             filenames: Set of source filenames to remove
@@ -924,11 +916,11 @@ class IncrementalIndexManager:
             except Exception as exc:
                 LOGGER.warning("Failed to remove %s from Qdrant: %s", filename, exc)
         
-        # 2. Remove from SQLite
+        # 2. Remove from PostgreSQL
         repo = NodeRepository(tenant_id=tenant_id)
         for filename in filenames:
             deleted = repo.delete_by_doc(filename)
-            LOGGER.debug("Removed %d nodes from SQLite for %s", deleted, filename)
+            LOGGER.debug("Removed %d nodes from PostgreSQL for %s", deleted, filename)
         
         # 3. Remove from Gemini cache (in-memory AND on disk)
         cache_modified = False
