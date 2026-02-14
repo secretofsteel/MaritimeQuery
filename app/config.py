@@ -100,6 +100,10 @@ class AppConfig:
         api_key = load_api_key()
         os.environ["GOOGLE_API_KEY"] = api_key
 
+        # Read from environment, with localhost defaults for dev
+        self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        self.qdrant_collection = os.getenv("QDRANT_COLLECTION", "maritime_rag")
+
         self.paths = build_paths()
         configure_llama_settings(api_key)
         self.client = genai.Client(api_key=api_key)
