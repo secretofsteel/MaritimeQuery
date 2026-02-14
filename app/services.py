@@ -89,7 +89,6 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
     Qdrant is source of truth for vectors. SQLite mirrors text/metadata.
     Compares TOTAL counts across all tenants, then rebuilds SQLite if needed.
     """
-    from llama_index.core.schema import TextNode
     
     from .database import rebuild_fts_index, get_node_count, db_connection
     from .nodes import NodeRepository, bulk_insert_nodes

@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     config = AppConfig.get()
     logger.info("Config loaded: base_dir=%s", config.paths.base_dir)
 
-    # 2. Connect to ChromaDB index
+    # 2. Connect to Qdrant index
     nodes, index = load_cached_nodes_and_index()
 
     # 3. Get shared Qdrant client for dependency injection

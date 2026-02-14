@@ -12,12 +12,12 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
-from llama_index.core.vector_stores.types import VectorStoreQueryResult
+
 
 from .database import db_connection, get_db_path
 from .logger import LOGGER
 
-import json
+
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -36,7 +36,7 @@ def _expand_doc_type_case(doc_type_filter: List[str]) -> List[str]:
     Production data contains mixed casing (e.g. ``"Form"`` vs ``"FORM"``,
     ``"Procedure"`` vs ``"PROCEDURE"``).  Rather than requiring a full
     reindex, this helper emits both UPPER and Title variants for each
-    requested type so that DB/Qdrant filters match regardless of how
+    requested type so that Qdrant filters match regardless of how
     the metadata was stored.
 
     Duplicates are removed to keep filter lists clean.

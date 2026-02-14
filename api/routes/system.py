@@ -36,7 +36,7 @@ async def get_system_status(
     tenant_id: str = Depends(get_current_tenant),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Get live system status with counts from SQLite and ChromaDB."""
+    """Get live system status with counts from SQLite and Qdrant."""
     
     # Live total counts (all tenants)
     total_nodes = get_node_count(None)

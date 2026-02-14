@@ -206,7 +206,7 @@ def _get_tenant_list() -> List[str]:
 def _sync_memory_to_db(app_state: AppState) -> None:
     """UI wrapper for sync_memory_to_db service."""
     
-    with st.spinner("Rebuilding memory from Qdrant..."):
+    with st.spinner("Syncing SQLite with Qdrant..."):
         result = sync_memory_to_db(app_state)
     
     if result.success:
@@ -2548,7 +2548,8 @@ def render_admin_panel(app_state: AppState) -> None:
             
             try:
                 manager = app_state.ensure_manager(target_tenant_id=selected_tenant)
-                total_db = manager.collection.count()
+                info = manager.qdrant_client.get_collection(manager.collection_name)
+                total_db = info.points_count
                 st.caption(f"📊 {total_db} total in DB")
             except Exception as exc:
                 LOGGER.warning("Failed to get DB count: %s", exc)
@@ -2617,7 +2618,7 @@ def render_admin_panel(app_state: AppState) -> None:
         
         with col1:
             st.markdown("### 🔄 Database Health")
-            st.markdown("Rebuild memory from ChromaDB when memory is bloated.")
+            st.markdown("Verify and repair consistency between SQLite and Qdrant.")
         
         with col2:
             st.write("")
@@ -2844,7 +2845,8 @@ def _render_bulk_upload(app_state: AppState) -> None:
     # Check if ANY documents exist in the system (not just this tenant's folder)
     try:
         manager = app_state.ensure_manager(target_tenant_id=manage_tenant)
-        system_has_index = manager.collection.count() > 0
+        info = manager.qdrant_client.get_collection(manager.collection_name)
+        system_has_index = info.points_count > 0
     except Exception:
         system_has_index = False
     
@@ -3561,12 +3563,12 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                             
                             config = AppConfig.get()
                             
-                            # Update in-memory nodes, Gemini cache, and ChromaDB
+                            # Update in-memory nodes, Gemini cache, and Qdrant
                             success = update_metadata_everywhere(
                                 source,
                                 corrections,
                                 app_state.nodes,
-                                config.paths.chroma_path
+                                batch_size=50
                             )
                             
                             if success:

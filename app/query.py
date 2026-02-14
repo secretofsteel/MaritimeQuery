@@ -72,7 +72,7 @@ def _attach_embeddings_from_cache(
     """
     Attach embeddings from cached nodes to retrieved nodes.
     
-    Retrieved nodes come from ChromaDB without embeddings.
+    Retrieved nodes come from Qdrant without embeddings.
     Cached nodes (app_state.nodes) have embeddings from indexing.
     
     Uses content hash matching with source+section fallback.
@@ -1512,7 +1512,7 @@ Rephrase this question to better match maritime documentation language. Do not o
                 LOGGER.info("  - Storing %d nodes in sticky_chunks", len(nodes))
             
             # Attach embeddings from cached nodes before storing
-            # (retrieved nodes come from ChromaDB without embeddings)
+            # (retrieved nodes come from Qdrant without embeddings)
             nodes = _attach_embeddings_from_cache(nodes, app_state.nodes)
             app_state.sticky_chunks = nodes
             
@@ -1739,7 +1739,7 @@ __all__ = [
     "classify_retrieval_strategy",  # Keep for now (deprecated)
     "retrieve_hierarchical",
     "format_hierarchical_context",
-    "diagnose_chroma_embedding_format",  # NEW - diagnostic utility
+
 ]
 
 # ==============================================================================

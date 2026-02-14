@@ -296,7 +296,7 @@ class AppState:
         This method:
         1. Finds the last assistant message with context_state
         2. Restores topic, scope, doc_type preferences, and turn count
-        3. Retrieves cached chunks from ChromaDB using stored IDs
+        3. Retrieves cached chunks from node map using stored IDs
         4. Re-indexes uploaded files from their JSONL extractions
         
         Called automatically after switch_session().
@@ -332,7 +332,7 @@ class AppState:
         LOGGER.info("📂 Restored session context: topic='%s', scope='%s', turn=%d/6", 
                 self.last_topic, self.last_scope, self.context_turn_count)
         
-        # Restore cached chunks by retrieving from ChromaDB using IDs
+        # Restore cached chunks by retrieving from node map using IDs
         cached_chunk_ids = last_context_state.get("cached_chunk_ids", [])
         if cached_chunk_ids and self.nodes:
             # Build node map (id -> node) for fast lookup
