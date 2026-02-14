@@ -139,18 +139,19 @@ def main() -> None:
     # With multi-tenancy, memory != DB is expected (memory has tenant+shared, DB has all)
     # Only log, don't warn unless memory > DB (impossible = real bug)
     if app_state.nodes:
-        try:
-            manager = app_state.ensure_manager()
-            memory_count = len(app_state.nodes)
-            db_count = manager.collection.count()
-            
-            if memory_count > db_count:
-                LOGGER.warning(
-                    "Data inconsistency: Memory=%d > DB=%d (shouldn't happen)",
-                    memory_count, db_count
-                )
-        except Exception as exc:
-            LOGGER.debug("Consistency check skipped: %s", exc)
+            try:
+                manager = app_state.ensure_manager()
+                memory_count = len(app_state.nodes)
+                info = manager.qdrant_client.get_collection(manager.collection_name)
+                db_count = info.points_count
+                
+                if memory_count > db_count:
+                    LOGGER.warning(
+                        "Data inconsistency: Memory=%d > Qdrant=%d (shouldn't happen)",
+                        memory_count, db_count
+                    )
+            except Exception as exc:
+                LOGGER.debug("Consistency check skipped: %s", exc)
     
     # === ROUTE TO APPROPRIATE UI ===
     read_only = st.query_params.get("read_only", "true").lower() == "true"
