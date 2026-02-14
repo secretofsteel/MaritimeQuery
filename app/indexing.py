@@ -41,7 +41,6 @@ from .processing_status import (
     save_processing_report,
 )
 from .nodes import bulk_insert_nodes, get_node_count, rebuild_fts_index, NodeRepository
-# from .database import init_db  # DELETED
 
 def clear_all_nodes_for_rebuild() -> int:
     """Clear ALL nodes from PostgreSQL regardless of tenant."""
@@ -126,7 +125,6 @@ def cache_nodes(
         tenant_id: Tenant identifier for multi-tenancy
     """
     from .nodes import bulk_insert_nodes
-    # from .database import init_db  # Not needed for PG
     
     # Ensure database is initialized
     # init_db()
@@ -854,7 +852,6 @@ class IncrementalIndexManager:
         Note: Method name kept for compatibility, but now saves to DB.
         """
         from .nodes import bulk_insert_nodes
-        # from .database import rebuild_fts_index # DELETED
         
         if not self.nodes:
             LOGGER.warning("No nodes to save")

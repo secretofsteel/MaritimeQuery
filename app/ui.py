@@ -3445,7 +3445,6 @@ def _render_metadata_edit_form(source: str, metadata: Dict, app_state: AppState)
                 if success:
                     # Update SQLite nodes
                     from .nodes import NodeRepository
-                    from .database import db_connection
                     
                     with db_connection() as conn:
                         if "tenant_id" in corrections:
@@ -3573,7 +3572,6 @@ def _render_batch_edit_form(filenames: List[str], app_state: AppState) -> None:
                             
                             if success:
                                 # Update SQLite
-                                from .database import db_connection
                                 import json
                                 
                                 with db_connection() as conn:
