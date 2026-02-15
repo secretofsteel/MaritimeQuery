@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, Request
 
-from api.dependencies import get_current_tenant, get_current_user, require_superuser
+from api.dependencies import get_current_tenant, get_current_user, require_superuser, get_target_tenant
 from api.log_stream import get_log_buffer, register_client, unregister_client
 from app.constants import ALLOWED_DOC_TYPES
 from app.nodes import get_distinct_doc_count, get_node_count
@@ -38,7 +38,7 @@ class SystemStatusResponse(BaseModel):
 @router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status(
     request: Request,
-    tenant_id: str = Depends(get_current_tenant),
+    tenant_id: str = Depends(get_target_tenant),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Get live system status with counts from SQLite and Qdrant."""

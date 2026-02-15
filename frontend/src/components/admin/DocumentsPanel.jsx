@@ -333,7 +333,7 @@ const DocumentsPanel = ({ tenantId, tenantList = [] }) => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-gray-900 text-gray-100 relative">
+    <div className="h-full flex flex-col bg-gray-900 text-gray-100 relative p-6">
       {/* Batch Edit Modal */}
       {isBatchEditing && (
         <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
@@ -495,7 +495,7 @@ const DocumentsPanel = ({ tenantId, tenantList = [] }) => {
                 </th>
                 <th className="px-4 py-3 font-medium border-b border-gray-800 w-28">Type</th>
                 <th className="px-4 py-3 font-medium border-b border-gray-800 w-24 text-right">Size</th>
-                <th className="px-4 py-3 font-medium border-b border-gray-800 w-20 text-center">Charts</th>
+                <th className="px-4 py-3 font-medium border-b border-gray-800 w-20 text-center">Chunks</th>
                 <th className="px-4 py-3 font-medium w-20 border-b border-gray-800 text-center">Status</th>
                 <th className="px-4 py-3 font-medium w-20 border-b border-gray-800 text-center">Cached</th>
                 <th className="px-4 py-3 font-medium w-24 border-b border-gray-800 text-right">Action</th>
@@ -528,7 +528,7 @@ const DocumentsPanel = ({ tenantId, tenantList = [] }) => {
                         />
                         </td>
                         <td className="px-4 py-3">
-                        <div className="flex flex-col max-w-xs">
+                        <div className="flex flex-col max-w-xl">
                             <span className="text-sm font-medium text-gray-200 truncate" title={doc.title || doc.filename}>
                                 {doc.title || doc.filename}
                             </span>

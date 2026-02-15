@@ -29,10 +29,12 @@ const AdminPage = () => {
   };
 
   useEffect(() => {
-    if (user?.tenant_id && user.tenant_id !== selectedTenant) {
+    // Only set default if nothing selected yet
+    if (user?.tenant_id && !selectedTenant) {
       setSelectedTenant(user.tenant_id);
     }
     fetchTenants();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const renderContent = () => {
@@ -52,7 +54,7 @@ const AdminPage = () => {
           />
         );
       case 'system':
-        return <SystemPanel tenantId={selectedTenant} />;
+        return <SystemPanel tenantId={selectedTenant} tenantList={tenantList} />;
       default:
         return <div className="p-8 text-center text-gray-500">Unknown tab</div>;
     }
@@ -70,7 +72,7 @@ const AdminPage = () => {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-hidden bg-gray-900 m-2 ml-0 rounded-lg border border-gray-800 shadow-xl relative flex flex-col">
+      <main className="flex-1 overflow-hidden bg-gray-900 m-2 rounded-lg border border-gray-800 shadow-xl relative flex flex-col">
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           {/* Header for mobile/context (optional, sidebar covers most) */}
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">

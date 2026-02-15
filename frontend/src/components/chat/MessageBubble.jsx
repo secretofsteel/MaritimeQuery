@@ -1,18 +1,29 @@
-// frontend/src/components/chat/MessageBubble.jsx
+import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { User, Bot } from 'lucide-react'
+import { User, Bot, Copy, Check } from 'lucide-react'
 import ConfidenceBadge from './ConfidenceBadge'
 import SourceCitations from './SourceCitations'
 import FeedbackControls from './FeedbackControls'
 
 export default function MessageBubble({ message, isStreaming, onFeedback }) {
   const isUser = message.role === 'user'
+  const [copied, setCopied] = useState(false)
   
   // Format timestamp (HH:MM if today, Date if older)
   const timestamp = new Date(message.timestamp).toLocaleString(undefined, {
     hour: 'numeric', minute: 'numeric'
   })
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy', err)
+    }
+  }
 
   return (
     <div className={`flex w-full mb-6 ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -103,6 +114,16 @@ export default function MessageBubble({ message, isStreaming, onFeedback }) {
                     percentage={message.metadata?.confidence_pct}
                   />
                   <FeedbackControls onFeedback={(type, correction) => onFeedback(type, correction)} disabled={false} />
+                  
+                  {/* Copy Button */}
+                  <button 
+                    onClick={handleCopy}
+                    className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                    title="Copy response"
+                  >
+                    {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
                 </div>
               </div>
               <SourceCitations sources={message.metadata?.sources} />

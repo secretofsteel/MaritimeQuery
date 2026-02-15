@@ -83,7 +83,7 @@ export default function SessionItem({ session, isActive, onSelect, onDelete, onR
       <MessageSquare size={16} className="shrink-0" />
       
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate pr-6">
+        <div className="text-sm font-medium truncate pr-14">
           {session.title || 'Untitled Chat'}
         </div>
         <div className="text-[10px] text-gray-500 mt-0.5">

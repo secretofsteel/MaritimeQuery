@@ -12,14 +12,17 @@ import {
 } from 'lucide-react';
 import LogViewer from './LogViewer';
 
-const SystemPanel = ({ tenantId }) => {
+const SystemPanel = ({ tenantId, tenantList = [] }) => {
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const fetchStatus = async () => {
+  const fetchStatus = React.useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/v1/system/status', {
+      const url = new URL('/api/v1/system/status', window.location.origin);
+      if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
+
+      const res = await fetch(url.toString(), {
         credentials: 'include'
       });
       if (res.ok) {
@@ -31,13 +34,13 @@ const SystemPanel = ({ tenantId }) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [tenantId]);
 
   useEffect(() => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000); // Poll every 30s
     return () => clearInterval(interval);
-  }, [tenantId]);
+  }, [fetchStatus]);
 
   const getStatusColor = (s) => {
     switch (s) {
@@ -155,16 +158,24 @@ const SystemPanel = ({ tenantId }) => {
       <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
         <h3 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
           <Database size={16} className="text-blue-400" />
-          Tenant Statistics ({status.tenant_id})
+          Tenant Statistics ({tenantList.find(t => t.tenant_id === status.tenant_id)?.display_name || status.tenant_id})
         </h3>
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-gray-900/50 p-3 rounded border border-gray-700">
-            <div className="text-xs text-gray-500 uppercase tracking-wider">Documents</div>
-            <div className="text-xl font-mono text-gray-200">{status.tenant_documents}</div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider cursor-help" title="Tenant Documents / Total System Documents">
+              Documents (Tenant / Total)
+            </div>
+            <div className="text-xl font-mono text-gray-200">
+              {status.tenant_documents} <span className="text-gray-500 text-base">/ {status.total_documents}</span>
+            </div>
           </div>
           <div className="bg-gray-900/50 p-3 rounded border border-gray-700">
-            <div className="text-xs text-gray-500 uppercase tracking-wider">Text Chunks</div>
-            <div className="text-xl font-mono text-gray-200">{status.tenant_nodes}</div>
+            <div className="text-xs text-gray-500 uppercase tracking-wider cursor-help" title="Tenant Chunks / Total System Chunks">
+              Text Chunks (Tenant / Total)
+            </div>
+            <div className="text-xl font-mono text-gray-200">
+              {status.tenant_nodes} <span className="text-gray-500 text-base">/ {status.total_nodes}</span>
+            </div>
           </div>
         </div>
       </div>

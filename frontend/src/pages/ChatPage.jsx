@@ -196,8 +196,8 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full w-full">
-      {/* Sidebar */}
-      <div className="w-72 border-r border-gray-800 bg-gray-900 flex-shrink-0 flex flex-col">
+      {/* Sidebar - Now Darker (Gray 900) */}
+      <div className="w-80 border-r border-gray-800 bg-gray-800 shrink-0 flex flex-col">
         <SessionList
           sessions={sessions}
           activeSessionId={activeSessionId}
@@ -209,8 +209,8 @@ export default function ChatPage() {
         />
       </div>
 
-      {/* Main chat area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* Main chat area - Now Lighter (Gray 800) */}
+      <div className="flex-1 flex flex-col min-w-0 bg-gray-900">
         <MessageList
           messages={messages}
           streamingText={streamingText}
