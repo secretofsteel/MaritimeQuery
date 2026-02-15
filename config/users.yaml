@@ -49,6 +49,8 @@ credentials:
 
 
 
+
+
 cookie:
   # Cookie name (shown in browser dev tools)
   name: maritime_rag_auth

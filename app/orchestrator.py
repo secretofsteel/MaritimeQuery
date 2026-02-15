@@ -429,7 +429,13 @@ FIELD DEFINITIONS:
    If the query asks about specific forms of checklists, include their codes.
    Return null if no clear maritime topic.
 
-4. "detected_sources" — Specific document sources mentioned or implied in the query.
+4. "detected_sources" — Identify specific source constraints:
+   Examples: ["RISQ"], ["SOLAS"], ["MARPOL"], ["ISGOTT"], ["VETTING"], ["PMS"].
+   CRITICAL: If the user refers to "this file", "the attachment", "uploaded document", "this PDF", etc.,
+   you MUST include "SESSION_CONTEXT" in this list.
+   - If the query is *only* about the file, list ONLY ["SESSION_CONTEXT"].
+   - If the query implies comparing the file to external rules (e.g., "Check this against PMS"),
+     list BOTH ["SESSION_CONTEXT", "PMS"].etected_sources" — Specific document sources mentioned or implied in the query.
    Return empty list [] if none detected. Match against these known patterns:
 {SOURCE_PATTERNS}
 
@@ -2175,20 +2181,89 @@ def orchestrated_query(
     )
 
     # ------------------------------------------------------------------
-    # Step 6: Filtered Retrieval
+    # Step 6: Filtered Retrieval with Hybrid/Exclusive Logic
     # ------------------------------------------------------------------
-    _status(f"📚 Searching documents ({len(sub_queries)} {'queries' if len(sub_queries) > 1 else 'query'})...")
+    _status(f"📚 Searching documents...")
 
-    retriever = FilteredRetriever(app_state)
+    # Check for Session Context intent
+    has_session_context_intent = "SESSION_CONTEXT" in analysis.detected_sources
+    
+    # Check for uploads
+    session_id = app_state.current_session_id
+    has_uploads = False
+    if session_id:
+        try:
+             upload_manager = app_state.ensure_session_upload_manager()
+             records = upload_manager._load_metadata_dict(session_id)
+             has_uploads = bool(records)
+        except Exception:
+             pass
 
-    if len(sub_queries) == 1:
-        retrieval_results = [retriever.retrieve_single(sub_queries[0])]
-    else:
-        retrieval_results = retriever.retrieve_parallel(sub_queries)
+    retrieval_results = []
+    
+    # CASE A: "No File" Handling
+    if has_session_context_intent and not has_uploads:
+        _status("⚠️ No session uploads found for file query")
+        return {
+            "query": query_text,
+            "answer": "I don't see any files attached to this conversation. Please upload a document first.",
+            "sources": [],
+            "confidence_pct": 100,
+            "topic_extracted": analysis.topic,
+            # Minimal fields to satisfy return type
+            "doc_type_preference": analysis.doc_type_hint,
+            "context_turn": app_state.context_turn_count,
+        }
 
-    # Inject session uploads into each result's nodes
-    for rr in retrieval_results:
-        rr.nodes = _include_session_uploads(app_state, rr.nodes, rr.sub_query.text)
+    # Determine Retrieval Mode
+    # Exclusive: SESSION_CONTEXT is the ONLY source AND no doc types.
+    is_exclusive = (
+        has_session_context_intent 
+        and len(analysis.detected_sources) == 1 
+        and not analysis.detected_doc_types
+    )
+    
+    # CASE B: Exclusive Retrieval (Pure File Query)
+    if is_exclusive and has_uploads:
+        _status(f"📂 Searching ONLY session uploads...")
+        # Direct retrieval from session uploads only
+        # We effectively skip the global search
+        upload_nodes = _include_session_uploads(app_state, [], query_text)
+        
+        if upload_nodes:
+            # Create a synthetic result using classes defined in this module
+            retrieval_results = [
+                RetrievalResult(
+                    sub_query=SubQuery(
+                        text=query_text,
+                        source_label="Current Upload",
+                    ),
+                    nodes=upload_nodes,
+                    source_label="Current Upload"
+                )
+            ]
+        else:
+             _status("⚠️ No matches in file")
+
+    # CASE C: Hybrid / Global Retrieval
+    # Handles:
+    # 1. Normal global queries (no SESSION_CONTEXT)
+    # 2. Hybrid queries (SESSION_CONTEXT + other sources/types) - we search global AND inject uploads
+    if not retrieval_results:
+        mode_label = "Hybrid" if has_session_context_intent else "Global"
+        _status(f"📚 {mode_label} Search ({len(sub_queries)} {'queries' if len(sub_queries) > 1 else 'query'})...")
+        
+        retriever = FilteredRetriever(app_state)
+        
+        if len(sub_queries) == 1:
+            retrieval_results = [retriever.retrieve_single(sub_queries[0])]
+        else:
+            retrieval_results = retriever.retrieve_parallel(sub_queries)
+
+        # Inject session uploads into each result's nodes (mixed mode)
+        # This ensures uploads are seen even in global/hybrid search
+        for rr in retrieval_results:
+            rr.nodes = _include_session_uploads(app_state, rr.nodes, rr.sub_query.text)
 
     total_nodes = sum(len(rr.nodes) for rr in retrieval_results)
     LOGGER.info("Orchestrator: Retrieval complete — %d total nodes", total_nodes)
