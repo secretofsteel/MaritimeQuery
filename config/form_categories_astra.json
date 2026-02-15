@@ -1,0 +1,20 @@
+{
+  "CBO": "Cargo/Ballast Operations",
+  "CS": "Cyber Security",
+  "D": "Document Control",
+  "DA": "Drug & Alcohol",
+  "DR": "Drills",
+  "E": "Engine Room Operations",
+  "EN": "Environmental",
+  "HR": "Human Resources",
+  "M": "Maintenance",
+  "MOC": "Management of Change",
+  "N": "Navigation",
+  "NCR": "Non-Compliance Reporting",
+  "P": "Safe Working Procedures",
+  "Q": "Quality Control",
+  "RA": "Risk Assessment",
+  "A": "Audits",
+  "Z": "Miscellaneous",
+  "CR": "Crew"
+}

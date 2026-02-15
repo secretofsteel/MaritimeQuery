@@ -29,6 +29,10 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("Starting Maritime RAG API...")
 
+    # 0. Install broadcast log handler for System Panel
+    from api.log_stream import install_log_handler
+    install_log_handler()
+
     # 1. Config singleton — loads API keys, configures embedding model
     config = AppConfig.get()
     logger.info("Config loaded: base_dir=%s", config.paths.base_dir)
@@ -105,15 +109,19 @@ app.add_middleware(
 from api.routes.auth import router as auth_router
 from api.routes.query import router as query_router
 from api.routes.sessions import router as sessions_router
+from api.routes.feedback import router as feedback_router
+from api.routes.admin import router as admin_router
+from api.routes.settings import router as settings_router
+from api.routes.documents import router as documents_router # Moved up for consolidation
+from api.routes.system import router as system_router # Moved up for consolidation
 
 app.include_router(auth_router)
 app.include_router(query_router)
-app.include_router(sessions_router)
-
-from api.routes.documents import router as documents_router
-from api.routes.system import router as system_router
-
 app.include_router(documents_router)
+app.include_router(sessions_router)
+app.include_router(feedback_router)
+app.include_router(admin_router)
+app.include_router(settings_router)
 app.include_router(system_router)
 
 

@@ -5,30 +5,53 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, HTTPException, Query, Request, status
+from fastapi import Cookie, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from api.auth import decode_token
+from api.auth import decode_token, COOKIE_NAME
 from app.state import AppState
 
 logger = logging.getLogger(__name__)
 
 # Security scheme — tells Swagger UI to show "Authorize" button
-_bearer_scheme = HTTPBearer()
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> Dict[str, Any]:
-    """Extract and verify JWT from Authorization header.
+    """Extract and verify JWT from Authorization header OR httpOnly cookie.
 
-    Returns the full token payload: {sub, tenant_id, role, exp, iat}.
+    Priority:
+        1. Authorization: Bearer <token> header (for API clients, Swagger UI)
+        2. httpOnly cookie (for browser/React app)
+
+    Returns the full token payload: {sub, tenant_id, role, name, exp, iat}.
 
     Raises:
-        HTTPException 401: If token is missing, invalid, or expired.
+        HTTPException 401: If no valid token found in either location.
     """
+    token = None
+
+    # 1. Try Authorization header first
+    if credentials is not None:
+        token = credentials.credentials
+
+    # 2. Fall back to cookie
+    if token is None:
+        token = request.cookies.get(COOKIE_NAME)
+
+    # 3. No token anywhere
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # 4. Decode and verify
     try:
-        payload = decode_token(credentials.credentials)
+        payload = decode_token(token)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
