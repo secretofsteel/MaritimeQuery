@@ -1,5 +1,6 @@
 // frontend/src/pages/ChatPage.jsx
 import { useState, useEffect, useCallback } from 'react'
+import { Menu, X } from 'lucide-react'
 import { api } from '../api/client'
 import { useStreamingQuery } from '../hooks/useStreamingQuery'
 import SessionList from '../components/sessions/SessionList'
@@ -11,6 +12,7 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
+  const [showSidebar, setShowSidebar] = useState(false)
 
   // Message state
   const [messages, setMessages] = useState([])
@@ -78,6 +80,7 @@ export default function ChatPage() {
       const data = await api.post('/api/v1/sessions', { title: 'New Chat' })
       await fetchSessions()
       setActiveSessionId(data.session_id)
+      setShowSidebar(false) // Close sidebar on mobile
     } catch (err) {
       console.error('Failed to create session:', err)
     }
@@ -86,6 +89,7 @@ export default function ChatPage() {
   const handleSelectSession = useCallback((sessionId) => {
     if (isStreaming) cancel()
     setActiveSessionId(sessionId)
+    setShowSidebar(false) // Close sidebar on mobile
   }, [isStreaming, cancel])
 
   const handleDeleteSession = useCallback(async (sessionId) => {
@@ -195,9 +199,23 @@ export default function ChatPage() {
   // --- Render ---
 
   return (
-    <div className="flex h-full w-full">
-      {/* Sidebar - Now Darker (Gray 900) */}
-      <div className="w-80 border-r border-gray-800 bg-gray-800 shrink-0 flex flex-col">
+    <div className="flex h-full w-full relative">
+      {/* Sidebar */}
+      <div className={`
+        flex-col border-r border-gray-800 bg-gray-800 shrink-0 transition-all duration-300
+        ${showSidebar ? 'flex w-full absolute inset-0 z-20' : 'hidden md:flex md:w-80 md:static'}
+      `}>
+        {/* Mobile Sidebar Header */}
+        <div className="md:hidden flex items-center justify-between p-4 border-b border-gray-700">
+          <span className="font-semibold text-gray-200">Chats</span>
+          <button 
+            onClick={() => setShowSidebar(false)}
+            className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-700"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
         <SessionList
           sessions={sessions}
           activeSessionId={activeSessionId}
@@ -209,8 +227,24 @@ export default function ChatPage() {
         />
       </div>
 
-      {/* Main chat area - Now Lighter (Gray 800) */}
-      <div className="flex-1 flex flex-col min-w-0 bg-gray-900">
+      {/* Main chat area */}
+      <div className={`
+        flex-col min-w-0 bg-gray-900 flex-1
+        ${showSidebar ? 'hidden md:flex' : 'flex'}
+      `}>
+        {/* Mobile Header with Hamburger */}
+        <div className="md:hidden flex items-center p-4 border-b border-gray-800 shrink-0">
+          <button
+            onClick={() => setShowSidebar(true)}
+            className="p-2 -ml-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 mr-3"
+          >
+            <Menu size={20} />
+          </button>
+          <span className="font-semibold text-gray-200 truncate">
+            {sessions.find(s => s.session_id === activeSessionId)?.title || 'Chat'}
+          </span>
+        </div>
+
         <MessageList
           messages={messages}
           streamingText={streamingText}
