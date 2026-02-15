@@ -1,18 +1,17 @@
 #Core app
-streamlit
-streamlit-authenticator
 markdown
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.0.0
+qdrant-client
 
 #LLM and embedding libraries
 google-genai
 llama-index-core
 llama-index-llms-google-genai
 llama-index-embeddings-google-genai
-
+llama-index-vector-stores-qdrant
 cohere
 
 #Document processing libraries
@@ -25,6 +24,7 @@ aspose-words
 rapidfuzz
 Pillow
 mammoth
+pyyaml
 
 #PDF processing libraries
 pymupdf
