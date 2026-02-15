@@ -26,7 +26,7 @@ export function AuthProvider({ children }) {
 
   const login = async (username, password) => {
     // POST /login sets the httpOnly cookie automatically
-    const data = await api.post('/api/v1/auth/login', { username, password })
+    await api.post('/api/v1/auth/login', { username, password })
     // Now fetch full user info from /me
     const me = await api.get('/api/v1/auth/me')
     setUser(me)
@@ -56,7 +56,7 @@ export function AuthProvider({ children }) {
   )
 }
 
-export function useAuth() {
+export const useAuth = () => {
   const context = useContext(AuthContext)
   if (!context) {
     throw new Error('useAuth must be used within AuthProvider')

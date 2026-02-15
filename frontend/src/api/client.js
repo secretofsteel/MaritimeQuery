@@ -75,4 +75,9 @@ export const api = {
     method: 'POST',
     body: formData,  // FormData — Content-Type set automatically
   }),
+
+  patch: (path, body) => request(path, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  }),
 }

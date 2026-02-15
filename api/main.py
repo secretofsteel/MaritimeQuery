@@ -105,10 +105,12 @@ app.add_middleware(
 from api.routes.auth import router as auth_router
 from api.routes.query import router as query_router
 from api.routes.sessions import router as sessions_router
+from api.routes.feedback import router as feedback_router
 
 app.include_router(auth_router)
 app.include_router(query_router)
 app.include_router(sessions_router)
+app.include_router(feedback_router)
 
 from api.routes.documents import router as documents_router
 from api.routes.system import router as system_router

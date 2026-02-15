@@ -50,8 +50,9 @@ export default function AppShell() {
               {user?.display_name}
             </p>
             <p className="text-xs text-gray-500">
-              {user?.tenant_id}
-              {isSuperuser && ' • superuser'}
+    {user?.role === 'superuser' ? 'Administrator' : 'User'}
+    {' • '}
+    {user?.tenant_id}
             </p>
           </div>
 

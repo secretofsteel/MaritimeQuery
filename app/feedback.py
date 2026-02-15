@@ -36,7 +36,7 @@ class FeedbackSystem:
         self.tenant_id = tenant_id
 
     def log_feedback(self, result: Dict, feedback_type: str, correction: str = "") -> None:
-        top_sources = [src["source"] for src in result.get("sources", [])[:3]]
+        top_sources = [src.get("source", src.get("title", "unknown")) for src in result.get("sources", [])[:3]]
 
         with pg_connection() as conn:
             with conn.cursor() as cur:
