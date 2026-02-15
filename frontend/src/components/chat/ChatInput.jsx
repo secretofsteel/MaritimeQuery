@@ -1,6 +1,6 @@
 // frontend/src/components/chat/ChatInput.jsx
 import { useState, useRef, useEffect } from 'react'
-import { Send, Paperclip, X } from 'lucide-react'
+import { Send, Paperclip, X, Loader2 } from 'lucide-react'
 import { api } from '../../api/client'
 
 export default function ChatInput({ onSubmit, disabled, sessionId }) {
@@ -9,6 +9,8 @@ export default function ChatInput({ onSubmit, disabled, sessionId }) {
   const [uploading, setUploading] = useState(false)
   const textareaRef = useRef(null)
   const fileInputRef = useRef(null)
+
+  const [isDragging, setIsDragging] = useState(false)
 
   // Auto-resize textarea
   useEffect(() => {
@@ -36,29 +38,32 @@ export default function ChatInput({ onSubmit, disabled, sessionId }) {
     }
   }
 
-  const handleFileSelect = async (e) => {
-    const selected = Array.from(e.target.files)
-    if (!selected.length || !sessionId) return
+  const uploadFiles = async (selectedFiles) => {
+    if (!selectedFiles.length || !sessionId) return
 
     setUploading(true)
     try {
       // Limit to 3 files total (existing + new)
       const slots = 3 - files.length
-      const toUpload = selected.slice(0, slots)
+      const toUpload = selectedFiles.slice(0, slots)
 
       for (const file of toUpload) {
         const formData = new FormData()
         formData.append('file', file)
-        // Note: Backend might not support session_scope param yet, but we'll send it
-        // If not supported, standard upload endpoint works for now (global scope)
-        // Ideally: /api/v1/documents/upload?session_id={sessionId}
-        await api.upload(`/api/v1/documents/upload?session_id=${sessionId}`, formData)
         
-        setFiles(prev => [...prev, file])
+        // Use the new session-specific upload endpoint
+        const response = await api.upload(`/api/v1/sessions/${sessionId}/upload`, formData)
+        
+        // Store file info with ID for deletion
+        const fileInfo = {
+            name: file.name,
+            id: response.record ? response.record.file_id : null,
+            originalFile: file
+        }
+        setFiles(prev => [...prev, fileInfo])
       }
     } catch (err) {
       console.error('Upload failed:', err)
-      // Could show toast or error state here
     } finally {
       setUploading(false)
       // Reset input so same file can be selected again if removed
@@ -66,18 +71,61 @@ export default function ChatInput({ onSubmit, disabled, sessionId }) {
     }
   }
 
-  const removeFile = (index) => {
+  const handleFileSelect = (e) => {
+    const selected = Array.from(e.target.files)
+    uploadFiles(selected)
+  }
+
+  const handleDragOver = (e) => {
+    e.preventDefault()
+    if (!disabled && !uploading && sessionId) {
+      setIsDragging(true)
+    }
+  }
+
+  const handleDragLeave = (e) => {
+    e.preventDefault()
+    setIsDragging(false)
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setIsDragging(false)
+    
+    if (disabled || uploading || !sessionId) return
+    
+    const droppedFiles = Array.from(e.dataTransfer.files)
+    if (droppedFiles.length > 0) {
+      uploadFiles(droppedFiles)
+    }
+  }
+
+  const removeFile = async (index) => {
+    const fileToRemove = files[index]
     setFiles(prev => prev.filter((_, i) => i !== index))
-    // Note: We don't delete from server here, just from the "to send" context visual
-    // Truly session-scoped files would be managed differently on backend.
+
+    if (fileToRemove.id && sessionId) {
+        try {
+            await api.delete(`/api/v1/sessions/${sessionId}/upload/${fileToRemove.id}`)
+        } catch (err) {
+            console.error('Failed to delete file:', err)
+        }
+    }
   }
 
   return (
-    <div className="border-t border-gray-800 bg-gray-900 p-4">
+    <div 
+      className={`border-t border-gray-800 bg-gray-900 p-4 transition-colors ${
+        isDragging ? 'bg-blue-900/20 border-blue-500/50' : ''
+      }`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="max-w-4xl mx-auto space-y-3">
         
         {/* File chips */}
-        {files.length > 0 && (
+        {(files.length > 0 || uploading) && (
           <div className="flex flex-wrap gap-2">
             {files.map((file, i) => (
               <div key={i} className="flex items-center gap-1.5 bg-gray-800 text-gray-300 text-xs px-2 py-1 rounded-md border border-gray-700">
@@ -90,10 +138,28 @@ export default function ChatInput({ onSubmit, disabled, sessionId }) {
                 </button>
               </div>
             ))}
+            
+            {uploading && (
+               <div className="flex items-center gap-1.5 bg-blue-900/30 text-blue-200 text-xs px-2 py-1 rounded-md border border-blue-500/30 animate-pulse">
+                <Loader2 size={12} className="animate-spin" />
+                <span>Processing attachment...</span>
+              </div>
+            )}
           </div>
         )}
+        
+        {/* Drag Overlay Text */}
+        {isDragging && (
+           <div className="absolute inset-x-0 -top-12 flex justify-center pointer-events-none">
+             <div className="bg-blue-600 text-white text-sm px-4 py-1.5 rounded-full shadow-lg">
+               Drop files to upload
+             </div>
+           </div>
+        )}
 
-        <div className="relative flex items-end gap-2 bg-gray-800 border border-gray-700 rounded-xl p-2 focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:border-blue-500 transition-all">
+        <div className={`relative flex items-end gap-2 bg-gray-800 border rounded-xl p-2 transition-all ${
+          isDragging ? 'border-blue-500 ring-2 ring-blue-500/30' : 'border-gray-700 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500/50'
+        }`}>
           
           {/* File attachment button */}
           <button
@@ -118,8 +184,8 @@ export default function ChatInput({ onSubmit, disabled, sessionId }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask a question about maritime regulations..."
-            className="flex-1 bg-transparent border-none text-gray-100 placeholder-gray-500 resize-none py-2 px-1 focus:ring-0 max-h-[200px]"
+            placeholder={isDragging ? "Drop files here..." : "Ask a question about maritime regulations..."}
+            className="flex-1 bg-transparent border-none text-gray-100 placeholder-gray-500 resize-none py-2 px-1 focus:outline-none focus:ring-0 max-h-[200px]"
             rows={1}
             disabled={disabled}
           />

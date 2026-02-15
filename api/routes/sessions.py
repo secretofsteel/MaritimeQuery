@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_app_state, get_current_user
@@ -214,3 +214,94 @@ def get_messages(
         ],
         count=len(messages),
     )
+
+
+from fastapi.concurrency import run_in_threadpool
+
+@router.post("/{session_id}/upload", status_code=status.HTTP_202_ACCEPTED)
+async def upload_session_file(
+    session_id: str,
+    file: UploadFile = File(...),
+    app_state: AppState = Depends(get_app_state),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Upload a file to the session context.
+    
+    The file is processed asynchronously (chunked & embedded) and added
+    to the session's temporary context.
+    """
+    session_mgr = app_state.ensure_session_manager()
+    session = session_mgr.get_session(session_id)
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+        
+    upload_mgr = app_state.ensure_session_upload_manager()
+    
+    try:
+        # Read file content
+        content = await file.read()
+        
+        # Process upload in threadpool to avoid blocking event loop
+        # SessionUploadManager.add_upload is synchronous/blocking
+        result = await run_in_threadpool(
+            upload_mgr.add_upload,
+            session_id=session_id,
+            filename=file.filename,
+            file_bytes=content,
+            mime_type=file.content_type or "application/octet-stream"
+        )
+        
+        # Refresh cache so UI updates immediately if polling
+        app_state.refresh_session_upload_cache(session_id)
+        
+        return result
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="File upload processing failed"
+        )
+
+
+@router.delete("/{session_id}/upload/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session_upload(
+    session_id: str,
+    file_id: str,
+    app_state: AppState = Depends(get_app_state),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Delete a specific file from the session context."""
+    session_mgr = app_state.ensure_session_manager()
+    session = session_mgr.get_session(session_id)
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}",
+        )
+        
+    upload_mgr = app_state.ensure_session_upload_manager()
+    
+    # Run in threadpool as it involves file I/O
+    success = await run_in_threadpool(
+        upload_mgr.delete_upload,
+        session_id=session_id,
+        file_id=file_id
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File not found in session: {file_id}",
+        )
+        
+    # Refresh cache
+    app_state.refresh_session_upload_cache(session_id)

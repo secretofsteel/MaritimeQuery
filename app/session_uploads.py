@@ -585,6 +585,40 @@ class SessionUploadManager:
                    len(scored), min(top_k, len(scored)), boost * 100)
         return scored[:top_k]
 
+    # Delete single upload
+    def delete_upload(self, session_id: str, file_id: str) -> bool:
+        """Delete a specific uploaded file from the session."""
+        records = self._load_metadata_dict(session_id)
+        if file_id not in records:
+            return False
+            
+        record = records.pop(file_id)
+        # Update metadata file
+        ordered_records = sorted(records.values(), key=lambda r: r.get("uploaded_at", ""))
+        self._write_metadata(session_id, ordered_records)
+        self._metadata_cache[session_id] = ordered_records
+        
+        # Remove chunks
+        # This is a bit expensive as we load all chunks, filter, and write back
+        all_chunks = self._load_chunks(session_id)
+        new_chunks = [c for c in all_chunks if c.file_id != file_id]
+        
+        if len(new_chunks) != len(all_chunks):
+            self._write_chunks(session_id, new_chunks)
+            self._chunks_cache[session_id] = new_chunks
+            
+        # Remove extraction JSONL if it exists
+        extraction_dir = self._get_session_extraction_dir(session_id)
+        jsonl_path = extraction_dir / f"{file_id}.jsonl"
+        if jsonl_path.exists():
+            try:
+                jsonl_path.unlink()
+            except OSError as e:
+                LOGGER.warning("Failed to delete extraction JSONL %s: %s", jsonl_path, e)
+                
+        LOGGER.info("Deleted upload %s from session %s", file_id, session_id)
+        return True
+
     def delete_session_extraction_jsonls(self, session_id: str) -> None:
         """Delete all extraction JSONLs for a session."""
         extraction_dir = self._get_session_extraction_dir(session_id)
