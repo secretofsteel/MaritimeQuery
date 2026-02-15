@@ -19,9 +19,7 @@ export default function SessionItem({ session, isActive, onSelect, onDelete, onR
 
   const handleDelete = (e) => {
     e.stopPropagation()
-    if (confirm('Delete this conversation?')) {
-      onDelete(session.session_id)
-    }
+    onDelete(session.session_id)
   }
 
   // Simple relative time helper
