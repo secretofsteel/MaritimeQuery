@@ -169,8 +169,8 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
   };
 
   return (
-    <div className="h-full bg-gray-900 text-gray-100 p-6 overflow-y-auto">
-      <div className="mb-6">
+    <div className="h-full bg-gray-900 text-gray-100 p-6 flex flex-col overflow-hidden">
+      <div className="mb-6 shrink-0">
         <h2 className="text-xl font-semibold text-white flex items-center gap-2 mb-2">
           <UploadCloud size={20} /> Upload Documents
         </h2>
@@ -179,12 +179,12 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
         {/* Left Column: Upload */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="lg:col-span-2 flex flex-col gap-6 h-full min-h-0">
           {/* Drop Zone */}
           <div
-            className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+            className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors shrink-0 ${
               dragActive
                 ? 'border-blue-500 bg-blue-500/10'
                 : 'border-gray-700 hover:border-gray-600 bg-gray-800/50'
@@ -219,9 +219,9 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
 
           {/* File List */}
           {files.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium text-gray-400 mb-3">Selected Files ({files.length})</h3>
-              <div className="space-y-2 bg-gray-800 rounded-lg p-2 max-h-60 overflow-y-auto">
+            <div className="flex-1 flex flex-col min-h-0">
+              <h3 className="text-sm font-medium text-gray-400 mb-3 shrink-0">Selected Files ({files.length})</h3>
+              <div className="space-y-2 bg-gray-800 rounded-lg p-2 flex-1 overflow-y-auto min-h-0 border border-gray-700 custom-scrollbar">
                 {files.map((file, idx) => {
                   const isDuplicate = existingFilenames.has(file.name);
                   return (
@@ -253,7 +253,7 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
               </div>
 
               {/* Footer: Classification & Actions */}
-              <div className="mt-4 flex flex-col lg:flex-row gap-4 items-end justify-between bg-gray-800/50 p-4 rounded-lg border border-gray-700">
+              <div className="mt-4 flex flex-col lg:flex-row gap-4 items-end justify-between bg-gray-800/50 p-4 rounded-lg border border-gray-700 shrink-0">
                   
                   {/* Classification Dropdown */}
                   <div className="w-full lg:w-1/2">
@@ -272,6 +272,13 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
 
                   {/* Action Buttons */}
                   <div className="flex gap-3 w-full lg:w-auto">
+                    <button
+                      onClick={() => setFiles([])}
+                      disabled={uploading || files.length === 0}
+                      className="flex-1 lg:flex-none px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-300 rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      Clear Files
+                    </button>
                     <button
                       onClick={() => handleUpload(false)}
                       disabled={uploading || files.length === 0}
@@ -324,7 +331,7 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
         </div>
 
         {/* Right Column: Processing Controls & Status */}
-        <div className="space-y-6">
+        <div className="space-y-6 overflow-y-auto h-full min-h-0 custom-scrollbar">
           
           <div className="bg-gray-800 rounded-lg p-5 border border-gray-700">
             <h3 className="text-sm font-medium text-gray-300 mb-4 flex items-center gap-2">
