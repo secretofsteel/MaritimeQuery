@@ -9,19 +9,12 @@ import FormSchemaPanel from '../components/admin/FormSchemaPanel';
 import SystemPanel from '../components/admin/SystemPanel';
 
 const AdminPage = () => {
-  const { user, isSuperuser } = useAuth();
+  const { user } = useAuth();
   
   // State
   const [activeTab, setActiveTab] = useState('documents');
   const [selectedTenant, setSelectedTenant] = useState('');
   const [tenantList, setTenantList] = useState([]);
-
-  useEffect(() => {
-    if (user?.tenant_id) {
-      setSelectedTenant(user.tenant_id);
-    }
-    fetchTenants();
-  }, [user]);
 
   const fetchTenants = async () => {
     try {
@@ -34,6 +27,13 @@ const AdminPage = () => {
       console.error('Failed to load tenants:', err);
     }
   };
+
+  useEffect(() => {
+    if (user?.tenant_id) {
+      setSelectedTenant(user.tenant_id);
+    }
+    fetchTenants();
+  }, [user]);
 
   const renderContent = () => {
     switch (activeTab) {

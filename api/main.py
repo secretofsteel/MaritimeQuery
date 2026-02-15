@@ -29,6 +29,10 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     logger.info("Starting Maritime RAG API...")
 
+    # 0. Install broadcast log handler for System Panel
+    from api.log_stream import install_log_handler
+    install_log_handler()
+
     # 1. Config singleton — loads API keys, configures embedding model
     config = AppConfig.get()
     logger.info("Config loaded: base_dir=%s", config.paths.base_dir)

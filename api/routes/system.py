@@ -7,10 +7,13 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, Request
 
-from api.dependencies import get_current_tenant, get_current_user
+from api.dependencies import get_current_tenant, get_current_user, require_superuser
+from api.log_stream import get_log_buffer, register_client, unregister_client
+from app.constants import ALLOWED_DOC_TYPES
 from app.nodes import get_distinct_doc_count, get_node_count
 from app.nodes import NodeRepository
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -99,4 +102,61 @@ async def get_system_status(
         tenant_documents=tenant_docs,
         pg_connected=pg_connected,
         pg_tables=pg_tables,
+    )
+
+
+@router.get("/config/doc-types")
+async def get_doc_types(
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Return the list of allowed document types.
+
+    Used by the frontend for filter bars, upload selectors, and metadata editors.
+    Single source of truth — add new types in app/constants.py and they appear
+    everywhere automatically.
+    """
+    return {"doc_types": ALLOWED_DOC_TYPES}
+
+
+@router.get("/logs/stream")
+async def stream_logs(
+    user: Dict[str, Any] = Depends(require_superuser),
+):
+    """Stream server logs in real time via SSE. Superuser only.
+
+    On connect, sends the last ~500 buffered log lines (catchup),
+    then streams new log entries as they occur.
+    """
+    import asyncio
+
+    async def generate():
+        queue = register_client()
+        try:
+            # Phase 1: Send buffered history
+            for line in get_log_buffer():
+                yield f"data: {line}\n\n"
+
+            # Separator so frontend knows catchup is done
+            yield f"event: caught_up\ndata: ---\n\n"
+
+            # Phase 2: Stream live
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield f"data: {entry}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive to prevent connection timeout
+                    yield f": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            unregister_client(queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )

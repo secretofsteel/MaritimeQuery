@@ -16,6 +16,11 @@ from api.dependencies import (
     get_current_user,
     get_target_tenant,
 )
+from app.constants import ALLOWED_DOC_TYPES
+from app.metadata_updates import (
+    apply_corrections_to_gemini_record,
+    update_metadata_everywhere,
+)
 from api.processing_jobs import ProcessingJob, complete_job, get_job, start_job
 from app.config import AppConfig
 from app.files import current_files_index, load_jsonl
@@ -53,6 +58,22 @@ class DocumentListResponse(BaseModel):
     total_documents: int
     total_chunks: int
     doc_type_filter: Optional[str] = None  # NEW — echo back active filter
+
+
+class MetadataUpdateRequest(BaseModel):
+    """Partial update — only include fields you want to change."""
+    title: Optional[str] = None
+    doc_type: Optional[str] = None
+    form_number: Optional[str] = None
+    form_category_name: Optional[str] = None
+
+
+class MetadataUpdateResponse(BaseModel):
+    filename: str
+    success: bool
+    updated_fields: List[str]
+    error: Optional[str] = None
+
 
 
 class DocumentDetailResponse(BaseModel):
@@ -665,3 +686,110 @@ async def delete_document(
         deleted_from_disk=result.deleted_from_disk,
         error=result.error,
     )
+
+
+@router.patch("/{filename}/metadata", response_model=MetadataUpdateResponse)
+async def update_document_metadata(
+    filename: str,
+    request: MetadataUpdateRequest,
+    app_state: AppState = Depends(get_admin_app_state),
+):
+    """Update metadata for a processed document.
+
+    Applies corrections to the Gemini cache, in-memory nodes, and Qdrant
+    vector store. Only include fields you want to change.
+
+    Supported fields: title, doc_type, form_number, form_category_name.
+    """
+    # Build corrections dict from non-None fields
+    corrections = {}
+    if request.title is not None:
+        corrections["title"] = request.title
+    if request.doc_type is not None:
+        # Validate against allowed types
+        if request.doc_type.upper() not in [dt.upper() for dt in ALLOWED_DOC_TYPES]:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Invalid doc_type: {request.doc_type}",
+                    "allowed": ALLOWED_DOC_TYPES,
+                },
+            )
+        corrections["doc_type"] = request.doc_type.upper()
+    if request.form_number is not None:
+        corrections["form_number"] = request.form_number
+    if request.form_category_name is not None:
+        corrections["form_category_name"] = request.form_category_name
+
+    if not corrections:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Get nodes for in-memory update
+    nodes = app_state.nodes or []
+
+    try:
+        success = update_metadata_everywhere(filename, corrections, nodes)
+    except Exception as exc:
+        logger.error("Metadata update failed for %s: %s", filename, exc)
+        return MetadataUpdateResponse(
+            filename=filename,
+            success=False,
+            updated_fields=[],
+            error=str(exc),
+        )
+
+    if success:
+        logger.info(
+            "Metadata updated: file=%s fields=%s",
+            filename,
+            list(corrections.keys()),
+        )
+
+    return MetadataUpdateResponse(
+        filename=filename,
+        success=success,
+        updated_fields=list(corrections.keys()) if success else [],
+        error=None if success else "Update failed — check server logs",
+    )
+
+
+@router.get("/{filename}/metadata")
+async def get_document_metadata(
+    filename: str,
+    tenant_id: str = Depends(get_target_tenant),
+):
+    """Get document metadata including any corrections applied.
+
+    Returns the Gemini-extracted metadata with corrections overlaid,
+    plus the raw corrections dict so the UI can show what's been changed.
+    """
+    config = AppConfig.get()
+    gemini_cache_path = config.gemini_cache_for(tenant_id)
+
+    if gemini_cache_path.exists():
+        cache = load_jsonl(gemini_cache_path)
+    else:
+        cache = {}
+
+    entry = cache.get(filename)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No cache entry for {filename}")
+
+    gemini_meta = entry.get("gemini", {})
+    corrections = entry.get("corrections", {})
+
+    # Apply corrections to get effective values
+    effective = apply_corrections_to_gemini_record(gemini_meta, corrections)
+
+    return {
+        "filename": filename,
+        "title": effective.get("title"),
+        "doc_type": effective.get("doc_type"),
+        "form_number": effective.get("form_number"),
+        "form_category_name": effective.get("form_category_name") or effective.get("category"),
+        "topics": effective.get("topics"),
+        "section_count": len(effective.get("sections", [])),
+        "corrections_applied": corrections,  # what's been manually overridden
+        "has_corrections": bool(corrections),
+    }
+
