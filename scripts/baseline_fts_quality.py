@@ -57,7 +57,7 @@ def capture_baseline():
         print("ERROR: Could not load index. Is Qdrant running?")
         sys.exit(1)
 
-    fts = state.fts5_retriever
+    fts = state.fts_retriever
     if fts is None:
         print("ERROR: FTS retriever not initialized")
         sys.exit(1)
@@ -107,8 +107,8 @@ def capture_baseline():
     output = {
         "captured_at": datetime.now().isoformat(),
         "retriever": "SQLiteFTS5Retriever",
-        "node_count_at_capture": state.fts5_retriever._get_node_count()
-            if hasattr(state.fts5_retriever, '_get_node_count') else "unknown",
+        "node_count_at_capture": state.fts_retriever._get_node_count()
+            if hasattr(state.fts_retriever, '_get_node_count') else "unknown",
         "queries": results,
     }
 

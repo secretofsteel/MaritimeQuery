@@ -17,14 +17,6 @@ The generated hash can be copied directly into users.yaml.
 import sys
 import getpass
 
-try:
-    import streamlit_authenticator as stauth
-except ImportError:
-    print("Error: streamlit-authenticator not installed")
-    print("Install with: pip install streamlit-authenticator")
-    sys.exit(1)
-
-
 def generate_hash(password: str) -> str:
     """Generate bcrypt hash for a password."""
     import bcrypt

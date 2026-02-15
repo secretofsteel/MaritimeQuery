@@ -183,7 +183,7 @@ def sync_memory_to_db(app_state: "AppState") -> SyncMemoryResult:
         
         # Invalidate caches
         app_state.invalidate_node_map_cache()
-        app_state.fts5_retriever = None
+        app_state.fts_retriever = None
         app_state.ensure_retrievers()
         
         LOGGER.info("Synced PostgreSQL to Qdrant: %d → %d nodes", pg_count, total_inserted)
@@ -577,7 +577,7 @@ def delete_entire_library(app_state: "AppState") -> DeleteLibraryResult:
         app_state._nodes_cache = None
         app_state.index = None
         app_state.vector_retriever = None
-        app_state.fts5_retriever = None
+        app_state.fts_retriever = None
         app_state.bm25_retriever = None
         app_state._managers.clear()
         app_state.invalidate_node_map_cache()

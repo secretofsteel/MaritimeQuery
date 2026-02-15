@@ -34,7 +34,7 @@ class AppState:
     nodes: List[Document] = field(default_factory=list)
     index: Optional[VectorStoreIndex] = None
     # Retrievers
-    fts5_retriever: Optional[PgFTSRetriever] = None
+    fts_retriever: Optional[PgFTSRetriever] = None
     vector_retriever: Optional[TenantAwareVectorRetriever] = None
     bm25_retriever: Optional[PgFTSRetriever] = None  # Alias for backward compatibility
     query_history: List[Dict] = field(default_factory=list)
@@ -130,15 +130,15 @@ class AppState:
         tenant_id = self.tenant_id
 
         # 2. FTS5 (PostgreSQL) Retriever
-        if self.fts5_retriever is None:
-            self.fts5_retriever = PgFTSRetriever(
+        if self.fts_retriever is None:
+            self.fts_retriever = PgFTSRetriever(
                 tenant_id=tenant_id,
                 similarity_top_k=20,
             )
             LOGGER.debug("Created PgFTSRetriever for tenant %s", tenant_id)
 
         # Point bm25_retriever to fts5 for compatibility
-        self.bm25_retriever = self.fts5_retriever
+        self.bm25_retriever = self.fts_retriever
 
         # Tenant-aware vector retriever
         if self.vector_retriever is None and self.index is not None:
@@ -164,7 +164,7 @@ class AppState:
         return (
             self.index is not None
             and self.vector_retriever is not None
-            and self.fts5_retriever is not None  # Changed from bm25_retriever
+            and self.fts_retriever is not None  # Changed from bm25_retriever
         )
 
     def ensure_manager(self, target_tenant_id: Optional[str] = None) -> IncrementalIndexManager:
@@ -719,7 +719,7 @@ class AppState:
         self.nodes = []  # Clear lazy-loaded nodes
         
         # Clear retrievers so they get recreated with correct tenant
-        self.fts5_retriever = None
+        self.fts_retriever = None
         self.bm25_retriever = None
         self.vector_retriever = None
         

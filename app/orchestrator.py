@@ -756,7 +756,7 @@ class FilteredRetriever:
         Sequential inner pipeline:
         FTS5 (filtered) → Vector (filtered) → RRF → Cohere rerank.
         """
-        fts_retriever = self.app_state.fts5_retriever
+        fts_retriever = self.app_state.fts_retriever
         vector_retriever = self.app_state.vector_retriever
 
         if not fts_retriever or not vector_retriever:
