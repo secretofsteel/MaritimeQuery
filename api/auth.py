@@ -24,6 +24,40 @@ logger = logging.getLogger(__name__)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
+# --- Cookie Management ---
+
+COOKIE_NAME = "access_token"
+COOKIE_MAX_AGE = ACCESS_TOKEN_EXPIRE_HOURS * 3600  # seconds
+
+
+def set_auth_cookie(response, token: str, secure: bool = False) -> None:
+    """Set httpOnly JWT cookie on a FastAPI response.
+
+    Args:
+        response: FastAPI Response object.
+        token: JWT access token string.
+        secure: If True, cookie only sent over HTTPS. Set True in production.
+    """
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        max_age=COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
+def clear_auth_cookie(response) -> None:
+    """Remove the auth cookie from a FastAPI response."""
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        httponly=True,
+        samesite="lax",
+    )
+
 
 def get_jwt_secret() -> str:
     """Get JWT signing secret from environment.
@@ -132,6 +166,7 @@ def create_access_token(
     username: str,
     tenant_id: str,
     role: str,
+    name: str = "",
     expires_hours: int = ACCESS_TOKEN_EXPIRE_HOURS,
 ) -> str:
     """Create a signed JWT access token.
@@ -140,6 +175,7 @@ def create_access_token(
         sub: username
         tenant_id: tenant identifier
         role: "superuser" or "tenant"
+        name: display name
         exp: expiration timestamp
         iat: issued-at timestamp
     """
@@ -148,6 +184,7 @@ def create_access_token(
         "sub": username,
         "tenant_id": tenant_id,
         "role": role,
+        "name": name,
         "exp": now + timedelta(hours=expires_hours),
         "iat": now,
     }
