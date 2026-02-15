@@ -210,7 +210,7 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
                     Click to upload or drag and drop
                 </span>
                 <span className="text-sm text-gray-500">
-                    PDF, DOCX, TXT (Max 50MB per file)
+                    PDF, DOCX, DOC, XLSX, XLS, TXT (Max 50MB per file)
                 </span>
             </label>
           </div>
