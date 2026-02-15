@@ -9,7 +9,8 @@ const FormSchemaPanel = ({ apiBasePath, tenantId, readOnly = false }) => {
   const [successMsg, setSuccessMsg] = useState('');
 
   // Editing state
-  const [editingCode, setEditingCode] = useState(null); // Code of the item being edited
+  const [editingOriginalCode, setEditingOriginalCode] = useState(null); // The key *before* edit
+  const [editCode, setEditCode] = useState(''); // The new key being typed
   const [editDescription, setEditDescription] = useState('');
 
   // New item state
@@ -99,21 +100,46 @@ const FormSchemaPanel = ({ apiBasePath, tenantId, readOnly = false }) => {
   };
 
   const startEditing = (code, currentDesc) => {
-    setEditingCode(code);
+    setEditingOriginalCode(code);
+    setEditCode(code);
     setEditDescription(currentDesc);
   };
 
+  const cancelEditing = () => {
+    setEditingOriginalCode(null);
+    setEditCode('');
+    setEditDescription('');
+    setError(null);
+  };
+
   const saveEdit = async () => {
-    if (!editingCode) return;
+    if (!editingOriginalCode) return;
     
-    const updated = {
-      ...categories,
-      [editingCode]: editDescription.trim(),
-    };
+    const newKey = editCode.trim().toUpperCase();
+    const newDesc = editDescription.trim();
+
+    if (!newKey || !newDesc) {
+      setError("Code and Description cannot be empty");
+      return;
+    }
+
+    // If key changed, check for collision
+    if (newKey !== editingOriginalCode && categories[newKey]) {
+      setError(`Code ${newKey} already exists`);
+      return;
+    }
+
+    // Construct new object preserving order if possible (not guaranteed in JS objects but good effort)
+    const updated = { ...categories };
+    
+    if (newKey !== editingOriginalCode) {
+      delete updated[editingOriginalCode];
+    }
+    updated[newKey] = newDesc;
 
     const success = await saveSchema(updated);
     if (success) {
-      setEditingCode(null);
+      cancelEditing();
     }
   };
 
@@ -163,7 +189,7 @@ const FormSchemaPanel = ({ apiBasePath, tenantId, readOnly = false }) => {
               placeholder="CODE (e.g. HR)"
               value={newCode}
               onChange={(e) => setNewCode(e.target.value.toUpperCase())}
-              className="w-24 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none uppercase"
+              className="w-32 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none uppercase"
               maxLength={10}
             />
             <input
@@ -190,7 +216,7 @@ const FormSchemaPanel = ({ apiBasePath, tenantId, readOnly = false }) => {
         <table className="w-full text-left border-collapse">
           <thead className="bg-gray-800/50 text-gray-400 text-xs uppercase tracking-wider sticky top-0">
             <tr>
-              <th className="px-4 py-3 font-medium w-32 border-b border-gray-800">Code</th>
+              <th className="px-4 py-3 font-medium w-48 border-b border-gray-800">Code</th>
               <th className="px-4 py-3 font-medium border-b border-gray-800">Description</th>
               {!readOnly && <th className="px-4 py-3 font-medium w-24 border-b border-gray-800 text-right">Actions</th>}
             </tr>
@@ -203,55 +229,79 @@ const FormSchemaPanel = ({ apiBasePath, tenantId, readOnly = false }) => {
                 </td>
               </tr>
             ) : (
-              sortedCodes.map((code) => (
-                <tr key={code} className="hover:bg-gray-800/30 group transition-colors">
-                  <td className="px-4 py-3 font-mono text-sm text-blue-400 font-medium">
-                    {code}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-300">
-                    {editingCode === code ? (
-                      <div className="flex items-center gap-2">
+              sortedCodes.map((code) => {
+                const isEditing = editingOriginalCode === code;
+                
+                return (
+                  <tr key={code} className={`hover:bg-gray-800/30 group transition-colors ${isEditing ? 'bg-gray-800/50' : ''}`}>
+                    {/* Code Column */}
+                    <td className="px-4 py-3 font-mono text-sm text-blue-400 font-medium align-middle">
+                      {isEditing ? (
                         <input
                           type="text"
-                          value={editDescription}
-                          onChange={(e) => setEditDescription(e.target.value)}
-                          className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveEdit();
-                            if (e.key === 'Escape') setEditingCode(null);
-                          }}
-                          autoFocus
+                          value={editCode}
+                          onChange={(e) => setEditCode(e.target.value.toUpperCase())}
+                          className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none uppercase font-mono"
+                          maxLength={10}
+                          autoFocus // First input gets focus
                         />
-                        <button onClick={saveEdit} className="text-green-400 hover:text-green-300 p-1">
-                          <Check size={16} />
-                        </button>
-                        <button onClick={() => setEditingCode(null)} className="text-red-400 hover:text-red-300 p-1">
-                          <X size={16} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div 
-                        className="cursor-pointer group-hover:text-white flex items-center gap-2"
-                        onClick={() => !readOnly && startEditing(code, categories[code])}
-                      >
-                        {categories[code]}
-                        {!readOnly && <Edit2 size={12} className="opacity-0 group-hover:opacity-30" />}
-                      </div>
-                    )}
-                  </td>
-                  {!readOnly && (
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => handleDelete(code)}
-                        className="text-gray-600 hover:text-red-400 p-1 transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 size={16} />
-                      </button>
+                      ) : (
+                        code
+                      )}
                     </td>
-                  )}
-                </tr>
-              ))
+
+                    {/* Description Column */}
+                    <td className="px-4 py-3 text-sm text-gray-300 align-middle">
+                      {isEditing ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={editDescription}
+                            onChange={(e) => setEditDescription(e.target.value)}
+                            className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') saveEdit();
+                              if (e.key === 'Escape') cancelEditing();
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <div 
+                          className="cursor-pointer group-hover:text-white flex items-center gap-2"
+                          onClick={() => !readOnly && startEditing(code, categories[code])}
+                        >
+                          {categories[code]}
+                          {!readOnly && <Edit2 size={12} className="opacity-0 group-hover:opacity-30" />}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Actions Column */}
+                    {!readOnly && (
+                      <td className="px-4 py-3 text-right align-middle">
+                        {isEditing ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <button onClick={saveEdit} className="text-green-400 hover:text-green-300 p-1" title="Save">
+                              <Check size={18} />
+                            </button>
+                            <button onClick={cancelEditing} className="text-gray-400 hover:text-gray-300 p-1" title="Cancel">
+                              <X size={18} />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => handleDelete(code)}
+                            className="text-gray-600 hover:text-red-400 p-1 transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
