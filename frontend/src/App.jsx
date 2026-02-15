@@ -6,6 +6,7 @@ import AppShell from './components/layout/AppShell'
 import LoginPage from './pages/LoginPage'
 import ChatPage from './pages/ChatPage'
 import AdminPage from './pages/AdminPage'
+import SettingsPage from './pages/SettingsPage'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
             }
           >
             <Route path="/chat" element={<ChatPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route
               path="/admin"
               element={
