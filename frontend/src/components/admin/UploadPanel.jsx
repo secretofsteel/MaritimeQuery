@@ -42,7 +42,9 @@ const UploadPanel = ({ tenantId }) => {
           setIsProcessing(true);
         }
       }
-    } catch (err) {}
+    } catch {
+      // Ignore errors during background status check
+    }
   }, [tenantId]);
 
   useEffect(() => {
@@ -112,11 +114,14 @@ const UploadPanel = ({ tenantId }) => {
     try {
       const url = new URL('/api/v1/documents/upload', window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
+      url.searchParams.set('overwrite', 'true'); // Fix P1/P4: Always overwrite to avoid 409s
 
       const res = await fetch(url.toString(), {
         method: 'POST',
         body: formData, // Browser sets Content-Type automatically
+        credentials: 'include',
       });
+
 
       if (!res.ok) throw new Error('Upload failed');
 
@@ -147,6 +152,7 @@ const UploadPanel = ({ tenantId }) => {
       const res = await fetch(url.toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ force_rebuild: forceRebuild }),
       });
 

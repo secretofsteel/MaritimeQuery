@@ -8,14 +8,16 @@ const DocumentsPanel = ({ tenantId }) => {
   const [sortField, setSortField] = useState('filename');
   const [sortDirection, setSortDirection] = useState('asc');
   const [searchQuery, setSearchQuery] = useState('');
+  const [docTypeFilter, setDocTypeFilter] = useState(null); // P3: Filter by doc_type
 
   const fetchDocuments = useCallback(async () => {
     setIsLoading(true);
     try {
       const url = new URL('/api/v1/documents', window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
+      if (docTypeFilter) url.searchParams.set('doc_type', docTypeFilter); // P3
 
-      const res = await fetch(url.toString());
+      const res = await fetch(url.toString(), { credentials: 'include' }); // Fix Auth
       if (!res.ok) throw new Error('Failed to load documents');
       
       const data = await res.json();
@@ -26,7 +28,7 @@ const DocumentsPanel = ({ tenantId }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [tenantId]);
+  }, [tenantId, docTypeFilter]); // Add docTypeFilter dependency
 
   useEffect(() => {
     fetchDocuments();
@@ -39,11 +41,14 @@ const DocumentsPanel = ({ tenantId }) => {
       const url = new URL(`/api/v1/documents/${filename}`, window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
 
-      const res = await fetch(url.toString(), { method: 'DELETE' });
+      const res = await fetch(url.toString(), { 
+        method: 'DELETE',
+        credentials: 'include' 
+      });
       if (!res.ok) throw new Error('Delete failed');
 
       fetchDocuments();
-    } catch (err) {
+    } catch {
       alert('Failed to delete document');
     }
   };
@@ -60,13 +65,14 @@ const DocumentsPanel = ({ tenantId }) => {
       const res = await fetch(url.toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ filenames: Array.from(selectedFiles) }),
       });
 
       if (!res.ok) throw new Error('Batch delete failed');
 
       fetchDocuments();
-    } catch (err) {
+    } catch {
       alert('Failed to delete documents');
     }
   };
@@ -133,6 +139,23 @@ const DocumentsPanel = ({ tenantId }) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   };
 
+  const getDocTypeBadge = (type) => {
+      if (!type) return null;
+      const colors = {
+          'FORM': 'bg-blue-900/40 text-blue-400 border-blue-900',
+          'PROCEDURE': 'bg-green-900/40 text-green-400 border-green-900',
+          'CHECKLIST': 'bg-purple-900/40 text-purple-400 border-purple-900',
+          'REGULATION': 'bg-amber-900/40 text-amber-400 border-amber-900',
+          'CIRCULAR': 'bg-gray-700/40 text-gray-400 border-gray-700',
+      };
+      const className = colors[type] || 'bg-gray-800 text-gray-400 border-gray-700';
+      return (
+          <span className={`text-[10px] px-2 py-0.5 rounded border ${className} font-medium`}>
+              {type}
+          </span>
+      );
+  };
+
   const getStatusIcon = (status) => {
     switch (status) {
       case 'success': return <CheckCircle size={14} className="text-green-500" />;
@@ -161,6 +184,23 @@ const DocumentsPanel = ({ tenantId }) => {
         </div>
 
         <div className="flex gap-3">
+            {/* P3: Filter Bar */}
+            <div className="flex bg-gray-800 rounded-md p-0.5 border border-gray-700">
+                {['ALL', 'FORM', 'PROCEDURE', 'CHECKLIST', 'REGULATION'].map(type => (
+                    <button
+                        key={type}
+                        onClick={() => setDocTypeFilter(type === 'ALL' ? null : type)}
+                        className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                            (type === 'ALL' && !docTypeFilter) || docTypeFilter === type
+                                ? 'bg-blue-600 text-white shadow-sm'
+                                : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                        }`}
+                    >
+                        {type}
+                    </button>
+                ))}
+            </div>
+
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
             <input
@@ -197,15 +237,11 @@ const DocumentsPanel = ({ tenantId }) => {
                     className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-offset-gray-900"
                   />
                 </th>
-                <th 
-                  className="px-4 py-3 font-medium cursor-pointer hover:text-white border-b border-gray-800 group"
-                  onClick={() => handleSort('filename')}
-                >
-                  <div className="flex items-center gap-1">
-                    Filename
-                    {sortField === 'filename' && <span className="text-[10px]">{sortDirection === 'asc' ? '▲' : '▼'}</span>}
-                  </div>
+                {/* P2: Enriched Columns */}
+                <th className="px-4 py-3 font-medium cursor-pointer hover:text-white border-b border-gray-800">
+                    Document
                 </th>
+                <th className="px-4 py-3 font-medium border-b border-gray-800 w-28">Type</th>
                 <th 
                   className="px-4 py-3 font-medium cursor-pointer hover:text-white border-b border-gray-800 w-24"
                   onClick={() => handleSort('file_size_bytes')}
@@ -232,14 +268,14 @@ const DocumentsPanel = ({ tenantId }) => {
             <tbody className="divide-y divide-gray-800">
               {isLoading && documents.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500">
                     <RefreshCw size={24} className="animate-spin mx-auto mb-2" />
                     Loading documents...
                   </td>
                 </tr>
               ) : sortedDocs.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500 italic">
+                  <td colSpan={8} className="px-4 py-8 text-center text-gray-500 italic">
                     {searchQuery ? 'No documents match your search.' : 'No documents uploaded yet.'}
                   </td>
                 </tr>
@@ -254,8 +290,18 @@ const DocumentsPanel = ({ tenantId }) => {
                         className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-offset-gray-900"
                       />
                     </td>
-                    <td className="px-4 py-3 text-sm font-medium text-gray-200 truncate max-w-xs" title={doc.filename}>
-                      {doc.filename}
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col max-w-xs">
+                          <span className="text-sm font-medium text-gray-200 truncate" title={doc.title || doc.filename}>
+                              {doc.title || doc.filename}
+                          </span>
+                          {doc.title && doc.title !== doc.filename && (
+                              <span className="text-xs text-gray-500 truncate">{doc.filename}</span>
+                          )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                        {getDocTypeBadge(doc.doc_type)}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-400 font-mono">
                       {formatBytes(doc.file_size_bytes)}
@@ -269,7 +315,7 @@ const DocumentsPanel = ({ tenantId }) => {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-center text-xs">
-                      {doc.is_cached ? (
+                      {doc.extraction_cached ? (
                         <span className="text-blue-400 bg-blue-900/20 px-1.5 py-0.5 rounded">YES</span>
                       ) : (
                         <span className="text-gray-600">-</span>

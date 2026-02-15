@@ -41,6 +41,10 @@ class DocumentInfo(BaseModel):
     extraction_cached: bool                  # has entry in Gemini cache
     extraction_status: str                   # "success" | "error" | "not_extracted"
     validation_coverage: Optional[float]     # n-gram coverage score, if available
+    # NEW — from Gemini cache
+    title: Optional[str] = None
+    doc_type: Optional[str] = None
+    topics: Optional[List[str]] = None
 
 
 class DocumentListResponse(BaseModel):
@@ -48,6 +52,7 @@ class DocumentListResponse(BaseModel):
     documents: List[DocumentInfo]
     total_documents: int
     total_chunks: int
+    doc_type_filter: Optional[str] = None  # NEW — echo back active filter
 
 
 class DocumentDetailResponse(BaseModel):
@@ -136,6 +141,10 @@ class ProcessingReportResponse(BaseModel):
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
     tenant_id: str = Depends(get_target_tenant),
+    doc_type: Optional[str] = Query(
+        None,
+        description="Filter by document type (e.g., FORM, PROCEDURE, CHECKLIST)",
+    ),
 ):
     """List all documents for the target tenant with rich status info."""
     config = AppConfig.get()
@@ -172,6 +181,14 @@ async def list_documents(
         cache_entry = gemini_cache.get(filename, {})
         gemini_meta = cache_entry.get("gemini", {})
 
+        # NEW: filter by doc_type if requested
+        file_doc_type = gemini_meta.get("doc_type", "")
+        if doc_type and file_doc_type and file_doc_type.upper() != doc_type.upper():
+            continue
+        # If doc_type filter is set but file has no doc_type, skip it (strict filtering)
+        if doc_type and not file_doc_type:
+            continue
+
         has_error = "parse_error" in gemini_meta or "extraction_error" in gemini_meta
         has_sections = bool(gemini_meta.get("sections"))
 
@@ -183,6 +200,10 @@ async def list_documents(
             ext_status = "not_extracted"
 
         validation = gemini_meta.get("validation", {})
+        
+        # Add these extractions:
+        doc_title = gemini_meta.get("title")
+        doc_topics = gemini_meta.get("topics")  # list of strings or None
 
         documents.append(DocumentInfo(
             filename=filename,
@@ -192,6 +213,10 @@ async def list_documents(
             extraction_cached=filename in gemini_cache,
             extraction_status=ext_status,
             validation_coverage=validation.get("ngram_coverage"),
+            # NEW fields:
+            title=doc_title,
+            doc_type=file_doc_type if file_doc_type else None,
+            topics=doc_topics,
         ))
 
     total_chunks = repo.get_node_count()
@@ -201,6 +226,7 @@ async def list_documents(
         documents=documents,
         total_documents=len(documents),
         total_chunks=total_chunks,
+        doc_type_filter=doc_type,
     )
 
 

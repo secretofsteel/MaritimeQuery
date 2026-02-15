@@ -12,7 +12,7 @@ const ProcessingStatus = ({ tenantId, isActive, onComplete }) => {
       const url = new URL('/api/v1/documents/process/status', window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
 
-      const res = await fetch(url.toString());
+      const res = await fetch(url.toString(), { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setStatus(data);
@@ -34,21 +34,23 @@ const ProcessingStatus = ({ tenantId, isActive, onComplete }) => {
       const url = new URL('/api/v1/documents/process/report', window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
 
-      const res = await fetch(url.toString());
+      const res = await fetch(url.toString(), { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setReport(data);
-        // Auto-expand if just finished
-        if (data && (!report || report.timestamp !== data.timestamp)) {
-          setIsReportExpanded(true);
-        }
+        setReport(prev => {
+          // Auto-expand if new report
+          if (data && (!prev || prev.timestamp !== data.timestamp)) {
+             setIsReportExpanded(true);
+          }
+          return data;
+        });
       } else {
         setReport(null);
       }
     } catch (err) {
-            console.error('Report fetch failed:', err);
+      console.error('Report fetch failed:', err);
     }
-  }, [tenantId, report]);
+  }, [tenantId]);
 
   const stopPolling = useCallback(() => {
     if (pollIntervalRef.current) {
