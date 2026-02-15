@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { UploadCloud, File, X, AlertCircle, CheckCircle, Zap } from 'lucide-react';
+import { UploadCloud, File, X, AlertCircle, CheckCircle, Zap, AlertTriangle } from 'lucide-react';
 import { useDocTypes } from '../../hooks/useDocTypes';
 import ProcessingStatus from './ProcessingStatus';
 
@@ -234,10 +234,10 @@ const UploadPanel = ({ tenantId, onUploadComplete }) => {
                         )}
                         <div className="flex flex-col min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className={`text-sm truncate max-w-[200px] ${isDuplicate ? 'text-amber-200' : 'text-gray-300'}`}>{file.name}</span>
+                            <span className={`text-sm truncate max-w-[400px] ${isDuplicate ? 'text-amber-200' : 'text-gray-300'}`}>{file.name}</span>
                           </div>
                           {isDuplicate && (
-                             <span className="text-[10px] text-amber-400/80 leading-none mt-0.5">(already exists — will overwrite)</span>
+                             <span className="text-[14px] text-amber-400/80 leading-none mt-0.5">(already exists — will overwrite)</span>
                           )}
                         </div>
                         <span className="text-xs text-gray-500 ml-auto mr-2">{(file.size / 1024 / 1024).toFixed(2)} MB</span>
