@@ -108,12 +108,10 @@ from api.routes.sessions import router as sessions_router
 from api.routes.feedback import router as feedback_router
 from api.routes.admin import router as admin_router
 from api.routes.settings import router as settings_router
-from api.routes.chat import router as chat_router # Added based on usage in include_router
 from api.routes.documents import router as documents_router # Moved up for consolidation
 from api.routes.system import router as system_router # Moved up for consolidation
 
 app.include_router(auth_router)
-app.include_router(chat_router)
 app.include_router(query_router)
 app.include_router(documents_router)
 app.include_router(sessions_router)
