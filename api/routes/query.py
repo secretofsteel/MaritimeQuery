@@ -119,18 +119,11 @@ def run_query(
 
     # 4. Consume answer stream
     answer_stream = result.get("answer_stream")
-    full_answer_parts = []
-
     if answer_stream:
-        for chunk in answer_stream:
-            full_answer_parts.append(chunk)
-            yield _sse_event("token", {"text": chunk})
+        full_answer = "".join(answer_stream)
+        result["answer"] = full_answer
 
-    full_answer = "".join(full_answer_parts) if full_answer_parts else result.get("answer", "")
-
-    # Handle non-streaming answers (greetings, chitchat, direct responses)
-    if not full_answer_parts and full_answer:
-        yield _sse_event("token", {"text": full_answer})
+    answer = result.get("answer", "")
 
     # 5. Save messages to session
     app_state.add_message_to_current_session("user", request.query)
@@ -271,6 +264,10 @@ def run_query_stream(
                     yield _sse_event("token", {"text": chunk})
 
             full_answer = "".join(full_answer_parts) if full_answer_parts else result.get("answer", "")
+
+            # Handle non-streaming answers (greetings, chitchat, direct responses)
+            if not full_answer_parts and full_answer:
+                yield _sse_event("token", {"text": full_answer})
 
             # 5. Save messages to session
             app_state.add_message_to_current_session("user", request.query)

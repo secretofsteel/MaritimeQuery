@@ -1,8 +1,10 @@
-/* frontend/src/index.css */
 @import "tailwindcss";
 
-html, body, #root {
+html, body {
   height: 100%;
   margin: 0;
-  overflow: hidden;
+}
+
+#root {
+  height: 100%;
 }

@@ -21,7 +21,7 @@ export default function AppShell() {
     }`
 
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col">
+    <div className="h-screen bg-gray-950 flex flex-col overflow-hidden">
       {/* Top navigation bar */}
       <header className="bg-gray-900 border-b border-gray-800 px-4 h-14 flex items-center justify-between shrink-0">
         {/* Left: App name + nav */}
