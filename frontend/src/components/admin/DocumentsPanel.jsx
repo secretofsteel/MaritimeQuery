@@ -2,12 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Trash2, RefreshCw, FileText, CheckCircle, AlertTriangle, XCircle, Search, Edit2, X, Save } from 'lucide-react';
 import { useDocTypes } from '../../hooks/useDocTypes';
 
-const DocumentsPanel = ({ tenantId }) => {
+const DocumentsPanel = ({ tenantId, tenantList = [] }) => {
   const [documents, setDocuments] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedFiles, setSelectedFiles] = useState(new Set());
-  const [sortField, setSortField] = useState('filename');
-  const [sortDirection, setSortDirection] = useState('asc');
+  const [sortField] = useState('filename');
+  const [sortDirection] = useState('asc');
   const [searchQuery, setSearchQuery] = useState('');
   const [docTypeFilter, setDocTypeFilter] = useState(null);
   
@@ -18,6 +18,10 @@ const DocumentsPanel = ({ tenantId }) => {
   const [editingFile, setEditingFile] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [isSaving, setIsSaving] = useState(false);
+
+  // Batch Edit state
+  const [isBatchEditing, setIsBatchEditing] = useState(false);
+  const [batchForm, setBatchForm] = useState({ doc_type: '', owner_tenant: '' });
 
   const fetchDocuments = useCallback(async () => {
     setIsLoading(true);
@@ -49,7 +53,7 @@ const DocumentsPanel = ({ tenantId }) => {
     if (!window.confirm(`Are you sure you want to delete "${filename}"?`)) return;
 
     try {
-      const url = new URL(`/api/v1/documents/${filename}`, window.location.origin);
+      const url = new URL(`/api/v1/documents/${encodeURIComponent(filename)}`, window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
 
       const res = await fetch(url.toString(), { 
@@ -103,10 +107,11 @@ const DocumentsPanel = ({ tenantId }) => {
       doc_type: doc.doc_type || 'FORM',
       form_number: '', // Will populate from fetch
       form_category_name: '', // Will populate from fetch
+      owner_tenant: tenantId, // Default to current
     });
 
     try {
-      const url = new URL(`/api/v1/documents/${doc.filename}/metadata`, window.location.origin);
+      const url = new URL(`/api/v1/documents/${encodeURIComponent(doc.filename)}/metadata`, window.location.origin);
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
       
       const res = await fetch(url.toString(), {
@@ -121,6 +126,7 @@ const DocumentsPanel = ({ tenantId }) => {
           form_number: data.form_number || '',
           form_category_name: data.form_category_name || '',
           corrections_applied: data.corrections_applied,
+          owner_tenant: data.owner_tenant || tenantId,
         });
       }
     } catch (err) {
@@ -131,38 +137,106 @@ const DocumentsPanel = ({ tenantId }) => {
   const saveEditing = async () => {
     setIsSaving(true);
     try {
-        const url = new URL(`/api/v1/documents/${editingFile}/metadata`, window.location.origin);
-        if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
+        const metadataUrl = new URL(`/api/v1/documents/${encodeURIComponent(editingFile)}/metadata`, window.location.origin);
+        if (tenantId) metadataUrl.searchParams.set('target_tenant_id', tenantId);
 
-        // Send only fields that actually have values or are relevant
-        const payload = {
+        // 1. Save Metadata Corrections
+        const metadataPayload = {
             title: editForm.title,
             doc_type: editForm.doc_type,
-            // Only send these if not empty/null
             ...(editForm.form_number ? { form_number: editForm.form_number } : {}),
             ...(editForm.form_category_name ? { form_category_name: editForm.form_category_name } : {}),
         };
 
-        const res = await fetch(url.toString(), {
+        const metaRes = await fetch(metadataUrl.toString(), {
             method: 'PATCH',
-            headers: { 
-                'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(metadataPayload),
+        });
+
+        if (!metaRes.ok) {
+            const err = await metaRes.json();
+            throw new Error(err.detail?.message || 'Failed to update metadata');
+        }
+
+        // 2. Handle Ownership Transfer if changed
+        if (editForm.owner_tenant && editForm.owner_tenant !== tenantId) {
+             const transferUrl = new URL(`/api/v1/documents/${encodeURIComponent(editingFile)}/transfer`, window.location.origin);
+             if (tenantId) transferUrl.searchParams.set('target_tenant_id', tenantId);
+
+             const transferRes = await fetch(transferUrl.toString(), {
+                 method: 'POST',
+                 headers: { 'Content-Type': 'application/json' },
+                 credentials: 'include',
+                 body: JSON.stringify({ new_tenant_id: editForm.owner_tenant }),
+             });
+
+             if (!transferRes.ok) {
+                 const err = await transferRes.json();
+                 throw new Error(err.detail || 'Transfer failed');
+             }
+        }
+
+        setEditingFile(null);
+        fetchDocuments(); // Refresh list
+    } catch (err) {
+        console.error(err);
+        alert(`Error: ${err.message}`);
+    } finally {
+        setIsSaving(false);
+    }
+  };
+
+  const saveBatchEditing = async () => {
+    if (!batchForm.doc_type && !batchForm.owner_tenant) {
+      alert("Please select at least one field to update.");
+      return;
+    }
+    
+    // Confirm
+    if (!window.confirm(`Update ${selectedFiles.size} documents? This cannot be undone.`)) return;
+
+    setIsSaving(true);
+    try {
+        const url = new URL('/api/v1/documents/batch-metadata', window.location.origin);
+        if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
+
+        const payload = {
+            filenames: Array.from(selectedFiles),
+            ...(batchForm.doc_type ? { doc_type: batchForm.doc_type } : {}),
+            ...(batchForm.owner_tenant ? { owner_tenant: batchForm.owner_tenant } : {}),
+        };
+
+        const res = await fetch(url.toString(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(payload),
         });
 
         if (!res.ok) {
             const err = await res.json();
-            alert(`Update failed: ${err.detail?.message || 'Unknown error'}`);
-            return;
+            throw new Error(err.detail?.message || 'Batch update failed');
         }
 
-        setEditingFile(null);
-        fetchDocuments(); // Refresh list to show changes
+        const data = await res.json();
+        
+        // Show result summary
+        let msg = `Successfully updated ${data.success_count} documents.`;
+        if (data.failure_count > 0) {
+            msg += `\nFailed: ${data.failure_count}\nErrors: ${JSON.stringify(data.errors)}`;
+        }
+        alert(msg);
+
+        setIsBatchEditing(false);
+        setBatchForm({ doc_type: '', owner_tenant: '' });
+        setSelectedFiles(new Set()); // Clear selection
+        fetchDocuments(); // Refresh list
+
     } catch (err) {
         console.error(err);
-        alert('Failed to save changes');
+        alert(`Error: ${err.message}`);
     } finally {
         setIsSaving(false);
     }
@@ -213,14 +287,7 @@ const DocumentsPanel = ({ tenantId }) => {
     }
   };
 
-  const handleSort = (field) => {
-    if (sortField === field) {
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortField(field);
-      setSortDirection('asc');
-    }
-  };
+
 
   const formatBytes = (bytes, decimals = 2) => {
     if (!bytes) return '0 B';
@@ -232,6 +299,7 @@ const DocumentsPanel = ({ tenantId }) => {
 
   const getDocTypeBadge = (type) => {
       if (!type) return null;
+      const normalizedType = type.toUpperCase();
       const colors = {
           'FORM': 'bg-blue-900/40 text-blue-400 border-blue-900',
           'PROCEDURE': 'bg-green-900/40 text-green-400 border-green-900',
@@ -240,10 +308,12 @@ const DocumentsPanel = ({ tenantId }) => {
           'VETTING': 'bg-red-900/40 text-red-400 border-red-900',
           'CIRCULAR': 'bg-gray-700/40 text-gray-400 border-gray-700',
       };
-      const className = colors[type] || 'bg-gray-800 text-gray-400 border-gray-700';
+      // Fallback for known types that might have slightly different casing in DB, 
+      // or unknown types getting a default style.
+      const className = colors[normalizedType] || 'bg-gray-800 text-gray-400 border-gray-700';
       return (
           <span className={`text-[10px] px-2 py-0.5 rounded border ${className} font-medium`}>
-              {type}
+              {normalizedType}
           </span>
       );
   };
@@ -257,8 +327,82 @@ const DocumentsPanel = ({ tenantId }) => {
     }
   };
 
+  const handleBatchEditClick = () => {
+    setIsBatchEditing(true);
+    setBatchForm({ doc_type: '', owner_tenant: '' });
+  };
+
   return (
-    <div className="h-full flex flex-col bg-gray-900 text-gray-100">
+    <div className="h-full flex flex-col bg-gray-900 text-gray-100 relative">
+      {/* Batch Edit Modal */}
+      {isBatchEditing && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-lg shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in-95">
+                <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                        <Edit2 size={18} className="text-blue-400"/>
+                        Batch Edit ({selectedFiles.size} docs)
+                    </h3>
+                    <button onClick={() => setIsBatchEditing(false)} className="text-gray-400 hover:text-white">
+                        <X size={20} />
+                    </button>
+                </div>
+                
+                <div className="space-y-4 mb-6">
+                     <div>
+                        <label className="block text-xs text-gray-500 mb-1">Set Document Type</label>
+                        <select
+                            value={batchForm.doc_type}
+                            onChange={e => setBatchForm(prev => ({...prev, doc_type: e.target.value}))}
+                            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none"
+                        >
+                            <option value="">(No Change)</option>
+                            {docTypes.map(dt => (
+                                <option key={dt} value={dt}>{dt}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs text-gray-500 mb-1">Transfer Ownership</label>
+                        <select
+                            value={batchForm.owner_tenant}
+                            onChange={e => setBatchForm(prev => ({...prev, owner_tenant: e.target.value}))}
+                            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 outline-none"
+                        >
+                            <option value="">(No Change)</option>
+                            {tenantList.map(t => (
+                                <option key={t.tenant_id} value={t.tenant_id}>
+                                    {t.display_name}
+                                </option>
+                            ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">
+                            Warning: Transferring ownership will remove documents from this tenant's view.
+                        </p>
+                    </div>
+                </div>
+
+                <div className="flex justify-end gap-3">
+                    <button 
+                        onClick={() => setIsBatchEditing(false)}
+                        className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        onClick={saveBatchEditing}
+                        disabled={isSaving}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                    >
+                        {isSaving ? <RefreshCw className="animate-spin" size={16} /> : <Save size={16} />}
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+      )}
+
       {/* Header / Toolbar */}
       <div className="flex flex-col gap-4 mb-4">
         <div className="flex justify-between items-center">
@@ -312,13 +456,22 @@ const DocumentsPanel = ({ tenantId }) => {
             />
           </div>
           {selectedFiles.size > 0 && (
-            <button
-              onClick={handleBatchDelete}
-              className="flex items-center gap-2 px-4 py-2 bg-red-900/30 text-red-400 border border-red-800 rounded-md hover:bg-red-900/50 transition-colors text-sm whitespace-nowrap"
-            >
-              <Trash2 size={16} />
-              Delete {selectedFiles.size}
-            </button>
+            <div className="flex gap-2">
+                <button
+                onClick={handleBatchEditClick}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-900/30 text-blue-400 border border-blue-800 rounded-md hover:bg-blue-900/50 transition-colors text-sm whitespace-nowrap"
+                >
+                <Edit2 size={16} />
+                Edit ({selectedFiles.size})
+                </button>
+                <button
+                onClick={handleBatchDelete}
+                className="flex items-center gap-2 px-4 py-2 bg-red-900/30 text-red-400 border border-red-800 rounded-md hover:bg-red-900/50 transition-colors text-sm whitespace-nowrap"
+                >
+                <Trash2 size={16} />
+                Delete
+                </button>
+            </div>
           )}
         </div>
       </div>
@@ -488,6 +641,22 @@ const DocumentsPanel = ({ tenantId }) => {
                                                 </div>
                                             </>
                                         )}
+
+
+                                        <div>
+                                            <label className="block text-xs text-gray-500 mb-1">Owner (Tenant)</label>
+                                            <select
+                                                value={editForm.owner_tenant}
+                                                onChange={e => setEditForm(prev => ({...prev, owner_tenant: e.target.value}))}
+                                                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-blue-500 outline-none"
+                                            >
+                                                {tenantList.map(t => (
+                                                    <option key={t.tenant_id} value={t.tenant_id}>
+                                                        {t.display_name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
                                     </div>
 
                                     {editForm.corrections_applied && Object.keys(editForm.corrections_applied).length > 0 && (

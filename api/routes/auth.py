@@ -126,9 +126,13 @@ async def list_tenants(
         if tid and tid not in tenants:
             tenants[tid] = data.get("name", tid)
 
+    # Build list with "shared" always first
     tenant_list = [
+        {"tenant_id": "shared", "display_name": "Shared (All Tenants)"}
+    ]
+    tenant_list.extend(
         {"tenant_id": tid, "display_name": name}
         for tid, name in sorted(tenants.items())
-    ]
+    )
 
     return {"tenants": tenant_list}

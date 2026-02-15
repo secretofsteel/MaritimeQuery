@@ -62,16 +62,12 @@ def unregister_client(queue: asyncio.Queue) -> None:
 
 
 def install_log_handler() -> None:
-    """Attach the broadcast handler to the root logger.
+    """Attach the broadcast handler to app and API loggers.
 
-    Call this once during app startup (in lifespan).
+    Attaches to specific loggers rather than just root, because the
+    main app logger (maritime_rag) has propagate=False and won't
+    forward records to root.
     """
-    # Check if already installed to avoid duplicates on reload
-    root = logging.getLogger()
-    for h in root.handlers:
-        if isinstance(h, BroadcastLogHandler):
-            return
-
     handler = BroadcastLogHandler()
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter(
@@ -79,5 +75,15 @@ def install_log_handler() -> None:
         datefmt="%H:%M:%S",
     ))
 
-    # Attach to root logger so ALL app logs are captured
-    root.addHandler(handler)
+    # Target loggers — attach to each one that matters
+    target_loggers = [
+        "",                 # root — catches uvicorn, third-party libs
+        "maritime_rag",     # main app logger (propagate=False)
+        "api",              # API route loggers (api.routes.documents etc.)
+    ]
+
+    for logger_name in target_loggers:
+        lg = logging.getLogger(logger_name)
+        # Avoid duplicate handlers on reload
+        if not any(isinstance(h, BroadcastLogHandler) for h in lg.handlers):
+            lg.addHandler(handler)

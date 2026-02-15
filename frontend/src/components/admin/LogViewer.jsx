@@ -78,7 +78,7 @@ export default function LogViewer() {
   }, [lines, autoScroll]);
 
   return (
-    <div className="mt-6">
+    <div className="mt-6 flex flex-col flex-1 min-h-0">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
           Server Logs
@@ -109,7 +109,7 @@ export default function LogViewer() {
       <div
         ref={containerRef}
         className="bg-black/50 border border-gray-800 rounded-lg p-3
-                   h-64 overflow-y-auto font-mono text-xs leading-5
+                   flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-5
                    text-gray-400 select-text scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent"
       >
         {lines.length === 0 ? (

@@ -29,7 +29,7 @@ const AdminPage = () => {
   };
 
   useEffect(() => {
-    if (user?.tenant_id) {
+    if (user?.tenant_id && user.tenant_id !== selectedTenant) {
       setSelectedTenant(user.tenant_id);
     }
     fetchTenants();
@@ -38,7 +38,7 @@ const AdminPage = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'documents':
-        return <DocumentsPanel tenantId={selectedTenant} />;
+        return <DocumentsPanel tenantId={selectedTenant} tenantList={tenantList} />;
       case 'upload':
         return <UploadPanel tenantId={selectedTenant} />;
       case 'feedback':
@@ -70,10 +70,10 @@ const AdminPage = () => {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-hidden bg-gray-900 m-2 ml-0 rounded-lg border border-gray-800 shadow-xl relative">
-        <div className="absolute inset-0 overflow-hidden">
+      <main className="flex-1 overflow-hidden bg-gray-900 m-2 ml-0 rounded-lg border border-gray-800 shadow-xl relative flex flex-col">
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           {/* Header for mobile/context (optional, sidebar covers most) */}
-          <div className="h-full p-4 overflow-y-auto custom-scrollbar">
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {renderContent()}
           </div>
         </div>

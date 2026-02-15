@@ -50,6 +50,7 @@ class DocumentInfo(BaseModel):
     title: Optional[str] = None
     doc_type: Optional[str] = None
     topics: Optional[List[str]] = None
+    owner_tenant: Optional[str] = None  # NEW
 
 
 class DocumentListResponse(BaseModel):
@@ -66,6 +67,19 @@ class MetadataUpdateRequest(BaseModel):
     doc_type: Optional[str] = None
     form_number: Optional[str] = None
     form_category_name: Optional[str] = None
+
+
+class BatchMetadataUpdateRequest(BaseModel):
+    filenames: List[str]
+    # Fields to update (if provided)
+    doc_type: Optional[str] = None
+    owner_tenant: Optional[str] = None
+
+
+class BatchMetadataUpdateResponse(BaseModel):
+    success_count: int
+    failure_count: int
+    errors: dict[str, str]  # filename -> error message
 
 
 class MetadataUpdateResponse(BaseModel):
@@ -201,9 +215,13 @@ async def list_documents(
         # Get cache details
         cache_entry = gemini_cache.get(filename, {})
         gemini_meta = cache_entry.get("gemini", {})
+        corrections = cache_entry.get("corrections", {})
+
+        # Apply corrections to get effective values
+        effective_meta = apply_corrections_to_gemini_record(gemini_meta, corrections)
 
         # NEW: filter by doc_type if requested
-        file_doc_type = gemini_meta.get("doc_type", "")
+        file_doc_type = effective_meta.get("doc_type", "")
         if doc_type and file_doc_type and file_doc_type.upper() != doc_type.upper():
             continue
         # If doc_type filter is set but file has no doc_type, skip it (strict filtering)
@@ -211,7 +229,7 @@ async def list_documents(
             continue
 
         has_error = "parse_error" in gemini_meta or "extraction_error" in gemini_meta
-        has_sections = bool(gemini_meta.get("sections"))
+        has_sections = bool(gemini_meta.get("sections"))  # Sections usually don't change via corrections yet
 
         if has_error:
             ext_status = "error"
@@ -223,8 +241,9 @@ async def list_documents(
         validation = gemini_meta.get("validation", {})
         
         # Add these extractions:
-        doc_title = gemini_meta.get("title")
-        doc_topics = gemini_meta.get("topics")  # list of strings or None
+        doc_title = effective_meta.get("title")
+        doc_topics = effective_meta.get("topics")  # list of strings or None
+        doc_owner = cache_entry.get("tenant_id", tenant_id)
 
         documents.append(DocumentInfo(
             filename=filename,
@@ -238,6 +257,7 @@ async def list_documents(
             title=doc_title,
             doc_type=file_doc_type if file_doc_type else None,
             topics=doc_topics,
+            owner_tenant=doc_owner,
         ))
 
     total_chunks = repo.get_node_count()
@@ -763,6 +783,71 @@ async def update_document_metadata(
     )
 
 
+@router.post("/batch-metadata", response_model=BatchMetadataUpdateResponse)
+async def batch_update_metadata(
+    request: BatchMetadataUpdateRequest,
+    app_state: AppState = Depends(get_admin_app_state),
+):
+    """Batch update metadata and/or ownership for multiple documents.
+
+    Supports updating `doc_type` and `owner_tenant` for a list of files.
+    """
+    from app.metadata_updates import transfer_document_ownership
+
+    success_count = 0
+    failure_count = 0
+    errors = {}
+    
+    current_tenant = app_state.tenant_id
+    nodes = app_state.nodes or []
+
+    for filename in request.filenames:
+        file_success = True
+        file_errors = []
+
+        # 1. Update doc_type if provided
+        if request.doc_type:
+            try:
+                # Reuse existing update logic
+                update_metadata_everywhere(
+                    filename=filename,
+                    corrections={"doc_type": request.doc_type},
+                    nodes=nodes,
+                    base_path=None # derived inside
+                )
+            except Exception as e:
+                file_success = False
+                file_errors.append(f"Metadata update failed: {str(e)}")
+                logger.error("Batch update failed for %s: %s", filename, e)
+
+        # 2. Transfer ownership if provided and different
+        if request.owner_tenant and request.owner_tenant != current_tenant:
+            try:
+                # If we already failed metadata, we might still try transfer? 
+                # Better to try to do both independently or stop?
+                # Let's try transfer even if metadata failed, as they are separate systems.
+                transfer_success = transfer_document_ownership(filename, request.owner_tenant)
+                if not transfer_success:
+                     file_success = False
+                     file_errors.append("Transfer failed")
+            except Exception as e:
+                file_success = False
+                file_errors.append(f"Transfer error: {str(e)}")
+                logger.error("Batch transfer failed for %s: %s", filename, e)
+
+        if file_success:
+            success_count += 1
+        else:
+            failure_count += 1
+            errors[filename] = "; ".join(file_errors)
+
+    return BatchMetadataUpdateResponse(
+        success_count=success_count,
+        failure_count=failure_count,
+        errors=errors,
+    )
+
+
 @router.get("/{filename}/metadata")
 async def get_document_metadata(
     filename: str,
@@ -801,5 +886,69 @@ async def get_document_metadata(
         "section_count": len(effective.get("sections", [])),
         "corrections_applied": corrections,  # what's been manually overridden
         "has_corrections": bool(corrections),
+        "owner_tenant": entry.get("tenant_id", tenant_id),
     }
+
+
+class TransferOwnershipRequest(BaseModel):
+    new_tenant_id: str = Field(..., description="Target tenant to transfer this document to")
+
+
+class TransferOwnershipResponse(BaseModel):
+    filename: str
+    success: bool
+    old_tenant: str
+    new_tenant: str
+    error: Optional[str] = None
+
+
+@router.post("/{filename}/transfer", response_model=TransferOwnershipResponse)
+async def transfer_document(
+    filename: str,
+    request: TransferOwnershipRequest,
+    app_state: AppState = Depends(get_admin_app_state),
+):
+    """Transfer a document to a different tenant.
+
+    Moves the physical file, updates the Gemini cache record, and updates
+    sync caches. The caller should re-sync or rebuild after transfer to
+    update vector store tenant assignments.
+
+    Superuser only (enforced by get_admin_app_state using get_target_tenant).
+    """
+    from app.metadata_updates import transfer_document_ownership
+
+    old_tenant = app_state.tenant_id
+
+    if request.new_tenant_id == old_tenant:
+        return TransferOwnershipResponse(
+            filename=filename,
+            success=True,
+            old_tenant=old_tenant,
+            new_tenant=old_tenant,
+            error=None,
+        )
+
+    try:
+        success = transfer_document_ownership(filename, request.new_tenant_id)
+    except Exception as exc:
+        logger.error("Transfer failed for %s: %s", filename, exc)
+        return TransferOwnershipResponse(
+            filename=filename,
+            success=False,
+            old_tenant=old_tenant,
+            new_tenant=request.new_tenant_id,
+            error=str(exc),
+        )
+
+    if success:
+        logger.info("Transferred %s: %s → %s", filename, old_tenant, request.new_tenant_id)
+
+    return TransferOwnershipResponse(
+        filename=filename,
+        success=success,
+        old_tenant=old_tenant,
+        new_tenant=request.new_tenant_id,
+        error=None if success else "Transfer failed — check server logs",
+    )
 

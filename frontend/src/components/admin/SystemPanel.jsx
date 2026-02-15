@@ -87,7 +87,7 @@ const SystemPanel = ({ tenantId }) => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-900 text-gray-100 overflow-y-auto p-6">
+    <div className="h-full flex flex-col bg-gray-900 text-gray-100 overflow-hidden p-6">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-semibold text-white flex items-center gap-2">
           <Activity size={20} /> System Status
