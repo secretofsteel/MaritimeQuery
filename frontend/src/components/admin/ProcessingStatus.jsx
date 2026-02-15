@@ -19,10 +19,11 @@ const ProcessingStatus = ({ tenantId, isActive, onComplete }) => {
 
         // Check for completion
         if (data.status === 'completed' || data.status === 'failed') {
-          // stopPolling will be called by useEffect cleanup or loop break, 
-          // but we need to trigger onComplete
           if (onComplete) onComplete();
         }
+      } else if (res.status === 404) {
+        // Job gone/finished
+        if (onComplete) onComplete();
       }
     } catch (err) {
       console.error('Status poll failed:', err);

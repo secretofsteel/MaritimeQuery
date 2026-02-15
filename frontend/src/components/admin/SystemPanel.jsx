@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import LogViewer from './LogViewer';
 
-const SystemPanel = ({ tenantId, token }) => {
+const SystemPanel = ({ tenantId }) => {
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -20,7 +20,7 @@ const SystemPanel = ({ tenantId, token }) => {
     setIsLoading(true);
     try {
       const res = await fetch('/api/v1/system/status', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        credentials: 'include'
       });
       if (res.ok) {
         const data = await res.json();
@@ -37,7 +37,7 @@ const SystemPanel = ({ tenantId, token }) => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000); // Poll every 30s
     return () => clearInterval(interval);
-  }, [tenantId, token]);
+  }, [tenantId]);
 
   const getStatusColor = (s) => {
     switch (s) {
@@ -169,7 +169,7 @@ const SystemPanel = ({ tenantId, token }) => {
         </div>
       </div>
 
-      <LogViewer token={token} />
+      <LogViewer />
     </div>
   );
 };

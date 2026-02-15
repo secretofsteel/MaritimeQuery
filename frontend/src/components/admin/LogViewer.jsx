@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-export default function LogViewer({ token }) {
+export default function LogViewer() {
   const [lines, setLines] = useState([]);
   const [autoScroll, setAutoScroll] = useState(true);
   const [connected, setConnected] = useState(false);
@@ -8,16 +8,12 @@ export default function LogViewer({ token }) {
 
   useEffect(() => {
     // Note: EventSource doesn't support custom headers (Auth), so we use fetch + ReadableStream
-    if (!token) return;
-
+    
     const controller = new AbortController();
 
     async function connect() {
       try {
         const res = await fetch('/api/v1/system/logs/stream', {
-          headers: { 
-            'Authorization': `Bearer ${token}` 
-          },
           signal: controller.signal,
           credentials: 'include',
         });
@@ -72,7 +68,7 @@ export default function LogViewer({ token }) {
       controller.abort();
       setConnected(false);
     };
-  }, [token]);
+  }, []);
 
   // Auto-scroll to bottom
   useEffect(() => {

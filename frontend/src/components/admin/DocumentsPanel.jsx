@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Trash2, RefreshCw, FileText, CheckCircle, AlertTriangle, XCircle, Search, Edit2, X, Save } from 'lucide-react';
 import { useDocTypes } from '../../hooks/useDocTypes';
 
-const DocumentsPanel = ({ tenantId, token }) => {
+const DocumentsPanel = ({ tenantId }) => {
   const [documents, setDocuments] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedFiles, setSelectedFiles] = useState(new Set());
@@ -12,7 +12,7 @@ const DocumentsPanel = ({ tenantId, token }) => {
   const [docTypeFilter, setDocTypeFilter] = useState(null);
   
   // Dynamic doc types
-  const docTypes = useDocTypes(token);
+  const docTypes = useDocTypes();
 
   // Edit state
   const [editingFile, setEditingFile] = useState(null);
@@ -27,7 +27,6 @@ const DocumentsPanel = ({ tenantId, token }) => {
       if (docTypeFilter) url.searchParams.set('doc_type', docTypeFilter);
 
       const res = await fetch(url.toString(), { 
-        headers: { 'Authorization': `Bearer ${token}` },
         credentials: 'include' 
       });
       if (!res.ok) throw new Error('Failed to load documents');
@@ -40,7 +39,7 @@ const DocumentsPanel = ({ tenantId, token }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [tenantId, docTypeFilter, token]);
+  }, [tenantId, docTypeFilter]);
 
   useEffect(() => {
     fetchDocuments();
@@ -55,7 +54,6 @@ const DocumentsPanel = ({ tenantId, token }) => {
 
       const res = await fetch(url.toString(), { 
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
         credentials: 'include' 
       });
       if (!res.ok) throw new Error('Delete failed');
@@ -79,7 +77,6 @@ const DocumentsPanel = ({ tenantId, token }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
         },
         credentials: 'include',
         body: JSON.stringify({ filenames: Array.from(selectedFiles) }),
@@ -113,7 +110,6 @@ const DocumentsPanel = ({ tenantId, token }) => {
       if (tenantId) url.searchParams.set('target_tenant_id', tenantId);
       
       const res = await fetch(url.toString(), {
-        headers: { 'Authorization': `Bearer ${token}` },
         credentials: 'include' 
       });
       
@@ -151,7 +147,6 @@ const DocumentsPanel = ({ tenantId, token }) => {
             method: 'PATCH',
             headers: { 
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
             },
             credentials: 'include',
             body: JSON.stringify(payload),

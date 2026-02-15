@@ -2,21 +2,15 @@ import { useState, useEffect } from 'react';
 
 let cachedDocTypes = null; // module-level cache — fetch once per session
 
-export function useDocTypes(token) {
+export function useDocTypes() {
   const [docTypes, setDocTypes] = useState(cachedDocTypes || []);
 
   useEffect(() => {
     if (cachedDocTypes && cachedDocTypes.length > 0) {
-      setDocTypes(cachedDocTypes);
       return;
     }
 
-    if (!token) return;
-
     fetch('/api/v1/system/config/doc-types', {
-      headers: { 
-        'Authorization': `Bearer ${token}` 
-      },
       credentials: 'include',
     })
       .then(res => {
@@ -35,7 +29,7 @@ export function useDocTypes(token) {
         const fallback = ['FORM', 'CHECKLIST', 'PROCEDURE', 'REGULATION', 'VETTING', 'CIRCULAR'];
         setDocTypes(fallback);
       });
-  }, [token]);
+  }, []);
 
   return docTypes;
 }

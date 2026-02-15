@@ -564,9 +564,19 @@ async def get_processing_status(
     """
     job = get_job(tenant_id)
     if not job:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No processing job found for tenant '{tenant_id}'",
+        # Return idle state instead of 404 to avoid log spam
+        return ProcessingJobResponse(
+            job_id="",
+            tenant_id=tenant_id,
+            status="idle",
+            started_at="",
+            completed_at=None,
+            mode="none",
+            phase="idle",
+            progress={"current": 0, "total": 0, "current_item": ""},
+            sync_result=None,
+            report_summary=None,
+            error=None
         )
     return ProcessingJobResponse(**job.to_dict())
 
